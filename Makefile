@@ -196,6 +196,7 @@ dev-unifi-env: ## Point the deployed controller at a UniFi console. Requires UNI
 		--from-literal=UNIFI_INSECURE_SKIP_VERIFY='$(if $(UNIFI_INSECURE_SKIP_VERIFY),$(UNIFI_INSECURE_SKIP_VERIFY),true)' \
 		--dry-run=client -o yaml | "$(KUBECTL)" apply -f -
 	"$(KUBECTL)" -n $(DEV_NAMESPACE) set env deployment/unifi-reactor-controller-manager --from=secret/unifi-credentials
+	"$(KUBECTL)" -n $(DEV_NAMESPACE) rollout restart deployment/unifi-reactor-controller-manager
 	"$(KUBECTL)" -n $(DEV_NAMESPACE) rollout status deployment/unifi-reactor-controller-manager --timeout=90s
 
 .PHONY: dev-hello
