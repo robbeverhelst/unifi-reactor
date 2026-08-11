@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -37,6 +38,8 @@ import (
 
 	reactorv1alpha1 "github.com/robbeverhelst/unifi-reactor/api/v1alpha1"
 	"github.com/robbeverhelst/unifi-reactor/internal/controller"
+	"github.com/robbeverhelst/unifi-reactor/internal/engine"
+	"github.com/robbeverhelst/unifi-reactor/internal/providers/unifi"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -178,9 +181,44 @@ func main() {
 		os.Exit(1)
 	}
 
+	store := engine.NewStateStore()
+
+	// The UniFi provider is configured at the controller level (Helm values /
+	// env), not per-Automation: one UniFi console per Reactor install.
+	if unifiURL := os.Getenv("UNIFI_URL"); unifiURL != "" {
+		apiKey := os.Getenv("UNIFI_API_KEY")
+		if apiKey == "" {
+			setupLog.Error(nil, "UNIFI_URL is set but UNIFI_API_KEY is empty")
+			os.Exit(1)
+		}
+		interval := 30 * time.Second
+		if v := os.Getenv("UNIFI_POLL_INTERVAL"); v != "" {
+			parsed, err := time.ParseDuration(v)
+			if err != nil {
+				setupLog.Error(err, "Invalid UNIFI_POLL_INTERVAL", "value", v)
+				os.Exit(1)
+			}
+			interval = parsed
+		}
+		poller := &controller.UniFiPoller{
+			Client: unifi.NewClient(unifiURL, apiKey, os.Getenv("UNIFI_SITE"),
+				os.Getenv("UNIFI_INSECURE_SKIP_VERIFY") == "true"),
+			Store:    store,
+			Interval: interval,
+		}
+		if err := mgr.Add(poller); err != nil {
+			setupLog.Error(err, "Failed to add UniFi poller")
+			os.Exit(1)
+		}
+		setupLog.Info("UniFi provider enabled", "url", unifiURL, "interval", interval)
+	} else {
+		setupLog.Info("UniFi provider disabled (UNIFI_URL not set); state triggers will stay pending")
+	}
+
 	if err := (&controller.AutomationReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		Store:  store,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "automation")
 		os.Exit(1)

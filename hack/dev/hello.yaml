@@ -1,0 +1,51 @@
+# Hello-world demo: the operator observes UniFi WAN state and scales this
+# nginx accordingly. With wan=primary it runs 1 replica; if the WAN fails
+# over (or you POST /flip on the mock), onExit drops it back to 0.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: reactor-hello
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-reactor
+  namespace: reactor-hello
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: hello-reactor
+  template:
+    metadata:
+      labels:
+        app: hello-reactor
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 80
+---
+apiVersion: reactor.robbeverhelst.com/v1alpha1
+kind: Automation
+metadata:
+  name: hello-on-primary-wan
+  namespace: reactor-hello
+spec:
+  when:
+    provider: unifi
+    state:
+      wan: primary
+  actions:
+    - type: kubernetes.scale
+      target:
+        kind: Deployment
+        name: hello-reactor
+      replicas: 1
+  onExit:
+    - type: kubernetes.scale
+      target:
+        kind: Deployment
+        name: hello-reactor
+      replicas: 0

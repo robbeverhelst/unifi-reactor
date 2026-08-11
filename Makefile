@@ -175,6 +175,42 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
+##@ Dev Environment (bring your own cluster: kind, k3d, orbstack, ... — targets act on the current kubectl context)
+
+DEV_IMG ?= unifi-reactor:dev
+DEV_NAMESPACE ?= unifi-reactor-system
+
+.PHONY: dev-deploy
+dev-deploy: ## Build the image and deploy CRDs + controller to the current kubectl context.
+	$(MAKE) docker-build IMG=$(DEV_IMG)
+	$(MAKE) install
+	$(MAKE) deploy IMG=$(DEV_IMG)
+
+.PHONY: dev-unifi-env
+dev-unifi-env: ## Point the deployed controller at a UniFi console. Requires UNIFI_URL and UNIFI_API_KEY in the environment.
+	@test -n "$(UNIFI_URL)" || (echo "UNIFI_URL is required (e.g. https://192.168.1.1, or your mock's URL)" && exit 1)
+	@test -n "$(UNIFI_API_KEY)" || (echo "UNIFI_API_KEY is required (any value works against the mock)" && exit 1)
+	"$(KUBECTL)" -n $(DEV_NAMESPACE) create secret generic unifi-credentials \
+		--from-literal=UNIFI_URL='$(UNIFI_URL)' \
+		--from-literal=UNIFI_API_KEY='$(UNIFI_API_KEY)' \
+		--from-literal=UNIFI_INSECURE_SKIP_VERIFY='$(if $(UNIFI_INSECURE_SKIP_VERIFY),$(UNIFI_INSECURE_SKIP_VERIFY),true)' \
+		--dry-run=client -o yaml | "$(KUBECTL)" apply -f -
+	"$(KUBECTL)" -n $(DEV_NAMESPACE) set env deployment/unifi-reactor-controller-manager --from=secret/unifi-credentials
+	"$(KUBECTL)" -n $(DEV_NAMESPACE) rollout status deployment/unifi-reactor-controller-manager --timeout=90s
+
+.PHONY: dev-hello
+dev-hello: ## Deploy the hello-world demo (nginx scaled by observed WAN state).
+	"$(KUBECTL)" apply -f hack/dev/hello.yaml
+
+.PHONY: dev-mock
+dev-mock: ## Run a mock UniFi API on :9443 serving captured payloads. POST /flip to fail over.
+	go run ./hack/mock-unifi
+
+.PHONY: dev-clean
+dev-clean: ## Remove the hello demo and the controller from the current kubectl context.
+	"$(KUBECTL)" delete -f hack/dev/hello.yaml --ignore-not-found=true
+	$(MAKE) undeploy ignore-not-found=true
+
 ##@ Dependencies
 
 ## Location to install dependencies to

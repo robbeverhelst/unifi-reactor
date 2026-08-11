@@ -18,9 +18,12 @@ package controller
 
 import (
 	"context"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -28,6 +31,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	reactorv1alpha1 "github.com/robbeverhelst/unifi-reactor/api/v1alpha1"
+	"github.com/robbeverhelst/unifi-reactor/internal/engine"
+	"github.com/robbeverhelst/unifi-reactor/internal/events"
 )
 
 var _ = Describe("Automation Controller", func() {
@@ -49,7 +54,7 @@ var _ = Describe("Automation Controller", func() {
 			By("creating the custom resource for the Kind Automation")
 			err := k8sClient.Get(ctx, typeNamespacedName, automation)
 			if err != nil && errors.IsNotFound(err) {
-				replicas := int32(0)
+				zero, one := int32(0), int32(1)
 				resource := &reactorv1alpha1.Automation{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
@@ -63,7 +68,12 @@ var _ = Describe("Automation Controller", func() {
 						Actions: []reactorv1alpha1.Action{{
 							Type:     "kubernetes.scale",
 							Target:   &reactorv1alpha1.TargetRef{Kind: "Deployment", Name: "qbittorrent"},
-							Replicas: &replicas,
+							Replicas: &zero,
+						}},
+						OnExit: []reactorv1alpha1.Action{{
+							Type:     "kubernetes.scale",
+							Target:   &reactorv1alpha1.TargetRef{Kind: "Deployment", Name: "qbittorrent"},
+							Replicas: &one,
 						}},
 					},
 				}
@@ -80,19 +90,67 @@ var _ = Describe("Automation Controller", func() {
 			By("Cleanup the specific resource instance Automation")
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 		})
-		It("should successfully reconcile the resource", func() {
-			By("Reconciling the created resource")
+		It("should scale the target on state transitions and reverse via onExit", func() {
+			By("creating the target deployment at 1 replica")
+			one := int32(1)
+			deployment := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "qbittorrent", Namespace: resourceNamespace},
+				Spec: appsv1.DeploymentSpec{
+					Replicas: &one,
+					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "qbittorrent"}},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "qbittorrent"}},
+						Spec: corev1.PodSpec{Containers: []corev1.Container{
+							{Name: "qbittorrent", Image: "example/qbittorrent"},
+						}},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, deployment) })
+
+			store := engine.NewStateStore()
 			controllerReconciler := &AutomationReconciler{
 				Client: k8sClient,
 				Scheme: k8sClient.Scheme(),
+				Store:  store,
+			}
+			reconcileOnce := func() {
+				_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+				Expect(err).NotTo(HaveOccurred())
+			}
+			replicasNow := func() int32 {
+				var d appsv1.Deployment
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "qbittorrent", Namespace: resourceNamespace}, &d)).To(Succeed())
+				return *d.Spec.Replicas
 			}
 
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+			By("reporting pending while no provider state is observed")
+			reconcileOnce()
+			Expect(replicasNow()).To(Equal(int32(1)))
+
+			By("entering the matching state (wan=backup) scales down")
+			store.Observe(events.Observation{Provider: "unifi", State: map[string]string{"wan": "backup"}, ObservedAt: time.Now()})
+			reconcileOnce()
+			Expect(replicasNow()).To(Equal(int32(0)))
+
+			By("repeated identical observations are no-ops")
+			store.Observe(events.Observation{Provider: "unifi", State: map[string]string{"wan": "backup"}, ObservedAt: time.Now()})
+			reconcileOnce()
+			Expect(replicasNow()).To(Equal(int32(0)))
+
+			By("leaving the matching state runs onExit and scales back up")
+			store.Observe(events.Observation{Provider: "unifi", State: map[string]string{"wan": "primary"}, ObservedAt: time.Now()})
+			reconcileOnce()
+			Expect(replicasNow()).To(Equal(int32(1)))
+
+			By("recording status")
+			var reconciled reactorv1alpha1.Automation
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &reconciled)).To(Succeed())
+			Expect(reconciled.Status.Matching).To(BeFalse())
+			Expect(reconciled.Status.ObservedState).To(HaveKeyWithValue("wan", "primary"))
+			Expect(reconciled.Status.LastExecution).NotTo(BeNil())
+			Expect(reconciled.Status.LastExecution.OnExit).To(BeTrue())
 		})
 	})
 })
