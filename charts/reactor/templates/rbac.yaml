@@ -1,0 +1,93 @@
+# Least-privilege RBAC in two modes (values.rbac.clusterWide):
+#   cluster-wide:      ClusterRole/ClusterRoleBinding — Automations may target
+#                      any namespace via spec.actions[].target.namespace.
+#   namespace-scoped:  Role/RoleBinding in the release namespace — Automations
+#                      only work in and target that namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+{{- if .Values.rbac.clusterWide }}
+kind: ClusterRole
+metadata:
+  name: {{ include "reactor.fullname" . }}-manager
+  labels:
+    {{- include "reactor.labels" . | nindent 4 }}
+{{- else }}
+kind: Role
+metadata:
+  name: {{ include "reactor.fullname" . }}-manager
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reactor.labels" . | nindent 4 }}
+{{- end }}
+rules:
+  - apiGroups: ["reactor.robbeverhelst.com"]
+    resources: ["automations"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["reactor.robbeverhelst.com"]
+    resources: ["automations/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["reactor.robbeverhelst.com"]
+    resources: ["automations/finalizers"]
+    verbs: ["update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+{{- if .Values.rbac.clusterWide }}
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "reactor.fullname" . }}-manager
+  labels:
+    {{- include "reactor.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "reactor.fullname" . }}-manager
+{{- else }}
+kind: RoleBinding
+metadata:
+  name: {{ include "reactor.fullname" . }}-manager
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reactor.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "reactor.fullname" . }}-manager
+{{- end }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "reactor.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Leader election needs lease access in the release namespace in both modes.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "reactor.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reactor.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "reactor.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reactor.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "reactor.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "reactor.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
