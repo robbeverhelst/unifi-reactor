@@ -1,0 +1,48 @@
+image:
+  repository: ghcr.io/robbeverhelst/unifi-reactor
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+unifi:
+  # Base URL of the UniFi console, e.g. https://192.168.1.1
+  url: ""
+  # UniFi Network site (internal reference). Leave as "default" unless you use multiple sites.
+  site: default
+  # How often to poll WAN state. Polling is the source of truth for state triggers.
+  pollInterval: 30s
+  # UniFi OS consoles serve a self-signed certificate by default.
+  insecureSkipVerify: true
+  # Name of an existing Secret containing the key UNIFI_API_KEY.
+  # Create it with:
+  #   kubectl -n <namespace> create secret generic unifi-reactor-credentials \
+  #     --from-literal=UNIFI_API_KEY=<your API key>
+  existingSecret: unifi-reactor-credentials
+
+rbac:
+  # cluster-wide: the operator may act on any namespace, enabling the optional
+  #   Automation spec.actions[].target.namespace field.
+  # When false, RBAC is namespace-scoped to the release namespace: Automations
+  #   can only target resources in that same namespace.
+  clusterWide: true
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 128Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+imagePullSecrets: []

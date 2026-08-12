@@ -1,0 +1,26 @@
+apiVersion: reactor.robbeverhelst.com/v1alpha1
+kind: Automation
+metadata:
+  labels:
+    app.kubernetes.io/name: unifi-reactor
+    app.kubernetes.io/managed-by: kustomize
+  name: pause-qbittorrent-on-backup-wan
+spec:
+  when:
+    provider: unifi
+    state:
+      wan: backup
+
+  actions:
+    - type: kubernetes.scale
+      target:
+        kind: Deployment
+        name: qbittorrent
+      replicas: 0
+
+  onExit:
+    - type: kubernetes.scale
+      target:
+        kind: Deployment
+        name: qbittorrent
+      replicas: 1
