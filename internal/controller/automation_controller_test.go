@@ -40,6 +40,10 @@ var _ = Describe("Automation Controller", func() {
 		const (
 			resourceName      = "test-resource"
 			resourceNamespace = "default"
+			targetName        = "qbittorrent"
+			wanPrimary        = "primary"
+			wanBackup         = "backup"
+			keyWAN            = "wan"
 		)
 
 		ctx := context.Background()
@@ -62,17 +66,17 @@ var _ = Describe("Automation Controller", func() {
 					},
 					Spec: reactorv1alpha1.AutomationSpec{
 						When: &reactorv1alpha1.StateTrigger{
-							Provider: "unifi",
-							State:    map[string]string{"wan": "backup"},
+							Provider: providerUniFi,
+							State:    map[string]string{keyWAN: wanBackup},
 						},
 						Actions: []reactorv1alpha1.Action{{
-							Type:     "kubernetes.scale",
-							Target:   &reactorv1alpha1.TargetRef{Kind: "Deployment", Name: "qbittorrent"},
+							Type:     actionKubernetesScale,
+							Target:   &reactorv1alpha1.TargetRef{Kind: "Deployment", Name: targetName},
 							Replicas: &zero,
 						}},
 						OnExit: []reactorv1alpha1.Action{{
-							Type:     "kubernetes.scale",
-							Target:   &reactorv1alpha1.TargetRef{Kind: "Deployment", Name: "qbittorrent"},
+							Type:     actionKubernetesScale,
+							Target:   &reactorv1alpha1.TargetRef{Kind: "Deployment", Name: targetName},
 							Replicas: &one,
 						}},
 					},
@@ -94,14 +98,14 @@ var _ = Describe("Automation Controller", func() {
 			By("creating the target deployment at 1 replica")
 			one := int32(1)
 			deployment := &appsv1.Deployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "qbittorrent", Namespace: resourceNamespace},
+				ObjectMeta: metav1.ObjectMeta{Name: targetName, Namespace: resourceNamespace},
 				Spec: appsv1.DeploymentSpec{
 					Replicas: &one,
-					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "qbittorrent"}},
+					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": targetName}},
 					Template: corev1.PodTemplateSpec{
-						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "qbittorrent"}},
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": targetName}},
 						Spec: corev1.PodSpec{Containers: []corev1.Container{
-							{Name: "qbittorrent", Image: "example/qbittorrent"},
+							{Name: targetName, Image: "example/qbittorrent"},
 						}},
 					},
 				},
@@ -121,7 +125,7 @@ var _ = Describe("Automation Controller", func() {
 			}
 			replicasNow := func() int32 {
 				var d appsv1.Deployment
-				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "qbittorrent", Namespace: resourceNamespace}, &d)).To(Succeed())
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: targetName, Namespace: resourceNamespace}, &d)).To(Succeed())
 				return *d.Spec.Replicas
 			}
 
@@ -130,17 +134,17 @@ var _ = Describe("Automation Controller", func() {
 			Expect(replicasNow()).To(Equal(int32(1)))
 
 			By("entering the matching state (wan=backup) scales down")
-			store.Observe(events.Observation{Provider: "unifi", State: map[string]string{"wan": "backup"}, ObservedAt: time.Now()})
+			store.Observe(events.Observation{Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup}, ObservedAt: time.Now()})
 			reconcileOnce()
 			Expect(replicasNow()).To(Equal(int32(0)))
 
 			By("repeated identical observations are no-ops")
-			store.Observe(events.Observation{Provider: "unifi", State: map[string]string{"wan": "backup"}, ObservedAt: time.Now()})
+			store.Observe(events.Observation{Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup}, ObservedAt: time.Now()})
 			reconcileOnce()
 			Expect(replicasNow()).To(Equal(int32(0)))
 
 			By("leaving the matching state runs onExit and scales back up")
-			store.Observe(events.Observation{Provider: "unifi", State: map[string]string{"wan": "primary"}, ObservedAt: time.Now()})
+			store.Observe(events.Observation{Provider: providerUniFi, State: map[string]string{keyWAN: wanPrimary}, ObservedAt: time.Now()})
 			reconcileOnce()
 			Expect(replicasNow()).To(Equal(int32(1)))
 
@@ -148,7 +152,7 @@ var _ = Describe("Automation Controller", func() {
 			var reconciled reactorv1alpha1.Automation
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &reconciled)).To(Succeed())
 			Expect(reconciled.Status.Matching).To(BeFalse())
-			Expect(reconciled.Status.ObservedState).To(HaveKeyWithValue("wan", "primary"))
+			Expect(reconciled.Status.ObservedState).To(HaveKeyWithValue(keyWAN, wanPrimary))
 			Expect(reconciled.Status.LastExecution).NotTo(BeNil())
 			Expect(reconciled.Status.LastExecution.OnExit).To(BeTrue())
 		})

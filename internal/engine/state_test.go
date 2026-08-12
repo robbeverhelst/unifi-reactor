@@ -22,23 +22,31 @@ import (
 	"github.com/robbeverhelst/unifi-reactor/internal/events"
 )
 
+const (
+	testProvider = "unifi"
+	wanPrimary   = "primary"
+	wanBackup    = "backup"
+	deviceOnline = "online"
+	keyWAN       = "wan"
+)
+
 func observe(s *StateStore, state map[string]string) []Transition {
-	return s.Observe(events.Observation{Provider: "unifi", State: state})
+	return s.Observe(events.Observation{Provider: testProvider, State: state})
 }
 
 func TestStateStoreFirstObservationReportsAllKeys(t *testing.T) {
 	s := NewStateStore()
-	got := observe(s, map[string]string{"wan": "primary"})
-	if len(got) != 1 || got[0] != (Transition{Provider: "unifi", Key: "wan", From: "", To: "primary"}) {
+	got := observe(s, map[string]string{keyWAN: wanPrimary})
+	if len(got) != 1 || got[0] != (Transition{Provider: testProvider, Key: keyWAN, From: "", To: wanPrimary}) {
 		t.Fatalf("unexpected transitions: %+v", got)
 	}
 }
 
 func TestStateStoreRepeatedObservationIsNoOp(t *testing.T) {
 	s := NewStateStore()
-	observe(s, map[string]string{"wan": "backup"})
-	for i := 0; i < 3; i++ {
-		if got := observe(s, map[string]string{"wan": "backup"}); len(got) != 0 {
+	observe(s, map[string]string{keyWAN: wanBackup})
+	for i := range 3 {
+		if got := observe(s, map[string]string{keyWAN: wanBackup}); len(got) != 0 {
 			t.Fatalf("repeat %d: expected no transitions, got %+v", i, got)
 		}
 	}
@@ -46,30 +54,30 @@ func TestStateStoreRepeatedObservationIsNoOp(t *testing.T) {
 
 func TestStateStoreDetectsTransition(t *testing.T) {
 	s := NewStateStore()
-	observe(s, map[string]string{"wan": "primary"})
-	got := observe(s, map[string]string{"wan": "backup"})
-	if len(got) != 1 || got[0] != (Transition{Provider: "unifi", Key: "wan", From: "primary", To: "backup"}) {
+	observe(s, map[string]string{keyWAN: wanPrimary})
+	got := observe(s, map[string]string{keyWAN: wanBackup})
+	if len(got) != 1 || got[0] != (Transition{Provider: testProvider, Key: keyWAN, From: wanPrimary, To: wanBackup}) {
 		t.Fatalf("unexpected transitions: %+v", got)
 	}
 }
 
 func TestStateStoreReportsDisappearedKey(t *testing.T) {
 	s := NewStateStore()
-	observe(s, map[string]string{"wan": "primary", "device.udm": "online"})
-	got := observe(s, map[string]string{"wan": "primary"})
-	if len(got) != 1 || got[0] != (Transition{Provider: "unifi", Key: "device.udm", From: "online", To: ""}) {
+	observe(s, map[string]string{keyWAN: wanPrimary, "device.udm": deviceOnline})
+	got := observe(s, map[string]string{keyWAN: wanPrimary})
+	if len(got) != 1 || got[0] != (Transition{Provider: testProvider, Key: "device.udm", From: deviceOnline, To: ""}) {
 		t.Fatalf("unexpected transitions: %+v", got)
 	}
 }
 
 func TestStateStoreProvidersAreIndependent(t *testing.T) {
 	s := NewStateStore()
-	observe(s, map[string]string{"wan": "primary"})
-	got := s.Observe(events.Observation{Provider: "nut", State: map[string]string{"ups": "online"}})
-	if len(got) != 1 || got[0] != (Transition{Provider: "nut", Key: "ups", From: "", To: "online"}) {
+	observe(s, map[string]string{keyWAN: wanPrimary})
+	got := s.Observe(events.Observation{Provider: "nut", State: map[string]string{"ups": deviceOnline}})
+	if len(got) != 1 || got[0] != (Transition{Provider: "nut", Key: "ups", From: "", To: deviceOnline}) {
 		t.Fatalf("unexpected transitions: %+v", got)
 	}
-	if _, ok := s.Get("unifi"); !ok {
+	if _, ok := s.Get(testProvider); !ok {
 		t.Fatal("unifi observation lost")
 	}
 }

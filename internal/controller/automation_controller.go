@@ -36,6 +36,10 @@ import (
 
 const (
 	conditionReady = "Ready"
+	// providerUniFi is the provider name UniFi observations are stored under.
+	providerUniFi = "unifi"
+	// actionKubernetesScale is the only action type implemented in v0.1.
+	actionKubernetesScale = "kubernetes.scale"
 	// reevaluateInterval bounds how stale a matching decision can get relative
 	// to the poller's StateStore when nothing else triggers a reconcile.
 	reevaluateInterval = 15 * time.Second
@@ -145,7 +149,7 @@ func (r *AutomationReconciler) transitionFor(automation *reactorv1alpha1.Automat
 
 func (r *AutomationReconciler) execute(ctx context.Context, automation *reactorv1alpha1.Automation, action reactorv1alpha1.Action) error {
 	switch action.Type {
-	case "kubernetes.scale":
+	case actionKubernetesScale:
 		return r.scale(ctx, automation, action)
 	default:
 		return fmt.Errorf("unsupported action type %q", action.Type)

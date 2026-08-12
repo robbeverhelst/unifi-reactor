@@ -85,7 +85,7 @@ func main() {
 		state := map[bool]string{false: "primary", true: "backup"}[backup]
 		mu.Unlock()
 		log.Printf("flipped: wan is now %s", state)
-		fmt.Fprintf(w, `{"wan":%q}`+"\n", state)
+		_, _ = fmt.Fprintf(w, `{"wan":%q}`+"\n", state)
 	})
 
 	log.Printf("mock UniFi API on %s (wan=primary; POST /flip to fail over)", *addr)
