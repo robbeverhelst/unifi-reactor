@@ -161,6 +161,7 @@ Chart values ([full reference](charts/reactor/README.md)):
 - [Captured UniFi payloads](testdata/unifi/README.md) — the real API responses every parser is written and tested against
 - [UniFi Alarm Manager API](docs/unifi-alarm-manager-api.md) — reverse-engineered notes on configuring UniFi's outbound webhooks programmatically
 - [Development](docs/development.md) — building, testing, and running against a local cluster
+- [Contributing](CONTRIBUTING.md) — the dev loop, conventional commits, and the fixture capture policy
 - [Security policy](SECURITY.md) — how to report a vulnerability, and how to verify a signed release
 
 ## Stability
@@ -181,7 +182,7 @@ Non-goals: replacing UniFi Network or UniFi OS, becoming a general-purpose workf
 
 ## Contributing
 
-PRs welcome. The short version:
+PRs welcome — [CONTRIBUTING.md](CONTRIBUTING.md) has the full version, including the fixture capture policy, which is a genuinely unusual rule and not one you would guess. The short version:
 
 ```sh
 make test          # unit + envtest
@@ -189,7 +190,9 @@ make lint          # golangci-lint
 make dev-deploy DEV_CONTEXT=<your-cluster> UNIFI_URL=... UNIFI_API_KEY=...
 ```
 
-No UniFi hardware needed — `make dev-mock` serves the captured payloads and rehearses a WAN failover or a power outage on demand. Conventional commits; tagging `vX.Y.Z` builds and publishes the multi-arch image, the OCI chart, and `install.yaml` from CI.
+No UniFi hardware needed — `make dev-mock` serves the captured payloads and rehearses a WAN failover or a power outage on demand. Conventional commits; tagging `vX.Y.Z` builds and publishes the multi-arch image, the OCI chart, and `install.yaml` from CI, with [generated release notes standing in for a changelog](CHANGELOG.md).
+
+Bug reports go through the [issue templates](https://github.com/robbeverhelst/unifi-reactor/issues/new/choose), which ask for the four things that make a report reproducible. Participation is covered by the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
