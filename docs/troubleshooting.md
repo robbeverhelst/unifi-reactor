@@ -192,6 +192,22 @@ kubectl -n reactor-system get deploy reactor \
 
 For the env path, `kubectl -n reactor-system rollout restart deployment/reactor` after rotating. Better, upgrade the chart. If you would rather restart on change anyway — because you already run something like reloader — the chart takes Deployment `annotations` for it.
 
+### The webhook shared secret
+
+Only relevant with `unifi.webhook.enabled`. This is a **second, separate** credential from the API key, and its failures all look the same from the outside: reactions go back to taking up to `unifi.pollInterval`, because the fast path is an optimization and losing it breaks nothing else. Nothing is stuck — it is just slow again.
+
+```sh
+kubectl -n reactor-system logs deploy/reactor | grep -i 'webhook'
+```
+
+| What you see | Cause |
+| --- | --- |
+| `Rejected a webhook delivery presenting no valid token` (needs `log.level=debug`) | The console's rule does not carry the secret in `UNIFI_WEBHOOK_TOKEN`, or carries an old one |
+| `Webhook fast path listening` and then nothing | Deliveries never arrive: the console cannot reach the receiver. It is a ClusterIP by default, and a `networkPolicy` with the default `ingress: []` also denies them |
+| `Could not register the Alarm Manager rule` | Self-registration failed; the error names the reason. Polling is unaffected, and the rule can be created by hand in the UniFi UI |
+
+Rotating this secret is not restart-free the way the API key is, and it takes two steps: the console holds a copy inside the Alarm Manager rule, and Reactor never edits that rule. Update the Secret, restart the pod, then update or recreate the rule in the UniFi UI. Deliveries are refused in between, which costs latency and nothing else.
+
 ---
 
 ## 4. `onExit` fired — or did not — when you did not expect it

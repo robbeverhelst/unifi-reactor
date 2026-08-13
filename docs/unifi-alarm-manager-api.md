@@ -71,6 +71,42 @@ The alarms API lives at the UniFi OS layer (no `/proxy/network` prefix) and requ
 - Trigger/action option schemas are self-describing JSON Schema in the manifest — an
   operator can validate config client-side before POSTing.
 
+## What Reactor relies on, and how sure we are
+
+`internal/providers/unifi/alarm.go` implements optional self-registration against this API.
+It is off by default. Split by confidence:
+
+**Observed on a real console (10.5.67), as recorded above:**
+
+- cookie session from `POST /api/auth/login`, CSRF token from the `csrfToken` claim in the
+  `TOKEN` JWT, echoed as `x-csrf-token` on writes
+- `GET /api/v2/alarms/network/manifest`, `GET /api/v2/alarms/network`, `POST /api/v2/alarms/network`
+- the arrays-of-arrays `triggers_data` / `actions_data` shape, and that a flat array is rejected
+- the `network:webhook` action and the three Internet trigger IDs
+- `auth` variants `none | basic | bearer` exist; localhost/127.x destinations are rejected
+
+**Inferred, never confirmed against a console:**
+
+- **the field name carrying the bearer value** — Reactor sends
+  `"auth": {"variant": "bearer", "token": "<secret>"}`. The variant list is documented in the
+  manifest; the key holding the value is a guess. If a console rejects the body, the error it
+  returns is logged verbatim, and the rule can be created by hand in the UniFi UI with an
+  `Authorization` header instead — the receiver also accepts `X-Reactor-Token`, which the
+  Alarm Manager's custom-headers list can send.
+- the shape of the manifest and of the rules list. Reactor never assumes a path through either:
+  it searches the decoded document for the IDs it needs and for a rule carrying its own title,
+  so a console that reorganizes its JSON degrades to "not offered" rather than to a decode error.
+
+**Deliberately not used:**
+
+- editing or deleting rules. `DELETE /api/v2/alarms/network/<id>` is an assumed verb, and `PUT`
+  versus `PATCH` was never established. Reactor creates its rule and then leaves it alone
+  forever; guessing wrong here means silently breaking somebody's alerting. A rule whose
+  destination has gone stale is reported in the logs and left for a human to remove.
+
+Every failure on this path is logged and swallowed. Polling remains the mechanism of record, so
+the worst outcome of this API having moved is that Reactor reacts on the poll interval.
+
 ## Current state on the UDM
 
 Rule **"Reactor spike capture"** (`019ff10d-5b3e-7930-8cd8-78745b579492`) exists,

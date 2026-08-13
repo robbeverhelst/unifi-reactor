@@ -37,7 +37,7 @@ func automation(name, provider, eventType string) *reactorv1alpha1.Automation {
 		a.Spec.Trigger = &reactorv1alpha1.EventTrigger{Provider: provider, Event: eventType}
 		return a
 	}
-	a.Spec.When = &reactorv1alpha1.StateTrigger{Provider: provider, State: map[string]string{"wan": "backup"}}
+	a.Spec.When = &reactorv1alpha1.StateTrigger{Provider: provider, State: map[string]string{"wan": wanBackupValue}}
 	return a
 }
 

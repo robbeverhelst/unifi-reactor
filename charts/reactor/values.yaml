@@ -46,6 +46,61 @@ unifi:
   #     --from-literal=UNIFI_API_KEY=<your API key>
   existingSecret: unifi-reactor-credentials
 
+  # Webhook fast path. UniFi's Alarm Manager posts here and Reactor re-observes
+  # state straight away instead of waiting for the next poll.
+  #
+  # A delivery only ever triggers a poll — its payload is never read and can
+  # never set state — so polling stays the source of truth. Leaving this off
+  # costs reaction latency and nothing else.
+  webhook:
+    enabled: false
+    # Port the receiver listens on inside the pod.
+    port: 9090
+    path: /webhooks/unifi
+    # Secret holding the shared secret every delivery must present, as
+    # "Authorization: Bearer <token>" or "X-Reactor-Token: <token>". Nothing is
+    # accepted without it. Create it with:
+    #   kubectl -n <namespace> create secret generic unifi-reactor-webhook \
+    #     --from-literal=UNIFI_WEBHOOK_TOKEN="$(openssl rand -hex 32)"
+    existingSecret: unifi-reactor-webhook
+    tokenKey: UNIFI_WEBHOOK_TOKEN
+    # Floor between two observations. A real outage fires several triggers at
+    # once and a retrying console repeats them; this is what keeps a burst of
+    # deliveries — or a flood from whoever finds the endpoint — from becoming a
+    # burst of requests to your gateway.
+    minObserveInterval: 500ms
+
+    # The receiver is NOT reachable from your console by default: this Service
+    # is a ClusterIP, and your UniFi gateway is not in the cluster. Give it a
+    # type your console can reach (LoadBalancer on a LAN-routable address, or
+    # NodePort), or point your own Ingress at it.
+    service:
+      enabled: true
+      type: ClusterIP
+      port: 9090
+      annotations: {}
+      loadBalancerIP: ""
+
+    # Optional: let Reactor create its own Alarm Manager rule on the console,
+    # instead of you creating it in the UniFi UI.
+    #
+    # This writes to your gateway on every start, over an API that is
+    # undocumented, reverse-engineered and version-fragile. It fails soft and
+    # never blocks polling, and Reactor only ever creates its rule — it never
+    # edits or deletes one. Off by default for good reason; creating the rule
+    # by hand in the UniFi UI is the conservative option.
+    registration:
+      enabled: false
+      # The URL your console should POST to. Reactor cannot work this out: only
+      # you know how the pod is exposed. Must be reachable from the console and
+      # must not be a loopback address.
+      publicURL: ""
+      ruleTitle: unifi-reactor
+      # Secret holding UNIFI_USERNAME and UNIFI_PASSWORD for a UniFi OS local
+      # account. The Alarm Manager API sits at the UniFi OS layer and rejects
+      # the API key the poller uses, so this is a second, separate credential.
+      existingSecret: unifi-reactor-console
+
 log:
   # Verbosity: "debug", "info", "error", or a V-level number ("1", "2").
   # debug turns on the per-observation lines you want while working out why a
@@ -105,8 +160,22 @@ networkPolicy:
   # When enabled, nothing may reach the operator and egress is whatever the
   # rules below allow — narrow them to your API server, DNS, and console.
   enabled: false
-  # Nothing needs to reach the operator: it serves only kubelet health probes,
-  # which most CNIs deliver from the node outside policy enforcement.
+  # Nothing needs to reach the operator by default: it serves only kubelet
+  # health probes, which most CNIs deliver from the node outside policy
+  # enforcement.
+  #
+  # The exception is unifi.webhook.enabled, where the console does need to
+  # reach it. This list is NOT widened for you when the webhook is on — a
+  # policy that opens a port you did not write here would be a bad surprise —
+  # so add the rule yourself, or deliveries are dropped and Reactor quietly
+  # falls back to the poll interval:
+  #   ingress:
+  #     - from:
+  #         - ipBlock:
+  #             cidr: 192.0.2.1/32     # your console
+  #       ports:
+  #         - protocol: TCP
+  #           port: 9090
   ingress: []
   # Unrestricted by default, so enabling the policy cannot silently break
   # polling or the operator's connection to the API server. See the chart

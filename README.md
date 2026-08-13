@@ -241,9 +241,18 @@ Chart values ([full reference](charts/reactor/README.md)):
 | `log.level` | `info` | `debug` adds the per-observation lines used to work out why an automation did not fire |
 | `unifi.ups.lowBatteryPercent` | `30` | charge at or below this reports `ups.battery: low` |
 | `unifi.ups.criticalBatteryPercent` | `10` | charge at or below this reports `ups.battery: critical` |
+| `unifi.webhook.enabled` | `false` | webhook fast path (below) |
 | `rbac.clusterWide` | `true` | when `false`, restricts the operator to its own namespace |
 
 `Automation` resources are namespaced. An action targets its own namespace by default; naming a different one in `target.namespace` requires `rbac.clusterWide: true`.
+
+### Webhook fast path
+
+Reactions are normally no faster than `unifi.pollInterval`. UniFi's Alarm Manager can post to Reactor instead, cutting that to about a second — and Reactor can create that Alarm Manager rule itself, rather than asking you to click through the UniFi UI.
+
+It is off by default and stays an optimization. A delivery **triggers a poll**; it never sets state. Its payload is not parsed at all, so a delivery that is dropped, duplicated, replayed or forged costs at most one extra request to your console. Every delivery must present a shared secret, the receiver is not exposed outside the cluster unless you expose it, and self-registration fails soft — if the console does not behave as expected, Reactor logs why and carries on polling.
+
+See the [chart reference](charts/reactor/README.md#webhook-fast-path-optional-off-by-default) for the values, how to make the receiver reachable from your console, and what is worth knowing before turning self-registration on.
 
 ## Documentation
 
@@ -263,11 +272,10 @@ Early days: the API group is `v1alpha1` and the project is pre-1.0, so expect br
 
 **The name stays `unifi-reactor` through v1**, and adding providers does not change that. The user-facing surface is already provider-neutral — the API group is `reactor.robbeverhelst.com`, the kind is `Automation` with a `provider` field, the chart is `reactor`, the namespace is `reactor-system` — so a NUT, Proxmox, or Prometheus provider lands with no breaking change and nothing to migrate. Only the repository, the Go module path, and the image carry the `unifi-` prefix, and those are the surfaces you touch least. Discovery favours the specific name besides: people search for a UniFi Kubernetes operator, and `reactor` alone has a lot of prior art. If a second provider ever gains real users, renaming is a repository rename (GitHub redirects), a transition period publishing the image under both paths, and a major-version bump of the module path — a decision for when it has users, not for a version boundary on its own.
 
-Parsers are written against real captured API responses committed to [`testdata/`](testdata/unifi/), never against assumed formats. One caveat worth stating plainly: the `wan` mapping is derived from a gateway with a second uplink configured, but a genuine failover has not yet been observed end-to-end. Treat `wan` as less battle-tested than `ups`.
+Parsers are written against real captured API responses committed to [`testdata/`](testdata/unifi/), never against assumed formats. Two caveats worth stating plainly. The `wan` mapping is derived from a gateway with a second uplink configured, but a genuine failover has not yet been observed end-to-end, so treat `wan` as less battle-tested than `ups`. And the webhook fast path has been exercised against the mock console, not a real one — which is a large part of why it defaults off and why nothing depends on it being right.
 
 ## Roadmap
 
-- Webhook fast path — UniFi's Alarm Manager triggers an immediate re-observation instead of waiting for the next poll ([the API for it is already mapped](docs/unifi-alarm-manager-api.md))
 - Event triggers for genuinely point-in-time things, like a client connecting
 - More actions: HTTP requests, notifications, `restart`, CronJob suspend
 - Prometheus metrics and richer status conditions

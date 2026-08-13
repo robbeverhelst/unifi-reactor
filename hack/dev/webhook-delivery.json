@@ -1,0 +1,9 @@
+{
+  "_comment": "SYNTHETIC. Not a capture. Reactor never reads a delivery body, so this only needs to be a plausible JSON blob for driving the fast path locally. Real captures belong in testdata/unifi/webhooks/ and must go through hack/sanitize-webhook-capture.sh first.",
+  "alarm": {
+    "id": "00000000-0000-0000-0000-000000000001",
+    "title": "unifi-reactor",
+    "trigger": "network:internet_disconnected",
+    "timestamp": "2026-01-01T00:00:00.000Z"
+  }
+}

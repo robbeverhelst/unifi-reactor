@@ -1,3 +1,14 @@
+{{- if and .Values.unifi.webhook.enabled (not .Values.unifi.url) }}
+{{- fail "unifi.webhook.enabled needs unifi.url set: there is no console to re-observe" }}
+{{- end }}
+{{- if .Values.unifi.webhook.registration.enabled }}
+{{- if not .Values.unifi.webhook.enabled }}
+{{- fail "unifi.webhook.registration.enabled needs unifi.webhook.enabled: registering a rule for a receiver that is not running only creates failing deliveries" }}
+{{- end }}
+{{- if not .Values.unifi.webhook.registration.publicURL }}
+{{- fail "unifi.webhook.registration.enabled needs unifi.webhook.registration.publicURL: the URL your UniFi console should POST to, which Reactor cannot work out for itself" }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -67,6 +78,46 @@ spec:
             # poll instead of waiting for someone to restart the pod.
             - name: UNIFI_API_KEY_FILE
               value: /etc/unifi-reactor/credentials/UNIFI_API_KEY
+            {{- if .Values.unifi.webhook.enabled }}
+            - name: UNIFI_WEBHOOK_ENABLED
+              value: "true"
+            - name: UNIFI_WEBHOOK_BIND_ADDRESS
+              value: ":{{ .Values.unifi.webhook.port }}"
+            - name: UNIFI_WEBHOOK_PATH
+              value: {{ .Values.unifi.webhook.path | quote }}
+            - name: UNIFI_WEBHOOK_MIN_INTERVAL
+              value: {{ .Values.unifi.webhook.minObserveInterval | quote }}
+            # Injected once at startup, unlike the API key above: rotating this
+            # secret also means recreating the Alarm Manager rule that carries
+            # it, which Reactor deliberately never edits, so there is no
+            # restart-free rotation to preserve here.
+            # Not optional either: a receiver with no shared secret rejects
+            # every delivery, so a missing key should fail loudly here rather
+            # than look like a console that stopped calling.
+            - name: UNIFI_WEBHOOK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.unifi.webhook.existingSecret | quote }}
+                  key: {{ .Values.unifi.webhook.tokenKey | quote }}
+            {{- if .Values.unifi.webhook.registration.enabled }}
+            - name: UNIFI_WEBHOOK_REGISTER
+              value: "true"
+            - name: UNIFI_WEBHOOK_PUBLIC_URL
+              value: {{ .Values.unifi.webhook.registration.publicURL | quote }}
+            - name: UNIFI_WEBHOOK_RULE_TITLE
+              value: {{ .Values.unifi.webhook.registration.ruleTitle | quote }}
+            - name: UNIFI_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.unifi.webhook.registration.existingSecret | quote }}
+                  key: UNIFI_USERNAME
+            - name: UNIFI_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.unifi.webhook.registration.existingSecret | quote }}
+                  key: UNIFI_PASSWORD
+            {{- end }}
+            {{- end }}
             {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -76,6 +127,10 @@ spec:
           ports:
             - name: healthz
               containerPort: 8081
+            {{- if .Values.unifi.webhook.enabled }}
+            - name: webhook
+              containerPort: {{ .Values.unifi.webhook.port }}
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz
