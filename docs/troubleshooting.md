@@ -434,7 +434,34 @@ Flux, on the target Kustomization, via `spec.patches` or by omitting `replicas` 
 
 ---
 
-## 10. Still stuck
+## 10. `wan` and `isp` disagree about a failover
+
+Reactor derives `wan` from which WAN port reports `is_uplink`, and cross-checks it against two
+signals that answer the same question independently: the interface the gateway names as its
+uplink, and the ISP behind the address it currently holds. When those stop agreeing, it says so
+rather than picking a winner:
+
+```sh
+kubectl -n reactor-system logs deploy/reactor | grep unifi-wan
+```
+
+| What you see | What it means | What to do |
+| --- | --- | --- |
+| `The gateway's WAN signals disagree about which uplink is live` | `is_uplink` and `uplink.name` point at different ports. Reactor reports the `is_uplink` answer. | Check which uplink is actually carrying traffic in the UniFi UI, and say which one Reactor got right on [#34](https://github.com/robbeverhelst/unifi-reactor/issues/34) |
+| `The ISP behind the uplink changed but the gateway still reports the same uplink` | Your traffic moved to a different carrier while `wan` did not move. If that was a failover, `wan` missed it. | Same — this is the observation issue #34 is open for |
+| `The gateway changed uplink but the ISP behind it did not change` | `wan` moved without your carrier changing. Normal if both uplinks are with the same ISP; suspicious otherwise. | Nothing, unless your two uplinks are with different carriers |
+| `The uplink believed to be live does not report itself as online` | The port Reactor thinks is carrying traffic reports something other than `online` in `last_wan_status`. | Note the exact status value on [#34](https://github.com/robbeverhelst/unifi-reactor/issues/34) — only `online` has ever been observed, and the failed value is unknown |
+| `is_uplink does not name a single live WAN port` | No port claimed the uplink, or both did. Reactor fell back to the gateway's uplink interface. | Nothing; this is the fallback working. Worth reporting if it persists rather than appearing for one poll during a switchover |
+
+None of these stops anything: state is still published and Automations still run. They exist
+because the `wan` mapping has never been checked against a real failover, and a wrong mapping
+that says nothing is far worse than one that complains. If you have a gateway with two working
+uplinks, [#34](https://github.com/robbeverhelst/unifi-reactor/issues/34) is where these lines
+turn into an answer.
+
+---
+
+## 11. Still stuck
 
 Collect these and open an issue — the [bug report template](https://github.com/robbeverhelst/unifi-reactor/issues/new/choose) asks for exactly this, and without it nothing is reproducible:
 

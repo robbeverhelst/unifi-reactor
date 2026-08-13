@@ -195,8 +195,27 @@ Each key is published only when the matching hardware is adopted by your control
 | Key | Values | Meaning |
 | --- | --- | --- |
 | `wan` | `primary`, `backup` | which uplink the gateway is currently using |
+| `isp` | a slug, e.g. `telenet`, or `unknown` | the carrier behind the live uplink |
 | `ups` | `online`, `on-battery` | whether a UniFi UPS is on mains or running on battery |
 | `ups.battery` | `normal`, `low`, `critical` | remaining charge against the configured thresholds |
+
+`isp` is the one key whose values are not a closed set: it is the carrier name your console geolocated your public address to, lowercased with everything non-alphanumeric turned into a hyphen. Look it up before matching on it —
+
+```sh
+kubectl -n reactor-system logs deploy/reactor | grep 'key=isp'
+# INFO state transition provider=unifi key=isp from= to=telenet
+```
+
+— and use it when *who* is carrying your traffic is what matters rather than which port it leaves by, which is usually the case for anything metered:
+
+```yaml
+  when:
+    provider: unifi
+    state:
+      isp: unknown        # or your backup carrier's slug
+```
+
+It exists for a second reason. `wan` and `isp` are independent answers to "did the uplink change", so Reactor compares them: if one moves and the other does not, it says so rather than quietly trusting either. Those lines are worth reading — see [`wan` and `isp` disagree](docs/troubleshooting.md#10-wan-and-isp-disagree-about-a-failover).
 
 `ups` and `ups.battery` are separate on purpose. An automation matching `ups: on-battery` stays matched for the whole outage as the battery drains — with a single escalating enum, dropping from `on-battery` to `low-battery` would leave the matching state and fire `onExit`, scaling workloads back **up** in the middle of a power failure. Express escalation by matching both keys instead; all keys in a `state` block must match.
 
@@ -220,9 +239,12 @@ unifi:
     default: 1          # react on the first observation
     keys:
       ups.battery: 2    # ...but let a threshold crossing settle
+      isp: 2            # ...and let a re-geolocated carrier settle
 ```
 
 Each extra sample costs one `pollInterval` of reaction time, so the default is `1`: a WAN failover and a power cut both deserve an immediate reaction, and neither flaps. `ups.battery` ships at `2` because it is a threshold crossing — a charge hovering at 30% would otherwise report `low`, `normal`, `low` — and because a battery drains over minutes, so spending one more poll to be sure costs nothing. At the default 30s poll that makes a battery-level escalation react in 60s worst case instead of 30s.
+
+`isp` ships at `2` for a different reason: it is not a link state but the result of a geolocation lookup on whatever public address the gateway currently holds, so it can report `unknown` for a poll or two while a new address is being resolved — precisely during the failover you would be reacting to. One extra sample skips that window. Nothing else needs it: `wan` and `ups` are switch positions, and they do not flap.
 
 Debouncing happens in the shared state store, so every automation sees the same settled value. Two automations can never disagree about the current state and fight over a workload they share.
 

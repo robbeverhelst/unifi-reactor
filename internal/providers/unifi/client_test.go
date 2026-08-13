@@ -77,9 +77,11 @@ func TestObserveAgainstCapturedGatewayAndUPS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Observe: %v", err)
 	}
-	// The captures were taken with WAN1 active and the UPS on mains at 100%.
+	// The captures were taken with WAN1 active, Telenet as the carrier, and
+	// the UPS on mains at 100%.
 	for key, want := range map[string]string{
 		stateKeyWAN:        wanPrimary,
+		stateKeyISP:        capturedISP,
 		stateKeyUPS:        upsOnline,
 		stateKeyUPSBattery: batteryNormal,
 	} {
@@ -89,6 +91,9 @@ func TestObserveAgainstCapturedGatewayAndUPS(t *testing.T) {
 	}
 }
 
+// Partial hardware is the normal case, not an edge case: plenty of consoles
+// have a gateway and no UniFi UPS, and a UPS can drop off a console that still
+// reports its gateway. Neither may take the other's keys down with it.
 func TestObserveWithoutUPSOmitsUPSKeys(t *testing.T) {
 	c := serve(t, captured(t, "stat-device-gateway.json"))
 
@@ -99,14 +104,38 @@ func TestObserveWithoutUPSOmitsUPSKeys(t *testing.T) {
 	if state[stateKeyWAN] != wanPrimary {
 		t.Errorf("state[wan] = %q, want %q", state[stateKeyWAN], wanPrimary)
 	}
-	if _, present := state[stateKeyUPS]; present {
-		t.Error("ups key should be absent when no UPS is visible to the controller")
+	if state[stateKeyISP] != capturedISP {
+		t.Errorf("state[isp] = %q, want %q", state[stateKeyISP], capturedISP)
+	}
+	for _, key := range []string{stateKeyUPS, stateKeyUPSBattery} {
+		if _, present := state[key]; present {
+			t.Errorf("%s should be absent when no UPS is visible to the controller", key)
+		}
+	}
+}
+
+func TestObserveWithoutAGatewayStillReportsTheUPS(t *testing.T) {
+	c := serve(t, captured(t, "stat-device-ups.json"))
+
+	state, err := c.Observe(context.Background())
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if state[stateKeyUPS] != upsOnline {
+		t.Errorf("state[ups] = %q, want %q", state[stateKeyUPS], upsOnline)
+	}
+	// A UPS record carries an uplink block of its own (the switch port it
+	// hangs off). It is not a gateway, so it must not produce wan or isp.
+	for _, key := range []string{stateKeyWAN, stateKeyISP} {
+		if got, present := state[key]; present {
+			t.Errorf("%s should be absent when no gateway is visible, got %q", key, got)
+		}
 	}
 }
 
 func TestWANBackupWhenWAN2IsUplink(t *testing.T) {
 	c := NewClient("", nil, "", false)
-	state, err := c.stateFromDevices(deviceStatResponse{Data: []deviceRecord{{
+	state, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{
 		Model: "UDMPRO",
 		WAN1:  &wanPort{IsUplink: false, Up: false},
 		WAN2:  &wanPort{IsUplink: true, Up: true},
@@ -142,7 +171,7 @@ func TestUPSStateTransitions(t *testing.T) {
 			vbms.IsBatteryMode = tc.batteryMode
 			vbms.BattPool.BatteryLevel = tc.level
 
-			state, err := c.stateFromDevices(deviceStatResponse{Data: []deviceRecord{{Model: "USWDA26", VBMS: &vbms}}})
+			state, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{Model: "USWDA26", VBMS: &vbms}}})
 			if err != nil {
 				t.Fatalf("stateFromDevices: %v", err)
 			}
@@ -165,7 +194,7 @@ func TestUPSStaysOnBatteryAcrossBatteryLevels(t *testing.T) {
 		vbms.IsBatteryMode = true
 		vbms.BattPool.BatteryLevel = level
 
-		state, err := c.stateFromDevices(deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
+		state, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
 		if err != nil {
 			t.Fatalf("stateFromDevices: %v", err)
 		}
@@ -184,7 +213,7 @@ func TestCustomBatteryThresholds(t *testing.T) {
 	vbms.IsBatteryMode = true
 	vbms.BattPool.BatteryLevel = 50
 
-	state, err := c.stateFromDevices(deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
+	state, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
 	if err != nil {
 		t.Fatalf("stateFromDevices: %v", err)
 	}
@@ -195,7 +224,7 @@ func TestCustomBatteryThresholds(t *testing.T) {
 
 func TestErrorsWhenNothingObservable(t *testing.T) {
 	c := NewClient("", nil, "", false)
-	if _, err := c.stateFromDevices(deviceStatResponse{}); err == nil {
+	if _, err := c.stateFromDevices(context.Background(), deviceStatResponse{}); err == nil {
 		t.Fatal("expected error for empty device list")
 	}
 }

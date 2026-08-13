@@ -18,7 +18,7 @@ The allowlist matters more than it looks. `stat/device` returns entire device re
 
 | File | Endpoint | What it documents |
 | --- | --- | --- |
-| `api/stat-device-gateway.json` | `GET /proxy/network/api/s/<site>/stat/device` (gateway) | `wan1`/`wan2` (`is_uplink`, `up`, `ifname`, `speed`), `uplink`, `last_wan_status`, `isp` |
+| `api/stat-device-gateway.json` | `GET /proxy/network/api/s/<site>/stat/device` (gateway) | `wan1`/`wan2` (`is_uplink`, `up`, `ifname`, `speed`), `uplink`, `last_wan_status`, `isp` (allowlisted from `active_geo_info.WAN.isp_name`) |
 | `api/stat-device-ups.json` | same call, UPS record | `vbms_table` battery state, `outlet_table` |
 | `api/stat-health.json` | `GET /proxy/network/api/s/<site>/stat/health` | per-subsystem `status`, WAN `uptime_stats` monitors, ISP |
 | `api/integration-info.json` | `GET /proxy/network/integration/v1/info` | controller version, for the compatibility guard |
@@ -28,9 +28,16 @@ Both API families accept the same `X-API-KEY` header as of Network 10.5.
 
 ## WAN state
 
-Captured with WAN1 (ethernet) active and WAN2 (SFP+) enabled but down. The provider derives `wan: primary | backup` from which port reports `is_uplink`.
+Captured with WAN1 (ethernet) active and WAN2 (SFP+) enabled but down. Four fields in that one capture say something about which uplink is live, and they all agree — which is exactly why the capture cannot settle anything:
 
-> ⚠️ **This mapping is inferred, not observed.** No real failover has been captured yet, so which fields actually move during one is unconfirmed. See issue #34. `isp` and `last_wan_status` are captured partly as independent cross-checks.
+| Field | In the capture | What the provider does with it |
+| --- | --- | --- |
+| `wan1.is_uplink` / `wan2.is_uplink` | `true` / `false` | derives `wan: primary \| backup`. **The signal of record**, and the unverified one |
+| `uplink.name` | `eth8`, matching `wan1.ifname` | independent second opinion, matched against each port's `ifname`. Used when `is_uplink` names no single live port; otherwise only to report disagreement |
+| `isp` | `Telenet` | published as the `isp` state key, slugified. Compared with `wan` across observations: if one moves and the other does not, that is logged |
+| `last_wan_status` | `{"WAN": "online"}` | never derived from — only `online` has ever been seen, so the failed value is unknown. Used only to notice the live uplink not calling itself online |
+
+> ⚠️ **The mapping is inferred, not observed.** No real failover has been captured, so which of these fields actually moves during one is unconfirmed — including whether `is_uplink` means "is carrying traffic" or "is configured as the uplink". See issue #34.
 
 ## UPS state (`vbms_table`)
 

@@ -37,9 +37,13 @@ unifi:
     # Per-key overrides. ups.battery is a threshold crossing, so a charge
     # hovering at the boundary would otherwise report low/normal/low; it
     # drains over minutes, so spending one more poll to be sure costs nothing.
+    # isp is a geolocation lookup on the current public address rather than a
+    # link state, so it can report "unknown" for a poll or two while a newly
+    # assigned address is resolved — which is exactly during a failover.
     # Keys that flap by nature — client presence, once it exists — want more.
     keys:
       ups.battery: 2
+      isp: 2
   # Name of an existing Secret containing the key UNIFI_API_KEY.
   # Create it with:
   #   kubectl -n <namespace> create secret generic unifi-reactor-credentials \
