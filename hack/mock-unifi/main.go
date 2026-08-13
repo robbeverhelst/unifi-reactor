@@ -23,6 +23,18 @@ limitations under the License.
 //
 //	curl -X POST http://localhost:9443/flip
 //
+// A real failover has never been observed (issue #34), so which fields actually
+// move during one is unknown. /wan rehearses each hypothesis about that, so the
+// parser can be driven against more than one of them:
+//
+//	curl -X POST 'http://localhost:9443/wan?link=backup&variant=clean'
+//	curl -X POST 'http://localhost:9443/wan?link=backup&variant=is-uplink-pinned'
+//	curl -X POST 'http://localhost:9443/wan?link=primary'   # recovery
+//	curl http://localhost:9443/wan                          # state + every variant
+//
+// Only "clean" can be right, and possibly none of them is. The runbook for
+// finding out with real hardware is in testdata/unifi/README.md.
+//
 // Rehearse a power outage (UPS on battery, draining):
 //
 //	curl -X POST 'http://localhost:9443/ups?mode=battery&level=80'
@@ -52,7 +64,9 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -61,12 +75,90 @@ import (
 // every write, the way a real console does.
 const mockCSRF = "mock-csrf-token"
 
+const (
+	linkPrimary = "primary"
+	linkBackup  = "backup"
+
+	// defaultVariant is what /flip uses: every signal moving together, which is
+	// what the current wan mapping assumes a failover looks like.
+	defaultVariant = "clean"
+
+	// defaultBackupISP is deliberately not a real carrier name. The backup
+	// uplink has never carried traffic, so the name the console would report
+	// for it is unknown, and a plausible-looking guess in a dev tool is how
+	// guesses end up being quoted as facts. Override it with ?isp=.
+	defaultBackupISP = "Mock Backup Carrier"
+
+	// statusFailed is what this mock reports for a downed uplink in
+	// last_wan_status. IT IS A GUESS: the only value ever observed on real
+	// hardware is "online", captured with the primary uplink live. Nothing in
+	// the provider derives state from this field for exactly that reason.
+	statusFailed = "failed"
+	statusOnline = "online"
+
+	// What a variant says wan1/wan2 is_uplink do when the backup takes over.
+	uplinkMoves   = "moves"
+	uplinkPinned  = "pinned"
+	uplinkBoth    = "both"
+	uplinkNeither = "neither"
+)
+
+// failoverVariant is one hypothesis about which fields a real failover moves.
+// Together they are the reason this mock exists beyond a demo: the parser
+// should be exercised against every shape a failover might have, not only the
+// one the mapping already assumes.
+type failoverVariant struct {
+	// isUplink says what wan1/wan2 is_uplink do when the backup takes over:
+	// "moves" (the assumption), "pinned" (is_uplink means "configured as
+	// primary" and never moves), "both", or "neither".
+	isUplink string
+	// context says whether uplink.name, last_wan_status and the ISP follow the
+	// backup uplink.
+	context bool
+	why     string
+}
+
+var failoverVariants = map[string]failoverVariant{
+	defaultVariant: {
+		isUplink: uplinkMoves, context: true,
+		why: "every signal moves together — what the wan mapping assumes, " +
+			"and the only variant it gets right for the right reason",
+	},
+	"is-uplink-only": {
+		isUplink: uplinkMoves, context: false,
+		why: "is_uplink moves and nothing else does — the mapping is right, " +
+			"but its cross-checks contradict it",
+	},
+	"is-uplink-pinned": {
+		isUplink: uplinkPinned, context: true,
+		why: "is_uplink means 'the port configured as primary' and never moves — " +
+			"the mapping reports primary right through a failover",
+	},
+	"both-uplinks": {
+		isUplink: uplinkBoth, context: true,
+		why: "is_uplink means 'configured as an uplink', so both ports claim it whenever both are up",
+	},
+	"no-uplink": {
+		isUplink: uplinkNeither, context: true,
+		why: "the switchover window: the old uplink has dropped and the new one is not claimed yet",
+	},
+}
+
+func variantNames() []string { return slices.Sorted(maps.Keys(failoverVariants)) }
+
 type mock struct {
-	mu       sync.Mutex
-	devices  []any
-	onBackup bool
-	onBatt   bool
-	battLvl  int
+	mu sync.Mutex
+	// pristine is the captured device list as JSON. Every response is built
+	// from it rather than from the last response, so the mock can move fields
+	// around without ever having to undo what it did.
+	pristine []byte
+
+	link           string
+	variant        string
+	backupISP      string
+	networkVersion string
+	onBatt         bool
+	battLvl        int
 
 	// delivery is the synthetic body /alarm-fire posts. It is a stand-in, not
 	// a capture: no real Alarm Manager delivery has been recorded yet.
@@ -80,14 +172,24 @@ func main() {
 	dir := flag.String("testdata", "testdata/unifi/api", "directory holding captured stat/device payloads")
 	deliveryFile := flag.String("delivery", "hack/dev/webhook-delivery.json",
 		"synthetic Alarm Manager delivery body posted by /alarm-fire")
+	networkVersion := flag.String("network-version", "",
+		"UniFi Network version to report; empty serves the captured one. Set 9.3.45 or 11.0.0 "+
+			"to rehearse Reactor's compatibility warning.")
 	flag.Parse()
 
-	m := &mock{battLvl: 100, rules: map[string]map[string]any{}}
+	m := &mock{
+		battLvl:   100,
+		link:      linkPrimary,
+		variant:   defaultVariant,
+		backupISP: defaultBackupISP,
+		rules:     map[string]map[string]any{},
+	}
 	if raw, err := os.ReadFile(*deliveryFile); err == nil {
 		m.delivery = raw
 	} else {
 		log.Printf("no synthetic delivery at %s (%v); /alarm-fire will post an empty body", *deliveryFile, err)
 	}
+	devices := make([]any, 0, 2)
 	for _, name := range []string{"stat-device-gateway.json", "stat-device-ups.json"} {
 		raw, err := os.ReadFile(*dir + "/" + name)
 		if err != nil {
@@ -99,12 +201,35 @@ func main() {
 		if err := json.Unmarshal(raw, &payload); err != nil {
 			log.Fatalf("parsing %s: %v", name, err)
 		}
-		m.devices = append(m.devices, payload.Data...)
+		devices = append(devices, payload.Data...)
+	}
+	pristine, err := json.Marshal(devices)
+	if err != nil {
+		log.Fatalf("re-encoding the captured devices: %v", err)
+	}
+	m.pristine = pristine
+
+	m.networkVersion = *networkVersion
+	if m.networkVersion == "" {
+		var info struct {
+			ApplicationVersion string `json:"applicationVersion"`
+		}
+		raw, err := os.ReadFile(*dir + "/integration-info.json")
+		if err == nil {
+			err = json.Unmarshal(raw, &info)
+		}
+		if err != nil {
+			log.Fatalf("reading integration-info.json: %v", err)
+		}
+		m.networkVersion = info.ApplicationVersion
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /proxy/network/api/s/{site}/stat/device", m.serveDevices)
+	mux.HandleFunc("GET /proxy/network/integration/v1/info", m.serveInfo)
 	mux.HandleFunc("POST /flip", m.flipWAN)
+	mux.HandleFunc("GET /wan", m.describeWAN)
+	mux.HandleFunc("POST /wan", m.setWAN)
 	mux.HandleFunc("POST /ups", m.setUPS)
 
 	// The UniFi OS layer: no /proxy/network prefix, cookie session, csrf header.
@@ -114,23 +239,27 @@ func main() {
 	mux.HandleFunc("POST /api/v2/alarms/network", m.createRule)
 	mux.HandleFunc("POST /alarm-fire", m.fireAlarm)
 
-	log.Printf("mock UniFi API on %s: %d devices, wan=primary, ups=online (100%%)", *addr, len(m.devices))
+	log.Printf("mock UniFi API on %s: wan=%s, ups=online (100%%)", *addr, m.link)
+	log.Printf("failover variants: %s (GET /wan explains each)", strings.Join(variantNames(), ", "))
 	log.Fatal(http.ListenAndServe(*addr, mux)) // #nosec G114 -- dev tool
 }
 
-// apply rewrites the captured devices to match the mock's current state.
-func (m *mock) apply() {
-	for _, d := range m.devices {
+// devices rebuilds the device list from the capture and rewrites it to match
+// the mock's current state. Starting from the capture every time is what lets
+// a failover variant move fields around without needing to put them back.
+func (m *mock) devices() []any {
+	var devices []any
+	if err := json.Unmarshal(m.pristine, &devices); err != nil {
+		log.Printf("re-reading the captured devices: %v", err)
+		return nil
+	}
+	for _, d := range devices {
 		device, ok := d.(map[string]any)
 		if !ok {
 			continue
 		}
-		if wan1, ok := device["wan1"].(map[string]any); ok {
-			wan1["is_uplink"] = !m.onBackup
-		}
-		if wan2, ok := device["wan2"].(map[string]any); ok {
-			wan2["is_uplink"] = m.onBackup
-			wan2["up"] = m.onBackup
+		if _, isGateway := device["wan1"]; isGateway && m.link == linkBackup {
+			m.failover(device)
 		}
 		if vbms, ok := device["vbms_table"].(map[string]any); ok {
 			vbms["is_battery_mode"] = m.onBatt
@@ -140,26 +269,142 @@ func (m *mock) apply() {
 			}
 		}
 	}
+	return devices
+}
+
+// failover rewrites a captured gateway record the way the current variant says
+// a real failover would. The primary state needs no rewriting at all: it is
+// the capture.
+func (m *mock) failover(device map[string]any) {
+	variant := failoverVariants[m.variant]
+	wan1, _ := device["wan1"].(map[string]any)
+	wan2, _ := device["wan2"].(map[string]any)
+	if wan1 == nil || wan2 == nil {
+		return
+	}
+
+	switch variant.isUplink {
+	case uplinkMoves:
+		wan1["is_uplink"], wan2["is_uplink"] = false, true
+	case uplinkPinned:
+		// left exactly as captured: wan1 keeps the claim
+	case uplinkBoth:
+		wan1["is_uplink"], wan2["is_uplink"] = true, true
+	case uplinkNeither:
+		wan1["is_uplink"], wan2["is_uplink"] = false, false
+	}
+	// The physical reality of a failover in every variant: the primary link is
+	// down and the backup is carrying traffic. Only the reporting differs.
+	wan1["up"], wan2["up"] = false, true
+
+	if !variant.context {
+		return
+	}
+	if uplink, ok := device["uplink"].(map[string]any); ok {
+		uplink["name"] = wan2["ifname"]
+	}
+	device["last_wan_status"] = map[string]any{"WAN": statusFailed, "WAN2": statusOnline}
+	device["isp"] = m.backupISP
 }
 
 func (m *mock) serveDevices(w http.ResponseWriter, _ *http.Request) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.apply()
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	devices := m.devices()
+	m.mu.Unlock()
+	writeJSON(w, map[string]any{
 		"meta": map[string]string{"rc": "ok"},
-		"data": m.devices,
+		"data": devices,
 	})
 }
 
-func (m *mock) flipWAN(w http.ResponseWriter, _ *http.Request) {
+// serveInfo answers the Integration API endpoint Reactor's compatibility guard
+// reads at startup, so the guard can be rehearsed — including its warnings, by
+// passing -network-version 9.3.45 or 11.0.0.
+func (m *mock) serveInfo(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, map[string]any{"applicationVersion": m.networkVersion})
+}
+
+// flipWAN toggles between the captured primary state and a failover in
+// whichever variant is current, defaulting to the one the mapping assumes.
+func (m *mock) flipWAN(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
-	m.onBackup = !m.onBackup
-	state := map[bool]string{false: "primary", true: "backup"}[m.onBackup]
+	if name := r.URL.Query().Get("variant"); name != "" {
+		if _, known := failoverVariants[name]; !known {
+			m.mu.Unlock()
+			unknownVariant(w, name)
+			return
+		}
+		m.variant = name
+	}
+	if m.link == linkBackup {
+		m.link = linkPrimary
+	} else {
+		m.link = linkBackup
+	}
+	link, variant := m.link, m.variant
 	m.mu.Unlock()
-	log.Printf("flipped: wan is now %s", state)
-	_, _ = fmt.Fprintf(w, `{"wan":%q}`+"\n", state)
+
+	log.Printf("flipped: wan is now %s (variant %s)", link, variant)
+	_, _ = fmt.Fprintf(w, `{"wan":%q,"variant":%q}`+"\n", link, variant)
+}
+
+// setWAN is the explicit form: which uplink is live, and which hypothesis
+// about a failover to render it under.
+func (m *mock) setWAN(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if name := query.Get("variant"); name != "" {
+		if _, known := failoverVariants[name]; !known {
+			unknownVariant(w, name)
+			return
+		}
+		m.variant = name
+	}
+	switch link := query.Get("link"); link {
+	case linkPrimary, linkBackup:
+		m.link = link
+	case "":
+	default:
+		http.Error(w, `link must be "primary" or "backup"`, http.StatusBadRequest)
+		return
+	}
+	if isp := query.Get("isp"); isp != "" {
+		m.backupISP = isp
+	}
+
+	log.Printf("wan is now %s (variant %s: %s)", m.link, m.variant, failoverVariants[m.variant].why)
+	writeJSON(w, map[string]any{"wan": m.link, "variant": m.variant, "backupISP": m.backupISP})
+}
+
+// describeWAN reports the current state and what every variant means, so the
+// list does not have to be remembered or looked up in this file.
+func (m *mock) describeWAN(w http.ResponseWriter, _ *http.Request) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	variants := make(map[string]any, len(failoverVariants))
+	for name, variant := range failoverVariants {
+		variants[name] = map[string]any{
+			"is_uplink":    variant.isUplink,
+			"contextMoves": variant.context,
+			"hypothesis":   variant.why,
+		}
+	}
+	writeJSON(w, map[string]any{
+		"wan":       m.link,
+		"variant":   m.variant,
+		"backupISP": m.backupISP,
+		"variants":  variants,
+		"note": "no real failover has ever been observed (issue #34); " +
+			"every variant here is a hypothesis, and the capture runbook in testdata/unifi/README.md settles it",
+	})
+}
+
+func unknownVariant(w http.ResponseWriter, name string) {
+	http.Error(w, fmt.Sprintf("unknown variant %q; try one of: %s\n", name, strings.Join(variantNames(), ", ")),
+		http.StatusBadRequest)
 }
 
 func (m *mock) setUPS(w http.ResponseWriter, r *http.Request) {

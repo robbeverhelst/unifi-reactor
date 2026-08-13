@@ -122,6 +122,141 @@ func TestCapturedGatewayHasEverySignalAgreeing(t *testing.T) {
 	}
 }
 
+// The hypotheses. Each says which fields a real failover moves; the assertions
+// say what the provider does about it.
+func TestFailoverHypotheses(t *testing.T) {
+	tests := []struct {
+		name string
+		// what this hypothesis says a failover looks like
+		apply func(*deviceRecord)
+		// what the provider should publish under it
+		wantWAN string
+		wantISP string
+		// substrings the provider must have logged, so that a hypothesis it
+		// cannot resolve is never resolved silently
+		wantLogged []string
+	}{
+		{
+			// Every signal moves together. If this is what a failover looks
+			// like, the current mapping is simply right.
+			name: "every signal moves",
+			apply: func(d *deviceRecord) {
+				d.WAN1.IsUplink, d.WAN1.Up = false, false
+				d.WAN2.IsUplink, d.WAN2.Up = true, true
+				d.Uplink.Name = d.WAN2.IfName
+				d.LastWANStatus = map[string]any{wanStatusKeyPrimary: statusFailed, wanStatusKeyBackup: wanStatusOnline}
+				d.ISP = backupCarrier
+			},
+			wantWAN: wanBackup,
+			wantISP: backupCarrierSlug,
+		},
+		{
+			// is_uplink moves and nothing else does. The mapping still gets
+			// the right answer, but two signals now contradict it, which is
+			// worth knowing about before trusting either.
+			name: "only is_uplink moves",
+			apply: func(d *deviceRecord) {
+				d.WAN1.IsUplink = false
+				d.WAN2.IsUplink, d.WAN2.Up = true, true
+			},
+			wantWAN:    wanBackup,
+			wantISP:    capturedISP,
+			wantLogged: []string{loggedDisagreement, `"byIsUplink"="backup"`, `"byUplinkName"="primary"`},
+		},
+		{
+			// The dangerous one: is_uplink turns out to mean "the port
+			// configured as the uplink" and stays pinned to WAN1, while
+			// everything else moves. The mapping reports primary right through
+			// a failover — so the only defence is that it says so loudly.
+			name: "is_uplink stays pinned while everything else moves",
+			apply: func(d *deviceRecord) {
+				d.WAN2.Up = true
+				d.Uplink.Name = d.WAN2.IfName
+				d.LastWANStatus = map[string]any{wanStatusKeyPrimary: statusFailed, wanStatusKeyBackup: wanStatusOnline}
+				d.ISP = backupCarrier
+			},
+			wantWAN: wanPrimary,
+			wantISP: backupCarrierSlug,
+			wantLogged: []string{
+				loggedDisagreement,
+				"does not report itself as online",
+			},
+		},
+		{
+			// is_uplink means "configured", so both ports claim it. Before
+			// uplink.name was consulted this reported backup unconditionally,
+			// for no reason beyond the order of a switch statement.
+			name: "both ports claim the uplink",
+			apply: func(d *deviceRecord) {
+				d.WAN2.IsUplink, d.WAN2.Up = true, true
+			},
+			wantWAN:    wanPrimary,
+			wantISP:    capturedISP,
+			wantLogged: []string{"is_uplink does not name a single live WAN port", `"bothPortsClaimedUplink"=true`},
+		},
+		{
+			// The switchover window: the old uplink has dropped and the new
+			// one has not been claimed yet. Without a second signal the key
+			// vanishes here, which reads to every Automation as "the gateway
+			// disappeared".
+			name: "neither port claims the uplink mid-switchover",
+			apply: func(d *deviceRecord) {
+				d.WAN1.IsUplink, d.WAN1.Up = false, false
+				d.WAN2.Up = true
+				d.Uplink.Name = d.WAN2.IfName
+			},
+			wantWAN:    wanBackup,
+			wantISP:    capturedISP,
+			wantLogged: []string{"is_uplink does not name a single live WAN port"},
+		},
+		{
+			// Nothing left to go on. The key is omitted rather than guessed,
+			// which is what makes the engine hold the last known state instead
+			// of running onExit actions mid-failover.
+			name: "no signal at all",
+			apply: func(d *deviceRecord) {
+				d.WAN1.IsUplink = false
+				d.Uplink = nil
+			},
+			wantWAN: "",
+			wantISP: capturedISP,
+		},
+		{
+			// A failover hands the gateway a public address the console has
+			// not geolocated yet.
+			name: "the carrier is not known yet",
+			apply: func(d *deviceRecord) {
+				d.ISP = ""
+			},
+			wantWAN: wanPrimary,
+			wantISP: ispUnknown,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, logs := logged(t)
+			c := NewClient("", nil, "", false)
+
+			state, err := c.stateFromDevices(ctx, gatewayFromCapture(t, tc.apply))
+			if err != nil {
+				t.Fatalf("stateFromDevices: %v", err)
+			}
+			if got := state[stateKeyWAN]; got != tc.wantWAN {
+				t.Errorf("state[wan] = %q, want %q", got, tc.wantWAN)
+			}
+			if got := state[stateKeyISP]; got != tc.wantISP {
+				t.Errorf("state[isp] = %q, want %q", got, tc.wantISP)
+			}
+			for _, want := range tc.wantLogged {
+				if !strings.Contains(logs(), want) {
+					t.Errorf("expected the provider to report %q, logged:\n%s", want, logs())
+				}
+			}
+		})
+	}
+}
+
 // The cross-check issue #6 exists for: wan and isp are independent answers to
 // "did the uplink change", and they are only meaningful together across two
 // observations.

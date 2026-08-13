@@ -67,7 +67,37 @@ curl -X POST 'http://localhost:9443/ups?level=5'               # battery critica
 curl -X POST 'http://localhost:9443/ups?mode=mains&level=100'  # power restored
 ```
 
+### Rehearsing a failover that has never been observed
+
+`/flip` moves every WAN signal at once, which is what the `wan` mapping assumes a failover looks like. That assumption has never been checked against real hardware ([#34](https://github.com/robbeverhelst/unifi-reactor/issues/34)), so the mock can also render the other plausible shapes — because a parser tested against one hypothesis is only tested against one hypothesis:
+
+```sh
+curl http://localhost:9443/wan          # current state, and what each variant means
+
+curl -X POST 'http://localhost:9443/wan?link=backup&variant=is-uplink-pinned'
+curl -X POST 'http://localhost:9443/wan?link=primary'
+```
+
+| Variant | What it says a failover looks like | What Reactor should do |
+| --- | --- | --- |
+| `clean` | every signal moves together | report `wan: backup`, quietly |
+| `is-uplink-only` | only `is_uplink` moves | report `backup`, and log that `uplink.name` disagrees |
+| `is-uplink-pinned` | `is_uplink` means "configured as primary" and never moves | report `primary` **through a failover** — the silent failure, so it logs loudly instead |
+| `both-uplinks` | both ports claim `is_uplink` | fall back to `uplink.name` rather than guessing |
+| `no-uplink` | neither claims it, mid-switchover | fall back to `uplink.name` instead of dropping the key |
+
+Add `&isp=<name>` to rehearse the carrier changing too; the default is an obviously synthetic one, because the real backup carrier has never been seen.
+
+The same hypotheses are asserted in `internal/providers/unifi/wan_test.go`, derived from the committed capture in code. Neither the mock nor those tests produce a fixture: settling which hypothesis is real needs hardware, and the [capture runbook](../testdata/unifi/README.md#capturing-a-real-failover) is the procedure for it.
+
 Point the operator at it with `UNIFI_URL=http://<your-host>:9443 UNIFI_API_KEY=mock`. Use a LAN address rather than `localhost` so the pod can reach your machine.
+
+The mock also answers the Integration API's `info` endpoint, which is what Reactor's compatibility guard reads at startup. It serves the captured version by default; pass a different one to rehearse the warning without owning the hardware that would produce it:
+
+```sh
+go run ./hack/mock-unifi -network-version 11.0.0
+# INFO This UniFi Network version is newer than anything Reactor has been tested against ...
+```
 
 ## Webhook fast path
 
