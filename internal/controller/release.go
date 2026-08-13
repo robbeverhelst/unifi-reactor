@@ -43,6 +43,15 @@ const finalizerReleaseClaims = "reactor.robbeverhelst.com/release-claims"
 // target still say what it was before.
 const maxReleaseAttempts = 3
 
+// ReleaseOptions bounds what a release sweep touches.
+type ReleaseOptions struct {
+	// Namespace scopes the sweep, and must be set to whatever the operator was
+	// permitted to watch: listing at cluster scope is forbidden under
+	// namespace-scoped RBAC, which would fail the hook and, with it, the
+	// uninstall. Empty means every namespace.
+	Namespace string
+}
+
 // ReleaseAllClaims hands every target Reactor holds back to whatever the
 // Automations referencing it want once nothing claims it, and removes the
 // finalizer from every Automation.
@@ -58,11 +67,15 @@ const maxReleaseAttempts = 3
 // It is deliberately best-effort: one unreachable target must not be able to
 // block an uninstall, so failures are logged and the next target is tried.
 // Only being unable to enumerate the Automations at all is fatal.
-func ReleaseAllClaims(ctx context.Context, c client.Client) error {
+func ReleaseAllClaims(ctx context.Context, c client.Client, options ReleaseOptions) error {
 	log := logf.FromContext(ctx)
 
+	var scope []client.ListOption
+	if options.Namespace != "" {
+		scope = append(scope, client.InNamespace(options.Namespace))
+	}
 	var list reactorv1alpha1.AutomationList
-	if err := c.List(ctx, &list); err != nil {
+	if err := c.List(ctx, &list, scope...); err != nil {
 		return fmt.Errorf("listing automations: %w", err)
 	}
 

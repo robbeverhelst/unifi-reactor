@@ -278,7 +278,7 @@ Two ways out, and the second is usually better in a homelab you did not want clu
 - `helm upgrade ... --set rbac.clusterWide=true`
 - Move the Automation into the target's namespace and drop `target.namespace`. Automations are namespaced precisely so they can live next to what they act on.
 
-> With `rbac.clusterWide: false`, Automations outside the release namespace are not reconciled at all — the operator has no permission to watch them, so they never get a status. If a resource you created is showing no status whatsoever, check this before anything else, and check the operator log for `failed to list` errors.
+> With `rbac.clusterWide: false`, the operator watches only the release namespace, and Automations outside it are not reconciled at all — they never get a status. If a resource you created is showing no status whatsoever, check this before anything else. The chart passes the scope to the operator as `WATCH_NAMESPACE`; without it a namespaced install would watch every namespace, be refused at every list, and sit there reporting itself healthy while reconciling nothing.
 
 ---
 

@@ -38,6 +38,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -146,6 +147,16 @@ func logKubernetesVersion(config *rest.Config) {
 	setupLog.Info("Kubernetes version detected", "version", version)
 }
 
+// watchNamespace is the single namespace Reactor is allowed to see, or "" for
+// the whole cluster. The chart sets it precisely when it grants namespace-
+// scoped RBAC: a cluster-scoped informer under a namespaced Role is forbidden,
+// and controller-runtime answers that by retrying the failed list forever while
+// the health probes keep reporting the pod ready — an operator that looks
+// healthy and reconciles nothing.
+func watchNamespace() string {
+	return strings.TrimSpace(os.Getenv("WATCH_NAMESPACE"))
+}
+
 // runReleaseClaims hands every claimed target back and exits. It talks to the
 // API server directly rather than through a manager's cache, because it has to
 // finish inside an uninstall rather than run for as long as the process lives.
@@ -155,7 +166,11 @@ func runReleaseClaims() error {
 	if err != nil {
 		return err
 	}
-	return controller.ReleaseAllClaims(logf.IntoContext(ctx, ctrl.Log.WithName("release-claims")), c)
+	options := controller.ReleaseOptions{
+		Namespace: watchNamespace(),
+	}
+	return controller.ReleaseAllClaims(
+		logf.IntoContext(ctx, ctrl.Log.WithName("release-claims")), c, options)
 }
 
 // nolint:gocyclo
@@ -283,8 +298,18 @@ func main() {
 	// the action failed.
 	restConfig.WarningHandler = targetAdmissionWarnings{log: ctrl.Log.WithName("target-warning")}
 
+	// Scoped to match the RBAC the operator was actually granted, so a
+	// namespaced install watches what it may read instead of failing every list
+	// at cluster scope.
+	cacheOptions := cache.Options{}
+	if namespace := watchNamespace(); namespace != "" {
+		cacheOptions.DefaultNamespaces = map[string]cache.Config{namespace: {}}
+		setupLog.Info("Watching a single namespace", "namespace", namespace)
+	}
+
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
+		Cache:                  cacheOptions,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,

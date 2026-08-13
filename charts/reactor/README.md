@@ -435,6 +435,6 @@ networkPolicy:
 | `actions.allowedDestinations` | `[]` | Where outbound actions may go. Empty refuses all of them; see [Outbound actions](#outbound-actions) |
 | `uninstall.releaseClaims` | `true` | Run a pre-delete Job that hands every held workload back before the operator is removed |
 | `uninstall.timeoutSeconds` | `120` | Hard bound on that Job, so a stuck release delays rather than blocks the uninstall |
-| `rbac.clusterWide` | `true` | `false` restricts the operator to the release namespace (cross-namespace `target.namespace` stops working) |
+| `rbac.clusterWide` | `true` | `false` restricts the operator to watching and acting on the release namespace only (cross-namespace `target.namespace` stops working, and Automations elsewhere are not reconciled at all) |
 | `image.repository` | `ghcr.io/robbeverhelst/unifi-reactor` | Manager image |
 | `image.tag` | chart `appVersion` | Image tag |

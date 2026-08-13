@@ -48,6 +48,8 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - --release-claims
+          env:
+            {{- include "reactor.watchNamespaceEnv" . | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

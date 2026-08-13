@@ -18,9 +18,9 @@ limitations under the License.
 //
 // These are render-time tests: they prove the CRD is part of the release (so
 // `helm upgrade` applies it) rather than a crds/ file Helm would install once
-// and never touch again. Proving the upgrade end to end — install an old
-// chart, upgrade, read the live schema back from the API server — needs a real
-// cluster and belongs with the chart e2e work in #35.
+// and never touch again. The upgrade itself — install the old packaging,
+// adopt the CRD, upgrade, and read the live schema back from the API server —
+// is proven end to end by test/e2e/lifecycle, which needs a real cluster.
 package chart
 
 import (
@@ -164,6 +164,24 @@ func TestCredentialsAreMountedForRotation(t *testing.T) {
 	}
 	if !strings.Contains(manifests, "secretName: \"unifi-reactor-credentials\"") {
 		t.Fatal("the credentials Secret is not mounted")
+	}
+}
+
+// TestNamespacedRBACScopesTheWatch covers the pairing that makes
+// rbac.clusterWide=false usable at all. A namespaced Role grants no
+// cluster-wide list, so an operator left watching every namespace is refused
+// at every list and reconciles nothing — while its health probes, which only
+// ping, keep reporting it ready.
+func TestNamespacedRBACScopesTheWatch(t *testing.T) {
+	scoped := render(t, unifiURL, "rbac.clusterWide=false")
+	if !strings.Contains(scoped, "name: WATCH_NAMESPACE") {
+		t.Fatal("namespace-scoped RBAC did not tell the operator which namespace it may watch")
+	}
+	if strings.Contains(scoped, "kind: ClusterRole") {
+		t.Fatal("rbac.clusterWide=false still rendered cluster-scoped RBAC")
+	}
+	if wide := render(t, unifiURL); strings.Contains(wide, "name: WATCH_NAMESPACE") {
+		t.Fatal("a cluster-wide install was restricted to one namespace")
 	}
 }
 
