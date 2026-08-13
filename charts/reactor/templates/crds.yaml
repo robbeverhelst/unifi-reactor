@@ -30,6 +30,9 @@ spec:
     - jsonPath: .status.matching
       name: Matching
       type: boolean
+    - jsonPath: .spec.suspend
+      name: Suspended
+      type: boolean
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
       type: string
@@ -196,6 +199,24 @@ spec:
                 - Baseline
                 - None
                 type: string
+              suspend:
+                default: false
+                description: |-
+                  Suspend takes this Automation out of force without deleting it: it goes
+                  on observing state and reporting it, and stops claiming its targets
+                  entirely.
+
+                  Suspending is a reversible delete, not a freeze. Targets are arbitrated
+                  as if this Automation did not exist, so whatever it was holding down is
+                  handed back to the other Automations claiming it — or, if none do, to
+                  this Automation's own spec.reversal, exactly as deleting it would. Which
+                  also means a suspended Automation writes nothing and can hold nothing
+                  down: scale its targets by hand while you work.
+
+                  Resuming re-evaluates against current state rather than replaying
+                  anything, so an Automation whose condition still holds re-claims its
+                  targets on the next reconcile.
+                type: boolean
               when:
                 description: 'When is a state trigger: active while the provider state
                   matches.'

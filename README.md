@@ -106,8 +106,8 @@ spec:
 
 ```sh
 kubectl -n media get automation
-# NAME                           PROVIDER   MATCHING   READY   AGE
-# pause-downloads-on-backup-wan  unifi      false      True    12s
+# NAME                           PROVIDER   MATCHING   SUSPENDED   READY   AGE
+# pause-downloads-on-backup-wan  unifi      false      false       True    12s
 ```
 
 Shedding load during a power cut is the same shape, matching `ups: on-battery` instead.
@@ -118,9 +118,9 @@ qBittorrent genuinely should pause for *both* a metered uplink and a power cut. 
 
 ```sh
 kubectl -n media get automation
-# NAME                    PROVIDER   MATCHING   APPLIED   AGE
-# pause-on-backup-wan     unifi      false      False     3h
-# shed-on-battery         unifi      true       True      3h
+# NAME                    PROVIDER   MATCHING   SUSPENDED   READY   AGE
+# pause-on-backup-wan     unifi      false      false       True    3h
+# shed-on-battery         unifi      true       false       True    3h
 ```
 
 While *any* automation's condition holds, the workload stays at the **most restrictive** replica count asked for. The WAN recovering above does not bring qBittorrent back, because the UPS automation still wants it down — and the automation that lost says so plainly:
@@ -167,6 +167,35 @@ kubectl -n media get automation pause-on-backup-wan -o jsonpath='{.status.condit
 ```
 
 `Ready` tells you whether an automation is healthy; `Applied` tells you whether what it wants is what its targets have. An automation that is outvoted by a more restrictive claim is `Ready=True, Applied=False` — working exactly as intended.
+
+### Pausing an automation
+
+`spec.suspend: true` takes an automation out of force without deleting it — during an incident, while testing, or when one is misbehaving:
+
+```sh
+kubectl -n media patch automation shed-on-battery --type=merge -p '{"spec":{"suspend":true}}'
+
+kubectl -n media get automation
+# NAME                    PROVIDER   MATCHING   SUSPENDED   READY   AGE
+# pause-on-backup-wan     unifi      false      false       True    3h
+# shed-on-battery         unifi      true       true        True    3h
+```
+
+**Suspending is a reversible delete, not a freeze.** A suspended automation keeps observing state and reporting `matching`, `observedState` and `lastTransition` — that is what makes it worth leaving in place while you debug — and stops claiming its targets entirely. Each target is arbitrated as if the automation were not there, so it goes back to whatever the other automations claiming it want, or to this one's [`reversal`](#what-coming-back-means) if none do. It reports `Ready=True`, `Applied=False` with reason `Suspended`.
+
+Deletion gives the same answer, on purpose: "pause this" and "remove this" should not mean different things to a workload one of them is holding down. Two consequences worth knowing:
+
+- **A suspended automation cannot strand a workload**, because it is not holding one. Deleting one is equally uneventful — its finalizer has nothing left to release.
+- **It never fights you.** A suspended automation writes nothing. If it was the only claimant, Reactor's annotations come off the target as it lets go and you can scale that workload by hand; if another automation still claims it, that one is still in charge and `claimed-by` names it.
+
+Resuming re-evaluates against current state and replays nothing: an automation whose condition still holds re-claims its targets on the next reconcile, recording a fresh baseline from whatever the workload is at then.
+
+If what you wanted was "leave the workload exactly where it is", say that explicitly — with nothing else claiming the target, this pauses the automation *and* stops Reactor asserting a value for it:
+
+```sh
+kubectl -n media patch automation shed-on-battery --type=merge \
+  -p '{"spec":{"suspend":true,"reversal":"None"}}'
+```
 
 ### Removing an automation, or Reactor itself
 

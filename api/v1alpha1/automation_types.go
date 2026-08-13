@@ -132,6 +132,24 @@ type AutomationSpec struct {
 	// not. Set None to leave targets wherever they were left.
 	// +optional
 	Reversal ReversalPolicy `json:"reversal,omitempty"`
+
+	// Suspend takes this Automation out of force without deleting it: it goes
+	// on observing state and reporting it, and stops claiming its targets
+	// entirely.
+	//
+	// Suspending is a reversible delete, not a freeze. Targets are arbitrated
+	// as if this Automation did not exist, so whatever it was holding down is
+	// handed back to the other Automations claiming it — or, if none do, to
+	// this Automation's own spec.reversal, exactly as deleting it would. Which
+	// also means a suspended Automation writes nothing and can hold nothing
+	// down: scale its targets by hand while you work.
+	//
+	// Resuming re-evaluates against current state rather than replaying
+	// anything, so an Automation whose condition still holds re-claims its
+	// targets on the next reconcile.
+	// +optional
+	// +kubebuilder:default=false
+	Suspend bool `json:"suspend,omitempty"`
 }
 
 // EffectiveReversal resolves the reversal policy actually in force, applying
@@ -245,6 +263,7 @@ type AutomationStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Provider",type=string,JSONPath=`.spec.when.provider`
 // +kubebuilder:printcolumn:name="Matching",type=boolean,JSONPath=`.status.matching`
+// +kubebuilder:printcolumn:name="Suspended",type=boolean,JSONPath=`.spec.suspend`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
@@ -260,6 +279,16 @@ type Automation struct {
 
 	// +optional
 	Status AutomationStatus `json:"status,omitempty"`
+}
+
+// InForce reports whether this Automation currently claims its targets.
+//
+// Suspension and deletion are the same answer to arbitration: both mean the
+// policy is not in force, so targets resolve as if the Automation were not
+// there. Keeping them identical is what stops "pause this" and "remove this"
+// from having different effects on the workloads being held down.
+func (a *Automation) InForce() bool {
+	return a.DeletionTimestamp.IsZero() && !a.Spec.Suspend
 }
 
 // +kubebuilder:object:root=true
