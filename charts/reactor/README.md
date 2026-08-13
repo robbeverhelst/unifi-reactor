@@ -120,6 +120,11 @@ scaled down would therefore stay down forever, so a `pre-delete` hook Job
 releases every claim first and removes the finalizers that nothing would be
 left to service.
 
+The Job stops the operator before releasing anything. Helm removes the
+release's own resources only once its pre-delete hooks have finished, so a
+controller still running would simply re-claim what the hook released, and
+re-add the finalizer — turning a later `kubectl delete crd` into a hang.
+
 ```sh
 helm uninstall reactor -n reactor-system              # workloads restored
 helm uninstall reactor -n reactor-system --no-hooks   # skip it, leave them as they are

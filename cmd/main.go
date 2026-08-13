@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -166,8 +167,16 @@ func runReleaseClaims() error {
 	if err != nil {
 		return err
 	}
+	// The chart names its own Deployment here so the sweep can stop Reactor
+	// before handing anything back. Helm removes the operator only after its
+	// pre-delete hooks finish, so a controller left running re-claims
+	// everything the sweep just released.
 	options := controller.ReleaseOptions{
 		Namespace: watchNamespace(),
+		Manager: types.NamespacedName{
+			Namespace: os.Getenv("MANAGER_NAMESPACE"),
+			Name:      os.Getenv("MANAGER_DEPLOYMENT"),
+		},
 	}
 	return controller.ReleaseAllClaims(
 		logf.IntoContext(ctx, ctrl.Log.WithName("release-claims")), c, options)

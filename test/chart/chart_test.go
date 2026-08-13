@@ -185,6 +185,23 @@ func TestNamespacedRBACScopesTheWatch(t *testing.T) {
 	}
 }
 
+// TestReleaseHookStopsTheOperator is the ordering the uninstall depends on.
+// Helm removes the release's own resources only after its pre-delete hooks
+// finish, so the hook has to stop the operator itself; one left running
+// re-claims everything the hook released and re-adds the finalizer that by
+// then has nothing to service it.
+func TestReleaseHookStopsTheOperator(t *testing.T) {
+	manifests := render(t, unifiURL)
+	for _, wiring := range []string{"name: MANAGER_DEPLOYMENT", "name: MANAGER_NAMESPACE"} {
+		if !strings.Contains(manifests, wiring) {
+			t.Errorf("the pre-delete hook is not told %q, so it cannot stop the operator first", wiring)
+		}
+	}
+	if disabled := render(t, unifiURL, "uninstall.releaseClaims=false"); strings.Contains(disabled, "kind: Job") {
+		t.Error("uninstall.releaseClaims=false still rendered the release hook")
+	}
+}
+
 // TestOperationalExtrasAreOptOut keeps upgrades boring: an existing install
 // that does not ask for them must render exactly what it rendered before.
 func TestOperationalExtrasAreOptOut(t *testing.T) {

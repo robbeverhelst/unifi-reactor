@@ -607,6 +607,36 @@ var _ = Describe("Automation Controller", func() {
 			}
 		})
 
+		// Helm removes the operator's Deployment only after its pre-delete
+		// hooks have run, so the sweep has to stop Reactor itself. A controller
+		// still watching re-claims everything the sweep just released and
+		// re-adds the finalizer, which by then has nothing left to service it.
+		It("stops the operator before handing anything back", func() {
+			const (
+				target  = "uninstall-with-manager"
+				manager = "reactor-manager"
+			)
+			createDeployment(manager, 1)
+			createDeployment(target, 2)
+			createAutomation(target, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyUPS: upsOnBattery},
+				},
+				Actions: []reactorv1alpha1.Action{scaleTo(target, 0)},
+			})
+
+			observe(map[string]string{keyUPS: upsOnBattery})
+			reconcileOnce(target)
+			Expect(replicasOf(target)).To(Equal(int32(0)))
+
+			Expect(ReleaseAllClaims(ctx, k8sClient, ReleaseOptions{
+				Manager: types.NamespacedName{Namespace: testNamespace, Name: manager},
+			})).To(Succeed())
+
+			Expect(replicasOf(manager)).To(Equal(int32(0)), "the operator was left running during the sweep")
+			Expect(replicasOf(target)).To(Equal(int32(2)))
+		})
+
 		// Namespace-scoped RBAC grants no cluster-wide list, so a sweep that
 		// enumerated every namespace would fail outright and take the uninstall
 		// with it.

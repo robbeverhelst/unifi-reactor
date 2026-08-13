@@ -50,6 +50,14 @@ spec:
             - --release-claims
           env:
             {{- include "reactor.watchNamespaceEnv" . | nindent 12 }}
+            # Helm removes the operator's Deployment only once this hook has
+            # finished, so the hook stops it itself first. A controller still
+            # watching would re-claim every workload the hook just released,
+            # and re-add the finalizer that by then has nothing to service it.
+            - name: MANAGER_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: MANAGER_DEPLOYMENT
+              value: {{ include "reactor.fullname" . | quote }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
