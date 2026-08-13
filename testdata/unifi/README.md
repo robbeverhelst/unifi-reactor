@@ -1,57 +1,50 @@
 # UniFi ground-truth captures
 
-Real responses captured from a UDM Pro (UniFi Network **10.5.67**, UniFi OS, gateway firmware 5.1.26.33914) on 2026-08-11, per the v0.0 spike in the project spec. **Do not invent payload formats** — parsers are built and tested against these files.
+Real responses from a UDM Pro (UniFi Network **10.5.67**, gateway firmware 5.1.26, with a UniFi UPS 2U). Parsers are written and tested against these files — never against assumed formats.
 
-Sanitization: public IPs → TEST-NET-3 (`203.0.113.x`), MAC addresses → `aa:bb:cc:00:11:22`, geo coordinates/city and device serials redacted. Field structure is untouched.
+## Capturing
 
-## `api/` — Network API responses (auth: `X-API-KEY` header, works on both API families)
+```sh
+UNIFI_URL=https://192.168.1.1 UNIFI_API_KEY=<key> ./hack/capture-unifi.sh
+```
 
-| File | Endpoint | Notes |
+That script is the policy. **It keeps an explicit allowlist of fields and discards everything else**, then replaces the few remaining sensitive values with placeholders (public IPs become TEST-NET-3, MACs and site IDs become fixed dummies). Adding a field to a parser means adding it to the allowlist, deliberately, one at a time.
+
+The allowlist matters more than it looks. `stat/device` returns entire device records — roughly 8 KB each, containing device management keys (`x_authkey`), syslog keys, adoption identifiers, and full topology tables. The parser needs about a dozen fields. An earlier version of these fixtures was produced by *removing* the sensitive fields someone thought of rather than *keeping* only the needed ones, and a live credential reached this repository's history as a result. Allowlist, not denylist.
+
+`hack/verify-testdata.sh` runs as part of `make test` and rejects unredacted secret fields, routable IPs outside documentation ranges, and MACs outside the placeholder prefix. It is the safety net, not the mechanism.
+
+## Files
+
+| File | Endpoint | What it documents |
 | --- | --- | --- |
-| `integration-info.json` | `GET /proxy/network/integration/v1/info` | official Integration API; application version |
-| `integration-sites.json` | `GET /proxy/network/integration/v1/sites` | official Integration API; site list (`internalReference: "default"`) |
-| `stat-health.json` | `GET /proxy/network/api/s/default/stat/health` | legacy API; `wan` subsystem: `status`, `wan_ip`, `isp_name`, per-WAN `uptime_stats` (`WAN`, `WAN2`) with monitor availability |
-| `stat-device-gateway.json` | `GET /proxy/network/api/s/default/stat/device` (UDMPRO record only) | `wan1`/`wan2` port state (`is_uplink`, `up`, `ip`), `uplink.name`, `last_wan_status`, `active_geo_info` (ISP of active WAN) |
-| `stat-device-ups.json` | `GET /proxy/network/api/s/default/stat/device` (UniFi UPS 2U record only) | `vbms_table` battery state — see below. Captured on mains power at 100% charge |
+| `api/stat-device-gateway.json` | `GET /proxy/network/api/s/<site>/stat/device` (gateway) | `wan1`/`wan2` (`is_uplink`, `up`, `ifname`, `speed`), `uplink`, `last_wan_status`, `isp` |
+| `api/stat-device-ups.json` | same call, UPS record | `vbms_table` battery state, `outlet_table` |
+| `api/stat-health.json` | `GET /proxy/network/api/s/<site>/stat/health` | per-subsystem `status`, WAN `uptime_stats` monitors, ISP |
+| `api/integration-info.json` | `GET /proxy/network/integration/v1/info` | controller version, for the compatibility guard |
+| `api/integration-sites.json` | `GET /proxy/network/integration/v1/sites` | site listing |
+
+Both API families accept the same `X-API-KEY` header as of Network 10.5.
+
+## WAN state
+
+Captured with WAN1 (ethernet) active and WAN2 (SFP+) enabled but down. The provider derives `wan: primary | backup` from which port reports `is_uplink`.
+
+> ⚠️ **This mapping is inferred, not observed.** No real failover has been captured yet, so which fields actually move during one is unconfirmed. See issue #34. `isp` and `last_wan_status` are captured partly as independent cross-checks.
 
 ## UPS state (`vbms_table`)
 
-A UniFi UPS (UPS 2U, model `USWDA26`) is reported by `stat/device` as a
-switch-type device carrying a `vbms_table` block:
+A UniFi UPS is reported as a switch-type device (`USWDA26`) carrying:
 
 ```json
 {
   "is_battery_mode": false,
-  "battpool": {
-    "batteryLevel": 100,
-    "ischarging": true,
-    "timeToRemain": 1071,
-    "device_total_power_budget": 1000,
-    "device_total_power_output": 300
-  }
+  "battpool": { "batteryLevel": 97, "ischarging": true, "timeToRemain": 1041 }
 }
 ```
 
-`is_battery_mode` is the authoritative mains-vs-battery signal; `batteryLevel`
-is the remaining charge percentage. `timeToRemain` appears to be seconds of
-runtime at the current load (~18 minutes at 300 W of a 1000 W budget), but this
-is inferred and not yet confirmed against a real outage — the provider does not
-depend on it.
+`is_battery_mode` is the authoritative mains-vs-battery signal and `batteryLevel` the remaining charge. `timeToRemain` appears to be seconds of runtime at the current load, but that is inferred from observation and nothing depends on it yet.
 
-The UPS record also carries `nut_client_table` / `nut_client_ips`, so the UPS
-can additionally serve Network UPS Tools clients. Reactor does not use this: the
-state is already in the device poll it performs anyway.
+## Webhooks
 
-## WAN state candidates (to confirm during the failover capture)
-
-Captured while **only WAN1 (Telenet, eth8) is connected**; WAN2 (eth9, SFP+) is enabled but down — the backup uplink was not yet installed. Candidate signals for `wan: primary | backup`:
-
-- `stat/device` gateway `.wan1.is_uplink` / `.wan2.is_uplink` — expected to flip on failover
-- `stat/device` gateway `.uplink.name` (`eth8` = WAN1)
-- `stat/device` gateway `.active_geo_info.WAN.isp_name` (Telenet vs backup ISP)
-- `stat/health` `wan` subsystem `.wan_ip` / `.isp_name`
-- `stat/health` `.uptime_stats.WAN.availability` vs `.uptime_stats.WAN2.availability`
-
-## `webhooks/` — captured Alarm Manager webhook deliveries (pending)
-
-To be captured during the real WAN failover/recovery test. The Integration API has no endpoint for configuring outbound Alarm Manager webhooks — they are configured in the UniFi UI (Alarm Manager → New Alarm → action: Webhook).
+`webhooks/` will hold captured Alarm Manager deliveries. `hack/webhook-logger.mjs` dumps incoming requests verbatim to `webhooks/raw/` (gitignored) — review, allowlist, and sanitize before committing anything from there.

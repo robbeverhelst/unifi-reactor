@@ -1,1 +1,13 @@
-{"offset":0,"limit":25,"count":1,"totalCount":1,"data":[{"id":"88f7af54-98f8-306a-a1c7-c9349722b1f6","internalReference":"default","name":"Default"}]}
+{
+  "offset": 0,
+  "limit": 25,
+  "count": 1,
+  "totalCount": 1,
+  "data": [
+    {
+      "id": "00000000-0000-0000-0000-0000000000ff",
+      "internalReference": "default",
+      "name": "Default"
+    }
+  ]
+}
