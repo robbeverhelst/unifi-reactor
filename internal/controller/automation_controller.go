@@ -51,6 +51,9 @@ const (
 	conditionApplied = "Applied"
 	// providerUniFi is the provider name UniFi observations are stored under.
 	providerUniFi = unifi.ProviderName
+	// reasonTriggerRemoved is reported for an Automation left over from when
+	// the API had a second, never-implemented trigger kind.
+	reasonTriggerRemoved = "EventTriggerRemoved"
 	// actionKubernetesScale is the only action type implemented in v0.1.
 	actionKubernetesScale = "kubernetes.scale"
 	// reevaluateInterval bounds how stale a matching decision can get relative
@@ -204,11 +207,22 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	if automation.Spec.When == nil {
-		// Event triggers are scheduled for v0.2; the schema exists but the
-		// engine does not process them yet.
-		r.setCondition(&automation, conditionReady, metav1.ConditionFalse, "EventTriggersNotImplemented",
-			"spec.trigger automations are not processed yet (v0.2)")
-		return ctrl.Result{}, r.Status().Update(ctx, &automation)
+		// Written before spec.trigger was removed from v1alpha1: the schema no
+		// longer offers a second trigger kind, but objects that used one
+		// survive in etcd. They never did anything — the engine never
+		// processed event triggers — so this is a report, not a migration.
+		//
+		// Deliberately no status write: spec.when is now required, so the API
+		// server rejects any update to an object that has none, status
+		// subresource included. Saying so once per reconcile beats an
+		// error-backoff loop nobody can act on.
+		log.Info("automation has no spec.when and will never act; spec.trigger was removed from v1alpha1, delete it",
+			"automation", claimantOf(&automation))
+		if r.Recorder != nil {
+			r.Recorder.Eventf(&automation, nil, corev1.EventTypeWarning, reasonTriggerRemoved, "Reconcile",
+				"spec.trigger was removed from v1alpha1 and was never implemented; this automation does nothing, delete it")
+		}
+		return ctrl.Result{}, nil
 	}
 
 	// Registered before the first claim is ever made, so there is no window in

@@ -242,6 +242,8 @@ Start with a single `Automation` CRD and keep the provider configuration simple.
 
 The `v1alpha1` API distinguishes state triggers from event triggers from the start, because migrating users from an event-shaped API to a state-shaped API later would be a breaking change for the flagship use case.
 
+> **Decided, and revised:** the *split* is kept — `when` is state-shaped and always will be — but `spec.trigger` is **not** in the `v1alpha1` schema. It shipped through v0.3.0 as a field the engine never processed, which is not a defensible thing to carry into v1. It returns in `v1alpha2` once (a) a real Alarm Manager delivery has been captured in `testdata/`, so a payload matcher is written against observed ground truth rather than an assumed shape, and (b) at least one *edge* action exists for it to run — every action type today declares a level and is arbitrated continuously across the automations sharing a target, which is not something an occurrence can contribute to. The argument in this section is about `when` never having to migrate, and that is satisfied without `trigger` being present but inert. See the README's Stability section.
+
 ### State trigger (preferred for anything that has a state)
 
 ```yaml
@@ -292,6 +294,8 @@ spec:
 ```
 
 An `Automation` specifies exactly one of `when` (state) or `trigger` (event). Exact API naming can be refined during implementation, but the two-kind split itself should be kept.
+
+> As shipped, `v1alpha1` accepts only `when`; the example above is the shape `trigger` will have when it returns, not a schema that exists today.
 
 ## Events and state
 

@@ -29,16 +29,20 @@ import (
 	reactorv1alpha1 "github.com/robbeverhelst/unifi-reactor/api/v1alpha1"
 )
 
-func automation(name, provider, eventType string) *reactorv1alpha1.Automation {
+func automation(name, provider string) *reactorv1alpha1.Automation {
 	a := &reactorv1alpha1.Automation{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-	}
-	if eventType != "" {
-		a.Spec.Trigger = &reactorv1alpha1.EventTrigger{Provider: provider, Event: eventType}
-		return a
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
 	}
 	a.Spec.When = &reactorv1alpha1.StateTrigger{Provider: provider, State: map[string]string{"wan": wanBackupValue}}
 	return a
+}
+
+// legacyAutomation stands in for a resource written before spec.trigger was
+// removed from v1alpha1: it survives in etcd with no spec.when at all.
+func legacyAutomation(name string) *reactorv1alpha1.Automation {
+	return &reactorv1alpha1.Automation{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+	}
 }
 
 // A state change must reach the reconciler immediately. Without this the only
@@ -54,10 +58,10 @@ func TestPollerWakesOnlyItsOwnStateAutomations(t *testing.T) {
 	}
 
 	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		automation("unifi-wan", "unifi", ""),
-		automation("unifi-ups", "unifi", ""),
-		automation("nut-ups", "nut", ""),          // different provider
-		automation("unifi-event", "unifi", "x.y"), // event trigger, not state
+		automation("unifi-wan", "unifi"),
+		automation("unifi-ups", "unifi"),
+		automation("nut-ups", "nut"),    // different provider
+		legacyAutomation("unifi-event"), // no state trigger to evaluate
 	).Build()
 
 	wake := make(chan event.GenericEvent, 16)
@@ -90,8 +94,8 @@ func TestPollerWakeDropsRatherThanBlocking(t *testing.T) {
 		t.Fatalf("adding reactor scheme: %v", err)
 	}
 	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		automation("a", "unifi", ""),
-		automation("b", "unifi", ""),
+		automation("a", "unifi"),
+		automation("b", "unifi"),
 	).Build()
 
 	full := make(chan event.GenericEvent, 1)

@@ -35,21 +35,6 @@ type StateTrigger struct {
 	State map[string]string `json:"state"`
 }
 
-// EventTrigger fires on a genuine point-in-time event, e.g. "client.connected".
-type EventTrigger struct {
-	// Provider is the event provider, e.g. "unifi".
-	// +kubebuilder:validation:MinLength=1
-	Provider string `json:"provider"`
-
-	// Event is the normalized event type, e.g. "client.connected".
-	// +kubebuilder:validation:MinLength=1
-	Event string `json:"event"`
-
-	// Match optionally narrows events by exact payload field values.
-	// +optional
-	Match map[string]string `json:"match,omitempty"`
-}
-
 // TargetRef identifies the Kubernetes object an action operates on.
 type TargetRef struct {
 	// Kind of the target resource. Only "Deployment" is supported in v1alpha1.
@@ -114,22 +99,22 @@ const (
 	ReversalNone ReversalPolicy = "None"
 )
 
-// AutomationSpec defines the desired automation: exactly one trigger kind
-// (state-shaped `when` or event-shaped `trigger`) and the actions to run.
-// +kubebuilder:validation:XValidation:rule="has(self.when) != has(self.trigger)",message="exactly one of spec.when or spec.trigger must be set"
-// +kubebuilder:validation:XValidation:rule="has(self.when) || !has(self.onExit)",message="spec.onExit is only valid with a state trigger (spec.when)"
-// +kubebuilder:validation:XValidation:rule="has(self.when) || !has(self.reversal)",message="spec.reversal is only valid with a state trigger (spec.when)"
+// AutomationSpec defines the desired automation: the state condition to watch
+// and the actions to run while it holds.
+//
+// v1alpha1 has one trigger kind. The event-shaped `spec.trigger` this schema
+// used to accept was removed because nothing implemented it: no captured
+// delivery payload exists to match against, and every action type is a
+// desired-state action that is arbitrated continuously rather than fired on an
+// occurrence. It returns in a later API version once both exist. Nothing about
+// `when` changes when it does.
 // +kubebuilder:validation:XValidation:rule="!has(self.reversal) || self.reversal != 'Declared' || has(self.onExit)",message="spec.reversal: Declared requires spec.onExit"
 type AutomationSpec struct {
 	// When is a state trigger: active while the provider state matches.
-	// +optional
-	When *StateTrigger `json:"when,omitempty"`
+	// +required
+	When *StateTrigger `json:"when"`
 
-	// Trigger is an event trigger for genuine point-in-time events.
-	// +optional
-	Trigger *EventTrigger `json:"trigger,omitempty"`
-
-	// Actions run when the trigger fires (state entered, or event matched).
+	// Actions run while the state condition holds.
 	// +kubebuilder:validation:MinItems=1
 	Actions []Action `json:"actions"`
 

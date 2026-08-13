@@ -58,7 +58,16 @@ status:
 | `ProviderStateUnavailable` | No state has been observed yet for this provider. | [§1](#1-nothing-happens-when-the-state-changes) |
 | `StateKeyUnavailable` | A key this Automation needs vanished from the observation. Last known matching state is held. | [§2](#2-statekeyunavailable-and-held-state) |
 | `ActionFailed` | An action returned an error. `status.lastExecution.reason` has the message. | [§5](#5-rbac-refuses-a-cross-namespace-target), [§6](#6-the-crd-invalid-ownership-metadata-or-a-stale-schema) |
-| `EventTriggersNotImplemented` | The resource uses `spec.trigger`. Event triggers are not processed yet. | Use `spec.when` for anything with an observable current value. |
+
+An Automation left over from before `spec.trigger` was removed has no conditions at all: `spec.when` is now required, so the API server rejects any write to it, status included. It is reported once per reconcile in the operator log and as a Warning Event on the resource instead:
+
+```sh
+kubectl -n media describe automation notify-on-client-connect | tail -5
+# Warning  EventTriggerRemoved  spec.trigger was removed from v1alpha1 and was never
+#          implemented; this automation does nothing, delete it
+```
+
+Delete it. Event triggers never ran on any version, so nothing is lost, and nothing it referenced was ever claimed. See the README's [Stability](../README.md#stability) section for when they come back.
 
 > On v0.3.0, `ActionFailed` is reported with `status: "True"` — a bug where the condition status was not flipped alongside the reason. Read the *reason*, not the status, on that version. Fixed in the target-ownership batch.
 
