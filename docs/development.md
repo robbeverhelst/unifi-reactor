@@ -21,7 +21,7 @@ hack/dev/              demo Automations used by `make dev-hello`
 testdata/unifi/        real captured API responses — the parsers' ground truth
 ```
 
-The engine must never contain provider-specific logic. Providers translate vendor reality into normalized state; the engine only ever sees that. Keeping the seam clean is what lets new providers arrive without touching the core.
+The engine must never contain provider-specific logic. Providers translate vendor reality into normalized state; the engine only ever sees that. Keeping the seam clean is what lets new providers arrive without touching the core — see [Adding a provider](adding-a-provider.md) for the contract and a walkthrough of the UniFi one.
 
 ## Everyday commands
 

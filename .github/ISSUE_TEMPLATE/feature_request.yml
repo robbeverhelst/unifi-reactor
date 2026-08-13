@@ -1,0 +1,68 @@
+name: Feature request
+description: Suggest an action, a provider, or a change to the API
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The [design spec](https://github.com/robbeverhelst/unifi-reactor/blob/main/docs/spec.md)
+        records what is planned and, just as usefully, what is a deliberate non-goal —
+        Reactor is not a general-purpose workflow engine and does not execute arbitrary
+        commands.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: |
+        The situation, not the solution. What is true in your network or cluster, and
+        what should happen because of it?
+      placeholder: |
+        When the UPS goes to battery I want my Proxmox VMs suspended, not just my
+        Kubernetes workloads scaled down.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of change is this?
+      options:
+        - A new action type (something Reactor should do)
+        - A new provider (something Reactor should observe)
+        - A change to the Automation API
+        - Chart / packaging / operations
+        - Documentation
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: shape
+    attributes:
+      label: What would it look like?
+      description: |
+        A sketch of the YAML, or the state keys a provider would publish. Rough is fine —
+        the shape is the useful part.
+      render: yaml
+    validations:
+      required: false
+
+  - type: textarea
+    id: state-or-event
+    attributes:
+      label: For a new provider — is it state or an event?
+      description: |
+        If it has an observable current value, it is state: Reactor can re-observe it
+        after a restart and recover. If it is genuinely point-in-time and cannot be
+        re-observed, it is an event. Most things are state.
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What are you doing today instead?
+      description: A workaround, another tool, or nothing at all. This is useful for prioritising.
+    validations:
+      required: false

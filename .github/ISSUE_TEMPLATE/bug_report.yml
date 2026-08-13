@@ -1,0 +1,102 @@
+name: Bug report
+description: Something does not work as documented
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file this.
+
+        **Two things first:**
+
+        1. [docs/troubleshooting.md](https://github.com/robbeverhelst/unifi-reactor/blob/main/docs/troubleshooting.md)
+           covers the most common reports — nothing happening after a state change,
+           `StateKeyUnavailable`, rotated credentials, a CRD that did not upgrade,
+           RBAC on cross-namespace targets, and workloads left scaled down.
+        2. **Redact before posting.** Logs and resource dumps can contain your public
+           IP, your ISP, internal hostnames, and site identifiers. Nothing below needs
+           any of them.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+      placeholder: |
+        The WAN failed over to the backup uplink and qbittorrent stayed at 1 replica.
+    validations:
+      required: true
+
+  - type: input
+    id: unifi-version
+    attributes:
+      label: UniFi Network version
+      description: UniFi UI → Settings → System, e.g. 10.5.67. Parsers are version-sensitive.
+      placeholder: "10.5.67"
+    validations:
+      required: true
+
+  - type: input
+    id: console-model
+    attributes:
+      label: Console model
+      description: e.g. UDM Pro, UDM SE, Cloud Gateway Ultra, UniFi OS on a Cloud Key.
+      placeholder: "UDM Pro"
+    validations:
+      required: true
+
+  - type: input
+    id: chart-version
+    attributes:
+      label: Chart / image version
+      description: |
+        `helm -n reactor-system list` for the chart, and
+        `kubectl -n reactor-system get deploy reactor -o jsonpath='{.spec.template.spec.containers[0].image}'`
+        for the image. Or `install.yaml` if you did not use Helm.
+      placeholder: "reactor-0.3.0 / ghcr.io/robbeverhelst/unifi-reactor:v0.3.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: automation
+    attributes:
+      label: The Automation and its status
+      description: |
+        `kubectl -n <ns> get automation <name> -o yaml` — the status block is usually
+        where the answer is.
+      render: yaml
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Operator logs
+      description: |
+        `kubectl -n reactor-system logs deploy/reactor --tail=200`.
+        The `state observed`, `state transition`, and `state observation failed` lines
+        matter most. If you can reproduce it, capture them with `--set log.level=debug`.
+      render: text
+    validations:
+      required: false
+
+  - type: dropdown
+    id: hardware
+    attributes:
+      label: Relevant hardware
+      description: Which of these is adopted on the site? Some state keys only exist when the hardware does.
+      multiple: true
+      options:
+        - Gateway with a second WAN configured
+        - UniFi UPS
+        - Neither / not sure
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Cluster distribution, GitOps controller, RBAC mode, or anything unusual about the setup.
+    validations:
+      required: false

@@ -1,0 +1,12 @@
+# Blank issues stay enabled: design notes and roadmap items do not fit a form.
+blank_issues_enabled: true
+contact_links:
+  - name: Troubleshooting guide
+    url: https://github.com/robbeverhelst/unifi-reactor/blob/main/docs/troubleshooting.md
+    about: Nothing happening after a state change, StateKeyUnavailable, credentials, RBAC, stranded workloads.
+  - name: Design spec
+    url: https://github.com/robbeverhelst/unifi-reactor/blob/main/docs/spec.md
+    about: The architecture, the state-first rationale, the roadmap, and the explicit non-goals.
+  - name: Contributing
+    url: https://github.com/robbeverhelst/unifi-reactor/blob/main/CONTRIBUTING.md
+    about: The dev loop, the fixture capture policy, and how to run everything without UniFi hardware.

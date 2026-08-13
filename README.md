@@ -15,6 +15,7 @@
   <a href="#your-first-automation">First automation</a> ·
   <a href="#state-keys">State keys</a> ·
   <a href="#configuration">Configuration</a> ·
+  <a href="docs/troubleshooting.md">Troubleshooting</a> ·
   <a href="docs/spec.md">Design spec</a>
 </p>
 
@@ -68,9 +69,12 @@ kubectl apply -f https://github.com/robbeverhelst/unifi-reactor/releases/latest/
 Confirm it can see your hardware:
 
 ```sh
-kubectl -n reactor-system logs deploy/reactor | grep 'state observed'
-# {"state": {"ups":"online","ups.battery":"normal","wan":"primary"}}
+kubectl -n reactor-system logs deploy/reactor | grep 'state transition'
+# INFO state transition provider=unifi key=ups from= to=online
+# INFO state transition provider=unifi key=wan from= to=primary
 ```
+
+The first observation reports every key it can see, so these lines are your inventory. For the full per-poll state, set `log.level=debug`.
 
 ## Your first automation
 
@@ -127,7 +131,7 @@ Each key is published only when the matching hardware is adopted by your control
       ups.battery: critical
 ```
 
-If a provider stops reporting a key at all — the hardware dropped off the controller — Reactor holds the last known state and reports `Ready=False` with `StateKeyUnavailable` rather than treating lost visibility as a condition that ended.
+If a provider stops reporting a key at all — the hardware dropped off the controller — Reactor holds the last known state and reports `Ready=False` with `StateKeyUnavailable` rather than treating lost visibility as a condition that ended ([what to do about it](docs/troubleshooting.md#2-statekeyunavailable-and-held-state)).
 
 ## Configuration
 
@@ -150,16 +154,21 @@ Chart values ([full reference](charts/reactor/README.md)):
 
 ## Documentation
 
+- [Troubleshooting](docs/troubleshooting.md) — nothing is happening, `StateKeyUnavailable`, credentials, CRD upgrades, RBAC, stranded workloads
+- [Adding a provider](docs/adding-a-provider.md) — the `Observe` contract, the state vocabulary, and the capture policy, walked through the UniFi provider
 - [Design spec](docs/spec.md) — the architecture, the state-first rationale, and the roadmap in full
 - [Chart reference](charts/reactor/README.md) — every value, both RBAC modes
 - [Captured UniFi payloads](testdata/unifi/README.md) — the real API responses every parser is written and tested against
 - [UniFi Alarm Manager API](docs/unifi-alarm-manager-api.md) — reverse-engineered notes on configuring UniFi's outbound webhooks programmatically
 - [Development](docs/development.md) — building, testing, and running against a local cluster
+- [Contributing](CONTRIBUTING.md) — the dev loop, conventional commits, and the fixture capture policy
 - [Security policy](SECURITY.md) — how to report a vulnerability, and how to verify a signed release
 
 ## Stability
 
 Early days: the API group is `v1alpha1` and the project is pre-1.0, so expect breaking changes between minor versions. The two trigger kinds (`when` for state, `trigger` for events) are settled and won't be collapsed — that split exists precisely so state-shaped automations never have to migrate.
+
+**The name stays `unifi-reactor` through v1**, and adding providers does not change that. The user-facing surface is already provider-neutral — the API group is `reactor.robbeverhelst.com`, the kind is `Automation` with a `provider` field, the chart is `reactor`, the namespace is `reactor-system` — so a NUT, Proxmox, or Prometheus provider lands with no breaking change and nothing to migrate. Only the repository, the Go module path, and the image carry the `unifi-` prefix, and those are the surfaces you touch least. Discovery favours the specific name besides: people search for a UniFi Kubernetes operator, and `reactor` alone has a lot of prior art. If a second provider ever gains real users, renaming is a repository rename (GitHub redirects), a transition period publishing the image under both paths, and a major-version bump of the module path — a decision for when it has users, not for a version boundary on its own.
 
 Parsers are written against real captured API responses committed to [`testdata/`](testdata/unifi/), never against assumed formats. One caveat worth stating plainly: the `wan` mapping is derived from a gateway with a second uplink configured, but a genuine failover has not yet been observed end-to-end. Treat `wan` as less battle-tested than `ups`.
 
@@ -175,7 +184,7 @@ Non-goals: replacing UniFi Network or UniFi OS, becoming a general-purpose workf
 
 ## Contributing
 
-PRs welcome. The short version:
+PRs welcome — [CONTRIBUTING.md](CONTRIBUTING.md) has the full version, including the fixture capture policy, which is a genuinely unusual rule and not one you would guess. The short version:
 
 ```sh
 make test          # unit + envtest
@@ -183,7 +192,9 @@ make lint          # golangci-lint
 make dev-deploy DEV_CONTEXT=<your-cluster> UNIFI_URL=... UNIFI_API_KEY=...
 ```
 
-No UniFi hardware needed — `make dev-mock` serves the captured payloads and rehearses a WAN failover or a power outage on demand. Conventional commits; tagging `vX.Y.Z` builds and publishes the multi-arch image, the OCI chart, and `install.yaml` from CI.
+No UniFi hardware needed — `make dev-mock` serves the captured payloads and rehearses a WAN failover or a power outage on demand. Conventional commits; tagging `vX.Y.Z` builds and publishes the multi-arch image, the OCI chart, and `install.yaml` from CI, with [generated release notes standing in for a changelog](CHANGELOG.md).
+
+Bug reports go through the [issue templates](https://github.com/robbeverhelst/unifi-reactor/issues/new/choose), which ask for the four things that make a report reproducible. Participation is covered by the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
