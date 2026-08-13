@@ -20,8 +20,10 @@ import (
 	"crypto/tls"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -35,7 +37,9 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -94,6 +98,51 @@ func init() {
 	// +kubebuilder:scaffold:scheme
 }
 
+// unifiDebounce reads how long a changed UniFi value must hold before Reactor
+// acts on it. The keys arrive as opaque data so the engine stays free of any
+// knowledge of what they mean; deciding that a battery threshold should settle
+// but a WAN failover should not is the provider's call, not the core's.
+func unifiDebounce() (engine.DebounceConfig, error) {
+	config := engine.DebounceConfig{Default: 1, PerKey: map[string]int{}}
+
+	if raw := os.Getenv("UNIFI_DEBOUNCE_DEFAULT"); raw != "" {
+		samples, err := strconv.Atoi(raw)
+		if err != nil {
+			return config, fmt.Errorf("UNIFI_DEBOUNCE_DEFAULT %q: %w", raw, err)
+		}
+		config.Default = samples
+	}
+
+	for pair := range strings.SplitSeq(os.Getenv("UNIFI_DEBOUNCE_KEYS"), ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		key, raw, found := strings.Cut(pair, "=")
+		if !found {
+			return config, fmt.Errorf("UNIFI_DEBOUNCE_KEYS %q is not key=samples", pair)
+		}
+		samples, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil {
+			return config, fmt.Errorf("UNIFI_DEBOUNCE_KEYS %q: %w", pair, err)
+		}
+		config.PerKey[strings.TrimSpace(key)] = samples
+	}
+	return config, nil
+}
+
+// runReleaseClaims hands every claimed target back and exits. It talks to the
+// API server directly rather than through a manager's cache, because it has to
+// finish inside an uninstall rather than run for as long as the process lives.
+func runReleaseClaims() error {
+	ctx := ctrl.SetupSignalHandler()
+	c, err := client.New(ctrl.GetConfigOrDie(), client.Options{Scheme: scheme})
+	if err != nil {
+		return err
+	}
+	return controller.ReleaseAllClaims(logf.IntoContext(ctx, ctrl.Log.WithName("release-claims")), c)
+}
+
 // nolint:gocyclo
 func main() {
 	var metricsAddr string
@@ -103,7 +152,11 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var releaseClaims bool
 	var tlsOpts []func(*tls.Config)
+	flag.BoolVar(&releaseClaims, "release-claims", false,
+		"Hand every target Reactor holds back to what the Automations referencing it want, drop the "+
+			"finalizers, and exit. Run this before removing the operator; the chart's pre-delete hook does it for you.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -196,6 +249,17 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
+	if releaseClaims {
+		// A one-shot mode, deliberately without a manager: it runs from a
+		// pre-delete hook, when the operator's Deployment is about to go away
+		// and leader election would have nothing to elect.
+		if err := runReleaseClaims(); err != nil {
+			setupLog.Error(err, "Failed to release claims")
+			os.Exit(1)
+		}
+		return
+	}
+
 	restConfig := ctrl.GetConfigOrDie()
 	// Admission warnings describe the resource being acted on — typically a
 	// target Deployment's pod spec against its namespace's PodSecurity level —
@@ -228,7 +292,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	store := engine.NewStateStore()
+	debounce, err := unifiDebounce()
+	if err != nil {
+		setupLog.Error(err, "Invalid debounce configuration")
+		os.Exit(1)
+	}
+	store := engine.NewStateStore(engine.WithDebounce(unifi.ProviderName, debounce))
 	// Providers push onto this when they observe a state change so the
 	// affected Automations reconcile immediately; the periodic re-evaluation
 	// in the reconciler is the backstop, not the mechanism.
@@ -288,10 +357,11 @@ func main() {
 	}
 
 	if err := (&controller.AutomationReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Store:  store,
-		Wake:   wake,
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Store:    store,
+		Wake:     wake,
+		Recorder: mgr.GetEventRecorder("automation"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "automation")
 		os.Exit(1)

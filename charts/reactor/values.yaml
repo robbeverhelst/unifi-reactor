@@ -28,6 +28,18 @@ unifi:
     # Only meaningful when a UniFi UPS is adopted; the ups keys are absent otherwise.
     lowBatteryPercent: 30
     criticalBatteryPercent: 10
+  debounce:
+    # How many consecutive observations a *changed* value needs before Reactor
+    # acts on it. Each extra sample costs one pollInterval of reaction time,
+    # so 1 (react on the first observation) is the default: a WAN failover or
+    # a power cut is worth reacting to immediately and neither flaps.
+    default: 1
+    # Per-key overrides. ups.battery is a threshold crossing, so a charge
+    # hovering at the boundary would otherwise report low/normal/low; it
+    # drains over minutes, so spending one more poll to be sure costs nothing.
+    # Keys that flap by nature — client presence, once it exists — want more.
+    keys:
+      ups.battery: 2
   # Name of an existing Secret containing the key UNIFI_API_KEY.
   # Create it with:
   #   kubectl -n <namespace> create secret generic unifi-reactor-credentials \
@@ -41,6 +53,20 @@ log:
   level: info
   # "console" for human-readable logs, "json" for a log collector.
   format: console
+
+uninstall:
+  # Before the operator is removed, hand every workload it is holding back to
+  # what your Automations want once nothing claims them. Helm does not delete
+  # the Automation CRD or your Automation resources on uninstall, so without
+  # this nothing would ever release them and anything scaled to 0 stays there.
+  # Disabling this leaves workloads exactly as they are; each one still records
+  # its pre-Reactor value in a reactor.robbeverhelst.com/baseline-replicas
+  # annotation.
+  releaseClaims: true
+  # Hard bound on the release Job, so a release that cannot finish delays the
+  # uninstall rather than blocking it. Use `helm uninstall --no-hooks` to skip
+  # the hook entirely.
+  timeoutSeconds: 120
 
 rbac:
   # cluster-wide: the operator may act on any namespace, enabling the optional

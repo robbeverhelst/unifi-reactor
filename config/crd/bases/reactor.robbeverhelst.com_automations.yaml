@@ -91,6 +91,16 @@ spec:
                       - kind
                       - name
                       type: object
+                    timeoutSeconds:
+                      description: |-
+                        TimeoutSeconds bounds a single attempt at this action, so an
+                        unreachable target cannot occupy a reconcile indefinitely. Defaults to
+                        30. Exceeding it is recorded as a failed execution and retried with
+                        bounded backoff, not held open.
+                      format: int32
+                      maximum: 600
+                      minimum: 1
+                      type: integer
                     type:
                       description: Type of the action, e.g. "kubernetes.scale".
                       enum:
@@ -103,8 +113,11 @@ spec:
                 type: array
               onExit:
                 description: |-
-                  OnExit actions run when a previously matching state condition stops
-                  matching. Reversal is always explicit, never inferred.
+                  OnExit declares what this Automation wants for its targets once its
+                  condition stops holding. For desired-state actions this is a level that
+                  is arbitrated against every other Automation sharing the target, not a
+                  list executed on the exit edge: leaving the matching state does not
+                  raise a target another Automation still holds down.
                 items:
                   description: |-
                     Action is a single normalized action. Type selects the action provider;
@@ -138,6 +151,16 @@ spec:
                       - kind
                       - name
                       type: object
+                    timeoutSeconds:
+                      description: |-
+                        TimeoutSeconds bounds a single attempt at this action, so an
+                        unreachable target cannot occupy a reconcile indefinitely. Defaults to
+                        30. Exceeding it is recorded as a failed execution and retried with
+                        bounded backoff, not held open.
+                      format: int32
+                      maximum: 600
+                      minimum: 1
+                      type: integer
                     type:
                       description: Type of the action, e.g. "kubernetes.scale".
                       enum:
@@ -147,6 +170,17 @@ spec:
                   - type
                   type: object
                 type: array
+              reversal:
+                description: |-
+                  Reversal selects what this Automation wants while its condition does not
+                  hold. Defaults to Declared when spec.onExit is set, and to Baseline —
+                  restore what the target was before Reactor first touched it — when it is
+                  not. Set None to leave targets wherever they were left.
+                enum:
+                - Declared
+                - Baseline
+                - None
+                type: string
               trigger:
                 description: Trigger is an event trigger for genuine point-in-time
                   events.
@@ -197,13 +231,18 @@ spec:
               rule: has(self.when) != has(self.trigger)
             - message: spec.onExit is only valid with a state trigger (spec.when)
               rule: has(self.when) || !has(self.onExit)
+            - message: spec.reversal is only valid with a state trigger (spec.when)
+              rule: has(self.when) || !has(self.reversal)
+            - message: 'spec.reversal: Declared requires spec.onExit'
+              rule: '!has(self.reversal) || self.reversal != ''Declared'' || has(self.onExit)'
           status:
             description: AutomationStatus is the observed state of an Automation.
             properties:
               conditions:
                 description: |-
                   Conditions represent the current service state. "Ready" reports whether
-                  the Automation is valid and being reconciled.
+                  the Automation is valid and being reconciled; "Applied" reports whether
+                  what it wants is what its targets actually have.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -264,6 +303,13 @@ spec:
                   LastExecution is the outcome of the most recent action run, including
                   onExit runs (recorded for auditability).
                 properties:
+                  attempts:
+                    description: |-
+                      Attempts counts consecutive failures. Retries stop once the budget is
+                      exhausted, leaving the Automation to recover on the next state change
+                      rather than retrying a hopeless action forever.
+                    format: int32
+                    type: integer
                   onExit:
                     description: OnExit is true when this execution ran the onExit
                       actions.
@@ -309,6 +355,51 @@ spec:
                   ObservedState is the provider state relevant to this Automation at the
                   last reconcile, e.g. {"wan": "backup"}.
                 type: object
+              releaseAttempts:
+                description: |-
+                  ReleaseAttempts counts how many times handing this Automation's targets
+                  back has failed during deletion. Deletion gives up once it is exhausted
+                  rather than leaving the resource stuck terminating.
+                format: int32
+                type: integer
+              targets:
+                description: |-
+                  Targets reports the arbitrated outcome per target, explaining why an
+                  Automation that wants something is not getting it.
+                items:
+                  description: |-
+                    TargetStatus reports what this Automation wants for one target and what the
+                    arbitration across every Automation sharing that target actually resolved
+                    to. When the two differ, DeferredBy names who is holding it there.
+                  properties:
+                    deferredBy:
+                      description: |-
+                        DeferredBy names the Automations whose more restrictive claim is holding
+                        the target away from Desired, as "namespace/name". Empty when this
+                        Automation's intent is the one in effect.
+                      items:
+                        type: string
+                      type: array
+                    desired:
+                      description: |-
+                        Desired is the value this Automation alone wants right now, whether it
+                        is currently matching or reversing. Absent when it wants nothing —
+                        reversal None, or a reversal value it has no way to know.
+                      format: int32
+                      type: integer
+                    effective:
+                      description: |-
+                        Effective is the value arbitration resolved to across every Automation
+                        claiming this target. Absent while nothing claims it.
+                      format: int32
+                      type: integer
+                    ref:
+                      description: Ref is the target this entry describes, as "Kind/namespace/name".
+                      type: string
+                  required:
+                  - ref
+                  type: object
+                type: array
             type: object
         required:
         - spec

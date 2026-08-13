@@ -28,7 +28,8 @@ Your UniFi gear already knows all of this. **UniFi Reactor** is a Kubernetes ope
 ## Why this exists
 
 - **State, not events** — Reactor polls the UniFi Network API and reconciles against what it observes. A dropped webhook, a network blip, or a controller restart can't strand your cluster in the wrong mode, because the next observation corrects it. Webhooks are an optimization, never the mechanism of record.
-- **Reversal is explicit** — an automation says what to do when a condition starts holding, and separately what to do when it stops. Nothing is inferred, undoing is never guessed, and every execution is recorded in the resource's status.
+- **Reversal is explicit** — an automation says what to do when a condition starts holding, and separately what it wants once it stops. Nothing is inferred, undoing is never guessed, and every execution is recorded in the resource's status.
+- **One workload, many automations** — a target's replica count is arbitrated across every automation pointing at it, not written by whichever one saw a transition last. Two automations can pause the same workload for unrelated reasons, and it stays paused until *neither* wants it down.
 - **Safe by default** — a dedicated ServiceAccount with exactly the verbs it needs, no `cluster-admin`, no arbitrary shell execution, and credentials read from Kubernetes Secrets. Actions are desired-state (`replicas = 0`), so retrying one is harmless.
 - **Boring to operate** — one static binary in a distroless image, no database, no queue, no UI. Small enough to forget about in a homelab.
 
@@ -43,7 +44,7 @@ flowchart LR
 
 The engine knows nothing about UniFi. A provider converts vendor-specific reality into normalized state, and the engine reconciles your `Automation` resources against it. That seam is what lets other providers — a UPS over NUT, Proxmox, Prometheus alerts — arrive later without touching the core.
 
-Actions run on **transitions only**. Observing `wan: backup` fifty times in a row does nothing fifty times; entering it runs `actions`, leaving it runs `onExit`.
+Observing `wan: backup` fifty times in a row does nothing fifty times. Scaling is a **desired state**, not a command: Reactor works out what every automation currently wants for a workload and reconciles it there, so the result depends only on which conditions hold — never on the order they were observed in.
 
 ## Quickstart
 
@@ -111,6 +112,82 @@ kubectl -n media get automation
 
 Shedding load during a power cut is the same shape, matching `ups: on-battery` instead.
 
+## When two automations share a workload
+
+qBittorrent genuinely should pause for *both* a metered uplink and a power cut. Point both automations at it and nothing has to be coordinated by hand:
+
+```sh
+kubectl -n media get automation
+# NAME                    PROVIDER   MATCHING   APPLIED   AGE
+# pause-on-backup-wan     unifi      false      False     3h
+# shed-on-battery         unifi      true       True      3h
+```
+
+While *any* automation's condition holds, the workload stays at the **most restrictive** replica count asked for. The WAN recovering above does not bring qBittorrent back, because the UPS automation still wants it down — and the automation that lost says so plainly:
+
+```sh
+kubectl -n media get automation pause-on-backup-wan -o jsonpath='{.status.targets[0]}'
+# {"ref":"Deployment/media/qbittorrent","desired":1,"effective":0,
+#  "deferredBy":["media/shed-on-battery"]}
+```
+
+The workload comes back only once **no** automation wants it down.
+
+### What "coming back" means
+
+`onExit` declares the value an automation wants once nothing is holding the workload down. Omit it and Reactor restores the **baseline** — what the workload was set to before it first claimed it, recorded on the Deployment itself:
+
+```sh
+kubectl -n media get deploy qbittorrent -o jsonpath='{.metadata.annotations}'
+# {"reactor.robbeverhelst.com/baseline-replicas":"1",
+#  "reactor.robbeverhelst.com/claimed-by":"media/shed-on-battery",
+#  "reactor.robbeverhelst.com/claimed-at":"2026-08-13T02:41:07Z"}
+```
+
+Those annotations are how a workload explains itself at 3am, and they are removed the moment nothing claims it — after which Reactor asserts nothing and you can scale it by hand freely.
+
+| `spec.reversal` | What the automation wants once nothing claims the target | Default when |
+| --- | --- | --- |
+| `Declared` | the values in `onExit` | `onExit` is set |
+| `Baseline` | whatever the target was before Reactor first claimed it | `onExit` is omitted |
+| `None` | nothing — leave it wherever it was left | never; opt in explicitly |
+
+> **Upgrading from v0.3.0:** an automation with no `onExit` used to leave its workload scaled down permanently. It now restores the baseline instead. Set `reversal: None` to keep the old behaviour.
+
+> **GitOps:** Reactor writes `spec.replicas` and the three annotations above onto target Deployments. If Flux or Argo CD manages those Deployments it will report drift and revert them. Exclude the fields on any workload you let Reactor act on — Argo CD `ignoreDifferences` on `/spec/replicas` and the `reactor.robbeverhelst.com` annotations, or a Flux `patch` with the same exclusions.
+
+### When an action fails
+
+Each action is bounded by `timeoutSeconds` (default 30), so a target that has stopped answering fails and is retried rather than occupying the reconciler. Retries back off exponentially from 2s to a 1-minute cap and stop after five consecutive failures — at which point the automation says so and waits for the next state change instead of retrying forever:
+
+```sh
+kubectl -n media get automation pause-on-backup-wan -o jsonpath='{.status.conditions[?(@.type=="Applied")]}'
+# {"type":"Applied","status":"False","reason":"RetryBudgetExhausted",
+#  "message":"giving up after 5 attempts, will try again on the next state change: ..."}
+```
+
+`Ready` tells you whether an automation is healthy; `Applied` tells you whether what it wants is what its targets have. An automation that is outvoted by a more restrictive claim is `Ready=True, Applied=False` — working exactly as intended.
+
+### Removing an automation, or Reactor itself
+
+Deleting an automation while it is holding a workload down hands the workload back rather than stranding it — a finalizer releases the claim first. Removing the policy removes its effect, even mid-outage, so an automation deleted while the UPS is still on battery brings its workload back up.
+
+`helm uninstall` is the case worth understanding, because Helm does **not** delete the `Automation` CRD or your `Automation` resources. They survive the uninstall and simply stop reconciling. A pre-delete hook therefore releases every claim before the operator goes away, and removes the finalizers, which nothing would be left to service:
+
+```sh
+helm uninstall reactor -n reactor-system    # workloads return to their pre-Reactor values
+helm uninstall reactor -n reactor-system --no-hooks    # skip it; workloads stay where they are
+```
+
+Set `uninstall.releaseClaims: false` to make that skip the default. Either way, every workload keeps its `baseline-replicas` annotation, so what it was before Reactor touched it is always recoverable by hand.
+
+What is **not** covered: deleting the operator's Deployment directly, or losing the cluster. Reactor does not supervise its own absence — the annotations are the answer there. And if you ever delete an automation while the controller is down, its finalizer has nothing to release it:
+
+```sh
+kubectl patch automation <name> -n <namespace> \
+  --type=merge -p '{"metadata":{"finalizers":[]}}'
+```
+
 ## State keys
 
 Each key is published only when the matching hardware is adopted by your controller.
@@ -132,6 +209,22 @@ Each key is published only when the matching hardware is adopted by your control
 ```
 
 If a provider stops reporting a key at all — the hardware dropped off the controller — Reactor holds the last known state and reports `Ready=False` with `StateKeyUnavailable` rather than treating lost visibility as a condition that ended ([what to do about it](docs/troubleshooting.md#2-statekeyunavailable-and-held-state)).
+
+### Settling a noisy signal
+
+A changed value can be required to hold for several consecutive observations before Reactor acts on it, which stops one flapping signal driving repeated actions:
+
+```yaml
+unifi:
+  debounce:
+    default: 1          # react on the first observation
+    keys:
+      ups.battery: 2    # ...but let a threshold crossing settle
+```
+
+Each extra sample costs one `pollInterval` of reaction time, so the default is `1`: a WAN failover and a power cut both deserve an immediate reaction, and neither flaps. `ups.battery` ships at `2` because it is a threshold crossing — a charge hovering at 30% would otherwise report `low`, `normal`, `low` — and because a battery drains over minutes, so spending one more poll to be sure costs nothing. At the default 30s poll that makes a battery-level escalation react in 60s worst case instead of 30s.
+
+Debouncing happens in the shared state store, so every automation sees the same settled value. Two automations can never disagree about the current state and fight over a workload they share.
 
 ## Configuration
 

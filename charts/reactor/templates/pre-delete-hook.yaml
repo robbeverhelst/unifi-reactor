@@ -1,0 +1,66 @@
+{{- if .Values.uninstall.releaseClaims }}
+# Uninstalling Reactor does not delete your Automations — Helm never removes
+# the CRD it installed, so the resources survive and simply stop reconciling.
+# Without this hook, every workload Reactor had scaled down would freeze there
+# with nothing left running that knows why.
+#
+# The Job hands each claimed target back to what its Automations want once
+# nothing claims them, and drops the finalizers, which nothing would be left to
+# service. If it fails, `helm uninstall --no-hooks` skips it — at the cost of
+# leaving workloads where they are, with the baseline still recorded on each
+# target's annotations.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "reactor.fullname" . }}-release-claims
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reactor.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: hook-succeeded,before-hook-creation
+spec:
+  backoffLimit: 1
+  # A hard bound, so a release that cannot finish delays the uninstall rather
+  # than blocking it indefinitely.
+  activeDeadlineSeconds: {{ .Values.uninstall.timeoutSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "reactor.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      # Runs before the release's own resources are removed, so the operator's
+      # ServiceAccount and its permissions are still in place.
+      serviceAccountName: {{ include "reactor.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: release-claims
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --release-claims
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
