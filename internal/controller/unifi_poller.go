@@ -20,25 +20,36 @@ import (
 	"context"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	reactorv1alpha1 "github.com/robbeverhelst/unifi-reactor/api/v1alpha1"
 	"github.com/robbeverhelst/unifi-reactor/internal/engine"
 	"github.com/robbeverhelst/unifi-reactor/internal/events"
 	"github.com/robbeverhelst/unifi-reactor/internal/providers/unifi"
 )
 
-// UniFiPoller periodically observes UniFi WAN state into the shared
-// StateStore. Polling is the source of truth: it makes the system
-// self-healing after restarts and immune to missed webhook deliveries.
+// UniFiPoller periodically observes UniFi state into the shared StateStore.
+// Polling is the source of truth: it makes the system self-healing after
+// restarts and immune to missed webhook deliveries.
 type UniFiPoller struct {
 	Client   *unifi.Client
 	Store    *engine.StateStore
 	Interval time.Duration
+
+	// Reader lists the Automations to wake when state changes. Optional; when
+	// nil, Automations are only re-evaluated on their periodic requeue.
+	Reader client.Reader
+	// Events wakes the controller as soon as a transition is observed, instead
+	// of leaving it to notice on its next periodic re-evaluation.
+	Events chan<- event.GenericEvent
 }
 
 // Start implements manager.Runnable; the manager cancels ctx on shutdown.
 func (p *UniFiPoller) Start(ctx context.Context) error {
 	log := logf.FromContext(ctx).WithName("unifi-poller")
+	ctx = logf.IntoContext(ctx, log)
 	interval := p.Interval
 	if interval <= 0 {
 		interval = 30 * time.Second
@@ -57,11 +68,46 @@ func (p *UniFiPoller) Start(ctx context.Context) error {
 			for _, t := range transitions {
 				log.Info("state transition", "provider", t.Provider, "key", t.Key, "from", t.From, "to", t.To)
 			}
+			if len(transitions) > 0 {
+				p.wake(ctx)
+			}
 		}
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
+		}
+	}
+}
+
+// wake enqueues every Automation driven by this provider for immediate
+// reconciliation. Without it, the only path back into the reconciler after a
+// state change is the periodic requeue, which adds up to one re-evaluation
+// interval of latency to every reaction.
+func (p *UniFiPoller) wake(ctx context.Context) {
+	log := logf.FromContext(ctx)
+	if p.Events == nil || p.Reader == nil {
+		return
+	}
+	var list reactorv1alpha1.AutomationList
+	if err := p.Reader.List(ctx, &list); err != nil {
+		log.Error(err, "listing automations to wake")
+		return
+	}
+	for i := range list.Items {
+		automation := &list.Items[i]
+		if automation.Spec.When == nil || automation.Spec.When.Provider != unifi.ProviderName {
+			continue
+		}
+		select {
+		case p.Events <- event.GenericEvent{Object: automation}:
+		case <-ctx.Done():
+			return
+		default:
+			// Never let a saturated queue stall observation: the periodic
+			// re-evaluation still picks this Automation up.
+			log.V(1).Info("wake queue full, leaving it to periodic re-evaluation",
+				"automation", client.ObjectKeyFromObject(automation))
 		}
 	}
 }

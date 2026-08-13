@@ -27,6 +27,9 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	"github.com/go-logr/logr"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -48,6 +51,21 @@ var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
 )
+
+// targetAdmissionWarnings logs API-server warnings under their own name and at
+// debug level, making clear they describe the target resource rather than the
+// operator, and keeping them out of the INFO stream that reports action
+// results.
+type targetAdmissionWarnings struct {
+	log logr.Logger
+}
+
+func (w targetAdmissionWarnings) HandleWarningHeader(code int, _ string, text string) {
+	if code != 299 || text == "" {
+		return
+	}
+	w.log.V(1).Info("API server warning about a targeted resource; the request itself succeeded", "warning", text)
+}
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -158,7 +176,15 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	restConfig := ctrl.GetConfigOrDie()
+	// Admission warnings describe the resource being acted on — typically a
+	// target Deployment's pod spec against its namespace's PodSecurity level —
+	// and arrive on requests that succeeded. Left on the default handler they
+	// print unstructured at INFO next to action results, where they read like
+	// the action failed.
+	restConfig.WarningHandler = targetAdmissionWarnings{log: ctrl.Log.WithName("target-warning")}
+
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
@@ -183,6 +209,10 @@ func main() {
 	}
 
 	store := engine.NewStateStore()
+	// Providers push onto this when they observe a state change so the
+	// affected Automations reconcile immediately; the periodic re-evaluation
+	// in the reconciler is the backstop, not the mechanism.
+	wake := make(chan event.GenericEvent, 256)
 
 	// The UniFi provider is configured at the controller level (Helm values /
 	// env), not per-Automation: one UniFi console per Reactor install.
@@ -225,6 +255,8 @@ func main() {
 			Client:   unifiClient,
 			Store:    store,
 			Interval: interval,
+			Reader:   mgr.GetClient(),
+			Events:   wake,
 		}
 		if err := mgr.Add(poller); err != nil {
 			setupLog.Error(err, "Failed to add UniFi poller")
@@ -239,6 +271,7 @@ func main() {
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 		Store:  store,
+		Wake:   wake,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "automation")
 		os.Exit(1)

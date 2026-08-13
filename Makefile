@@ -205,6 +205,7 @@ dev-deploy: dev-context ## Build the image and install/upgrade the chart on DEV_
 		--kube-context $(DEV_CONTEXT) --namespace $(DEV_NAMESPACE) \
 		--set unifi.url='$(UNIFI_URL)' \
 		--set unifi.insecureSkipVerify=$(if $(UNIFI_INSECURE_SKIP_VERIFY),$(UNIFI_INSECURE_SKIP_VERIFY),true) \
+		$(if $(UNIFI_POLL_INTERVAL),--set unifi.pollInterval=$(UNIFI_POLL_INTERVAL),) \
 		--set image.repository=$(word 1,$(subst :, ,$(DEV_IMG))) \
 		--set image.tag=$(word 2,$(subst :, ,$(DEV_IMG)))
 	$(KUBECTL_DEV) -n $(DEV_NAMESPACE) rollout restart deployment/$(DEV_RELEASE)

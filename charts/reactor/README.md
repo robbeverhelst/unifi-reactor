@@ -39,6 +39,17 @@ spec:
       replicas: 1
 ```
 
+## Pod Security
+
+The controller pod satisfies the **`restricted`** Pod Security Standard with no exemptions — it sets `runAsNonRoot`, `seccompProfile: RuntimeDefault`, drops all capabilities, and runs with `allowPrivilegeEscalation: false` and a read-only root filesystem. You can label its namespace accordingly without any trial and error:
+
+```sh
+kubectl label namespace reactor-system \
+  pod-security.kubernetes.io/enforce=restricted
+```
+
+Note that the operator patches *other* workloads' Deployments. If a target namespace enforces or warns on `restricted` and the target's own pod spec doesn't comply, the API server returns an admission warning on the otherwise successful patch. That warning describes the target, not Reactor; it is logged under the `target-warning` logger at debug level so it can't be mistaken for a failed action.
+
 ## State keys
 
 The UniFi provider publishes these keys; each is only present when the matching
