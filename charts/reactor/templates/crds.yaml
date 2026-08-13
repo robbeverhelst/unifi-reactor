@@ -337,6 +337,13 @@ spec:
                   ObservedState is the provider state relevant to this Automation at the
                   last reconcile, e.g. {"wan": "backup"}.
                 type: object
+              releaseAttempts:
+                description: |-
+                  ReleaseAttempts counts how many times handing this Automation's targets
+                  back has failed during deletion. Deletion gives up once it is exhausted
+                  rather than leaving the resource stuck terminating.
+                format: int32
+                type: integer
               targets:
                 description: |-
                   Targets reports the arbitrated outcome per target, explaining why an

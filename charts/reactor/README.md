@@ -102,6 +102,31 @@ If Flux or Argo CD manages a target Deployment, exclude `spec.replicas` and the
 `reactor.robbeverhelst.com` annotations from its drift detection, or the two
 controllers will fight over the workload.
 
+## Uninstalling
+
+Helm does not delete the `Automation` CRD or your `Automation` resources on
+uninstall — they survive and simply stop reconciling. Anything Reactor had
+scaled down would therefore stay down forever, so a `pre-delete` hook Job
+releases every claim first and removes the finalizers that nothing would be
+left to service.
+
+```sh
+helm uninstall reactor -n reactor-system              # workloads restored
+helm uninstall reactor -n reactor-system --no-hooks   # skip it, leave them as they are
+```
+
+If the hook fails the uninstall fails; re-run with `--no-hooks` to proceed.
+Workloads keep their `baseline-replicas` annotation either way, so their
+pre-Reactor value is always recoverable by hand.
+
+Deleting an Automation while the controller is down leaves its finalizer with
+nothing to release it:
+
+```sh
+kubectl patch automation <name> -n <namespace> \
+  --type=merge -p '{"metadata":{"finalizers":[]}}'
+```
+
 ## Pod Security
 
 The controller pod satisfies the **`restricted`** Pod Security Standard with no exemptions — it sets `runAsNonRoot`, `seccompProfile: RuntimeDefault`, drops all capabilities, and runs with `allowPrivilegeEscalation: false` and a read-only root filesystem. You can label its namespace accordingly without any trial and error:
@@ -227,6 +252,8 @@ networkPolicy:
 | `podAnnotations` | `{}` | annotations on the pod |
 | `unifi.ups.lowBatteryPercent` | `30` | charge at or below this reports `ups.battery: low` |
 | `unifi.ups.criticalBatteryPercent` | `10` | charge at or below this reports `ups.battery: critical` |
+| `uninstall.releaseClaims` | `true` | Run a pre-delete Job that hands every held workload back before the operator is removed |
+| `uninstall.timeoutSeconds` | `120` | Hard bound on that Job, so a stuck release delays rather than blocks the uninstall |
 | `rbac.clusterWide` | `true` | `false` restricts the operator to the release namespace (cross-namespace `target.namespace` stops working) |
 | `image.repository` | `ghcr.io/robbeverhelst/unifi-reactor` | Manager image |
 | `image.tag` | chart `appVersion` | Image tag |

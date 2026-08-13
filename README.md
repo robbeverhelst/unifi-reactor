@@ -152,6 +152,26 @@ Those annotations are how a workload explains itself at 3am, and they are remove
 
 > **GitOps:** Reactor writes `spec.replicas` and the three annotations above onto target Deployments. If Flux or Argo CD manages those Deployments it will report drift and revert them. Exclude the fields on any workload you let Reactor act on — Argo CD `ignoreDifferences` on `/spec/replicas` and the `reactor.robbeverhelst.com` annotations, or a Flux `patch` with the same exclusions.
 
+### Removing an automation, or Reactor itself
+
+Deleting an automation while it is holding a workload down hands the workload back rather than stranding it — a finalizer releases the claim first. Removing the policy removes its effect, even mid-outage, so an automation deleted while the UPS is still on battery brings its workload back up.
+
+`helm uninstall` is the case worth understanding, because Helm does **not** delete the `Automation` CRD or your `Automation` resources. They survive the uninstall and simply stop reconciling. A pre-delete hook therefore releases every claim before the operator goes away, and removes the finalizers, which nothing would be left to service:
+
+```sh
+helm uninstall reactor -n reactor-system    # workloads return to their pre-Reactor values
+helm uninstall reactor -n reactor-system --no-hooks    # skip it; workloads stay where they are
+```
+
+Set `uninstall.releaseClaims: false` to make that skip the default. Either way, every workload keeps its `baseline-replicas` annotation, so what it was before Reactor touched it is always recoverable by hand.
+
+What is **not** covered: deleting the operator's Deployment directly, or losing the cluster. Reactor does not supervise its own absence — the annotations are the answer there. And if you ever delete an automation while the controller is down, its finalizer has nothing to release it:
+
+```sh
+kubectl patch automation <name> -n <namespace> \
+  --type=merge -p '{"metadata":{"finalizers":[]}}'
+```
+
 ## State keys
 
 Each key is published only when the matching hardware is adopted by your controller.

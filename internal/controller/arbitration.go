@@ -228,7 +228,11 @@ func (r *AutomationReconciler) reconcileTarget(
 	for _, peer := range peers {
 		matching := selfMatching
 		if claimantOf(peer) != claimantOf(self) {
-			matching = r.matchingOf(peer)
+			// A peer being deleted has stopped claiming, exactly as this
+			// Automation does when it is the one being deleted. Its reversal
+			// still counts, which is what restores a workload when the
+			// Automation holding it down is removed mid-outage.
+			matching = peer.DeletionTimestamp.IsZero() && r.matchingOf(peer)
 		}
 		if claim, ok := claimFor(peer, key, matching); ok {
 			claims = append(claims, claim)
@@ -255,7 +259,7 @@ func (r *AutomationReconciler) reconcileTarget(
 		if outcome.desired != nil && *outcome.desired != value {
 			outcome.deferredBy = withoutClaimant(resolution.Winners, claimantOf(self))
 		}
-		changed, err := r.claimTarget(ctx, &deployment, resolution, claims)
+		changed, err := claimTarget(ctx, r.Client, &deployment, resolution, claims)
 		outcome.changed = changed
 		return outcome, err
 
@@ -267,7 +271,7 @@ func (r *AutomationReconciler) reconcileTarget(
 			value := int32(release.Level)
 			level = &value
 		}
-		changed, err := r.releaseTarget(ctx, &deployment, level)
+		changed, err := releaseTarget(ctx, r.Client, &deployment, level)
 		outcome.changed = changed
 		if changed {
 			log.Info("released target", "target", key.String(), "replicas", level)
@@ -350,8 +354,9 @@ func (r *AutomationReconciler) matchingOf(automation *reactorv1alpha1.Automation
 }
 
 // claimTarget writes the resolved value and marks the target as claimed.
-func (r *AutomationReconciler) claimTarget(
+func claimTarget(
 	ctx context.Context,
+	c client.Client,
 	deployment *appsv1.Deployment,
 	resolution engine.Resolution,
 	claims []engine.Intent,
@@ -388,7 +393,7 @@ func (r *AutomationReconciler) claimTarget(
 		return false, nil
 	}
 
-	if err := r.Patch(ctx, deployment, patch); err != nil {
+	if err := c.Patch(ctx, deployment, patch); err != nil {
 		return false, fmt.Errorf("claiming %s/%s at %d replicas: %w",
 			deployment.Namespace, deployment.Name, replicas, err)
 	}
@@ -400,8 +405,9 @@ func (r *AutomationReconciler) claimTarget(
 
 // releaseTarget applies the agreed reversal, if any, and removes Reactor's
 // annotations so that nothing asserts a value for this target any more.
-func (r *AutomationReconciler) releaseTarget(
+func releaseTarget(
 	ctx context.Context,
+	c client.Client,
 	deployment *appsv1.Deployment,
 	level *int32,
 ) (bool, error) {
@@ -423,7 +429,7 @@ func (r *AutomationReconciler) releaseTarget(
 		return false, nil
 	}
 
-	if err := r.Patch(ctx, deployment, patch); err != nil {
+	if err := c.Patch(ctx, deployment, patch); err != nil {
 		return false, fmt.Errorf("releasing %s/%s: %w", deployment.Namespace, deployment.Name, err)
 	}
 	return true, nil

@@ -92,7 +92,18 @@ var _ = Describe("Automation Controller", func() {
 			Spec:       spec,
 		}
 		Expect(k8sClient.Create(ctx, automation)).To(Succeed())
-		DeferCleanup(func() { _ = k8sClient.Delete(ctx, automation) })
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(ctx, automation)
+			// The release finalizer would otherwise leave the resource
+			// terminating for the rest of the suite, where it still shows up
+			// in the List that gathers claimants.
+			var lingering reactorv1alpha1.Automation
+			key := types.NamespacedName{Name: name, Namespace: testNamespace}
+			if err := k8sClient.Get(ctx, key, &lingering); err == nil {
+				lingering.Finalizers = nil
+				_ = k8sClient.Update(ctx, &lingering)
+			}
+		})
 	}
 
 	observe := func(state map[string]string) {
@@ -272,6 +283,97 @@ var _ = Describe("Automation Controller", func() {
 		})
 	})
 
+	Context("when Reactor stops watching", func() {
+		// The realistic version of #39: the UPS is on battery, a workload is
+		// scaled down, and the automation — or the whole operator — goes away.
+		It("hands the target back when a matched automation is deleted", func() {
+			const target = "deleted-while-matched"
+			createDeployment(target, 2)
+			createAutomation(target, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyUPS: upsOnBattery},
+				},
+				Actions: []reactorv1alpha1.Action{scaleTo(target, 0)},
+				OnExit:  []reactorv1alpha1.Action{scaleTo(target, 2)},
+			})
+
+			observe(map[string]string{keyUPS: upsOnBattery})
+			reconcileOnce(target)
+			Expect(replicasOf(target)).To(Equal(int32(0)))
+
+			By("deleting it while the power is still out")
+			var automation reactorv1alpha1.Automation
+			key := types.NamespacedName{Name: target, Namespace: testNamespace}
+			Expect(k8sClient.Get(ctx, key, &automation)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &automation)).To(Succeed())
+			reconcileOnce(target)
+
+			Expect(replicasOf(target)).To(Equal(int32(2)),
+				"removing the automation removes the policy, so the workload comes back")
+			Expect(annotationsOf(target)).NotTo(HaveKey(annotationBaselineReplicas))
+			Expect(k8sClient.Get(ctx, key, &automation)).To(MatchError(ContainSubstring("not found")))
+		})
+
+		It("restores every claimed target and drops finalizers on uninstall", func() {
+			const (
+				declared = "uninstall-declared"
+				baseline = "uninstall-baseline"
+			)
+			createDeployment(declared, 2)
+			createDeployment(baseline, 4)
+			createAutomation(declared, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyUPS: upsOnBattery},
+				},
+				Actions: []reactorv1alpha1.Action{scaleTo(declared, 0)},
+				OnExit:  []reactorv1alpha1.Action{scaleTo(declared, 2)},
+			})
+			createAutomation(baseline, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyUPS: upsOnBattery},
+				},
+				Actions: []reactorv1alpha1.Action{scaleTo(baseline, 1)},
+			})
+
+			observe(map[string]string{keyUPS: upsOnBattery})
+			reconcileOnce(declared)
+			reconcileOnce(baseline)
+			Expect(replicasOf(declared)).To(Equal(int32(0)))
+			Expect(replicasOf(baseline)).To(Equal(int32(1)))
+
+			By("running the pre-delete release with the power still out")
+			Expect(ReleaseAllClaims(ctx, k8sClient)).To(Succeed())
+
+			Expect(replicasOf(declared)).To(Equal(int32(2)), "declared onExit value")
+			Expect(replicasOf(baseline)).To(Equal(int32(4)), "recorded baseline")
+			Expect(annotationsOf(declared)).NotTo(HaveKey(annotationBaselineReplicas))
+			Expect(annotationsOf(baseline)).NotTo(HaveKey(annotationClaimedBy))
+
+			By("leaving nothing that would block a later delete")
+			for _, name := range []string{declared, baseline} {
+				var automation reactorv1alpha1.Automation
+				key := types.NamespacedName{Name: name, Namespace: testNamespace}
+				Expect(k8sClient.Get(ctx, key, &automation)).To(Succeed())
+				Expect(automation.Finalizers).NotTo(ContainElement(finalizerReleaseClaims),
+					"nothing is left running to service a finalizer after uninstall")
+			}
+		})
+
+		It("is a no-op for targets it never claimed", func() {
+			const target = "never-claimed"
+			createDeployment(target, 3)
+			createAutomation(target, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyUPS: upsOnBattery},
+				},
+				Actions: []reactorv1alpha1.Action{scaleTo(target, 0)},
+			})
+
+			Expect(ReleaseAllClaims(ctx, k8sClient)).To(Succeed())
+			Expect(replicasOf(target)).To(Equal(int32(3)))
+		})
+	})
+
 	Context("with two automations sharing a target", func() {
 		const (
 			target = "shared"
@@ -353,6 +455,31 @@ var _ = Describe("Automation Controller", func() {
 			Expect(*status.Targets[0].Desired).To(Equal(int32(1)))
 			Expect(*status.Targets[0].Effective).To(Equal(int32(0)))
 			Expect(status.Targets[0].DeferredBy).To(Equal([]string{testNamespace + "/" + upsed}))
+		})
+
+		It("keeps the target claimed when one of the two is deleted", func() {
+			observe(map[string]string{keyWAN: wanBackup, keyUPS: upsOnBattery})
+			reconcileOnce(wanned)
+			reconcileOnce(upsed)
+			Expect(replicasOf(target)).To(Equal(int32(0)))
+
+			By("deleting the WAN automation while the power is still out")
+			var automation reactorv1alpha1.Automation
+			key := types.NamespacedName{Name: wanned, Namespace: testNamespace}
+			Expect(k8sClient.Get(ctx, key, &automation)).To(Succeed())
+			Expect(automation.Finalizers).To(ContainElement(finalizerReleaseClaims))
+			Expect(k8sClient.Delete(ctx, &automation)).To(Succeed())
+			reconcileOnce(wanned)
+
+			Expect(replicasOf(target)).To(Equal(int32(0)),
+				"the UPS automation still claims this target")
+			Expect(k8sClient.Get(ctx, key, &automation)).To(MatchError(ContainSubstring("not found")),
+				"the finalizer must be released once the target has been handed back")
+
+			By("releasing once the survivor's condition also ends")
+			observe(map[string]string{keyWAN: wanPrimary, keyUPS: upsOnline})
+			reconcileOnce(upsed)
+			Expect(replicasOf(target)).To(Equal(int32(2)))
 		})
 
 		It("claims the target when only one condition holds", func() {

@@ -234,6 +234,12 @@ type AutomationStatus struct {
 	// Automation that wants something is not getting it.
 	// +optional
 	Targets []TargetStatus `json:"targets,omitempty"`
+
+	// ReleaseAttempts counts how many times handing this Automation's targets
+	// back has failed during deletion. Deletion gives up once it is exhausted
+	// rather than leaving the resource stuck terminating.
+	// +optional
+	ReleaseAttempts int32 `json:"releaseAttempts,omitempty"`
 }
 
 // +kubebuilder:object:root=true

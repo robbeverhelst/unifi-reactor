@@ -23,10 +23,13 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -52,6 +55,9 @@ const (
 	// reevaluateInterval bounds how stale a matching decision can get relative
 	// to the poller's StateStore when nothing else triggers a reconcile.
 	reevaluateInterval = 15 * time.Second
+	// releaseRetryInterval is the base delay between attempts to hand a
+	// deleted Automation's targets back.
+	releaseRetryInterval = 5 * time.Second
 )
 
 // desiredStateActions are the action types that express a level — what a
@@ -84,12 +90,18 @@ type AutomationReconciler struct {
 	// re-evaluation. Optional; without it reactions lag by up to one
 	// reevaluateInterval.
 	Wake <-chan event.GenericEvent
+
+	// Recorder surfaces the cases an operator has to know about but would
+	// otherwise only find in logs — notably giving up on releasing a deleted
+	// Automation's targets.
+	Recorder events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=reactor.robbeverhelst.com,resources=automations,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=reactor.robbeverhelst.com,resources=automations/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=reactor.robbeverhelst.com,resources=automations/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // evaluation is one Automation's condition assessed against current state.
 type evaluation struct {
@@ -152,12 +164,24 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	if !automation.DeletionTimestamp.IsZero() {
+		return r.finalize(ctx, &automation)
+	}
+
 	if automation.Spec.When == nil {
 		// Event triggers are scheduled for v0.2; the schema exists but the
 		// engine does not process them yet.
 		r.setCondition(&automation, conditionReady, metav1.ConditionFalse, "EventTriggersNotImplemented",
 			"spec.trigger automations are not processed yet (v0.2)")
 		return ctrl.Result{}, r.Status().Update(ctx, &automation)
+	}
+
+	// Registered before the first claim is ever made, so there is no window in
+	// which Reactor holds a target it would not hand back on deletion.
+	if len(targetsOf(&automation)) > 0 && controllerutil.AddFinalizer(&automation, finalizerReleaseClaims) {
+		if err := r.Update(ctx, &automation); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	assessment := r.evaluate(&automation)
@@ -227,6 +251,49 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: reevaluateInterval}, nil
+}
+
+// finalize hands a deleted Automation's targets back before letting it go.
+//
+// Deletion needs no special arbitration case: an Automation being deleted is
+// simply one that no longer claims anything, so reconciling its targets with
+// matching=false releases them if nothing else claims them, and leaves them
+// alone if something does. The reversal it declared still applies, which is
+// what makes deleting an Automation mid-outage restore the workload rather
+// than strand it.
+func (r *AutomationReconciler) finalize(
+	ctx context.Context,
+	automation *reactorv1alpha1.Automation,
+) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	if !controllerutil.ContainsFinalizer(automation, finalizerReleaseClaims) {
+		return ctrl.Result{}, nil
+	}
+
+	_, err := r.reconcileTargets(ctx, automation, false)
+	if err != nil {
+		attempts := automation.Status.ReleaseAttempts + 1
+		if attempts < maxReleaseAttempts {
+			automation.Status.ReleaseAttempts = attempts
+			r.setCondition(automation, conditionApplied, metav1.ConditionFalse, "ReleaseFailed", err.Error())
+			if statusErr := r.Status().Update(ctx, automation); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return ctrl.Result{RequeueAfter: time.Duration(attempts) * releaseRetryInterval}, nil
+		}
+		// Out of attempts. Let the object go anyway: a workload left where it
+		// was is recoverable — the baseline annotation still records what it
+		// was before — but a resource stuck terminating forever is not.
+		log.Error(err, "giving up releasing targets, removing finalizer anyway",
+			"automation", claimantOf(automation), "attempts", attempts)
+		if r.Recorder != nil {
+			r.Recorder.Eventf(automation, nil, corev1.EventTypeWarning, "ReleaseFailed", "Release",
+				"could not hand targets back after %d attempts, deleting anyway: %v", attempts, err)
+		}
+	}
+
+	controllerutil.RemoveFinalizer(automation, finalizerReleaseClaims)
+	return ctrl.Result{}, r.Update(ctx, automation)
 }
 
 // reconcileTargets arbitrates and writes every target this Automation
