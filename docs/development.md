@@ -69,14 +69,19 @@ Point the operator at it with `UNIFI_URL=http://<your-host>:9443 UNIFI_API_KEY=m
 
 ## Captured payloads
 
-Parsers are written and tested against real responses in [`testdata/unifi/`](../testdata/unifi/README.md), never against assumed formats. When adding support for new hardware or a new state key:
+Parsers are written and tested against real responses in [`testdata/unifi/`](../testdata/unifi/README.md), never against assumed formats. Capture them with:
 
-1. Capture the real response from a live console.
-2. Sanitize it — public IPs, MAC addresses, serials, site IDs, and anything under `x_` (auth keys) must go. Field *structure* stays untouched.
-3. Commit it to `testdata/unifi/api/` and document the fields in that directory's README.
-4. Write the parser against the committed file.
+```sh
+UNIFI_URL=https://192.168.1.1 UNIFI_API_KEY=<key> ./hack/capture-unifi.sh
+```
 
-`hack/webhook-logger.mjs` dumps incoming webhook deliveries verbatim to `testdata/unifi/webhooks/raw/` (gitignored) when capturing from a real Alarm Manager.
+The script **keeps an explicit allowlist of fields and discards everything else**, then replaces the few remaining sensitive values with placeholders. Supporting a new field means adding it to the allowlist in that script, deliberately.
+
+This is allowlist rather than denylist for a reason: `stat/device` returns whole device records containing management keys, syslog keys, and adoption identifiers, and the parser needs a dozen fields out of hundreds. An earlier version of these fixtures stripped the sensitive fields someone thought of instead of keeping only the needed ones, and a live credential reached this repository's history as a result.
+
+`make test` runs `hack/verify-testdata.sh`, which rejects unredacted secret fields, routable IPs, and real MACs. That is the safety net; the capture script is the mechanism.
+
+`hack/webhook-logger.mjs` dumps incoming webhook deliveries verbatim to `testdata/unifi/webhooks/raw/` (gitignored) when capturing from a real Alarm Manager. Apply the same allowlist discipline before committing any of it.
 
 ## Releasing
 
