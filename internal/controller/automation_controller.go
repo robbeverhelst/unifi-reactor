@@ -146,7 +146,7 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				execution.Status = "Failed"
 				execution.Reason = err.Error()
 				automation.Status.LastExecution = execution
-				r.setReady(&automation, metav1.ConditionTrue, "ActionFailed", err.Error())
+				r.setReady(&automation, metav1.ConditionFalse, "ActionFailed", err.Error())
 				if statusErr := r.Status().Update(ctx, &automation); statusErr != nil {
 					return ctrl.Result{}, statusErr
 				}
