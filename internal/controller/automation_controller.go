@@ -32,12 +32,13 @@ import (
 
 	reactorv1alpha1 "github.com/robbeverhelst/unifi-reactor/api/v1alpha1"
 	"github.com/robbeverhelst/unifi-reactor/internal/engine"
+	"github.com/robbeverhelst/unifi-reactor/internal/providers/unifi"
 )
 
 const (
 	conditionReady = "Ready"
 	// providerUniFi is the provider name UniFi observations are stored under.
-	providerUniFi = "unifi"
+	providerUniFi = unifi.ProviderName
 	// actionKubernetesScale is the only action type implemented in v0.1.
 	actionKubernetesScale = "kubernetes.scale"
 	// reevaluateInterval bounds how stale a matching decision can get relative

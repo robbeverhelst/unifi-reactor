@@ -13,6 +13,11 @@ unifi:
   pollInterval: 30s
   # UniFi OS consoles serve a self-signed certificate by default.
   insecureSkipVerify: true
+  ups:
+    # Battery charge (%) at or below which ups.battery reports "low" / "critical".
+    # Only meaningful when a UniFi UPS is adopted; the ups keys are absent otherwise.
+    lowBatteryPercent: 30
+    criticalBatteryPercent: 10
   # Name of an existing Secret containing the key UNIFI_API_KEY.
   # Create it with:
   #   kubectl -n <namespace> create secret generic unifi-reactor-credentials \

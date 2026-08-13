@@ -47,11 +47,11 @@ func (p *UniFiPoller) Start(ctx context.Context) error {
 	defer ticker.Stop()
 
 	for {
-		state, err := p.Client.ObserveWANState(ctx)
+		state, err := p.Client.Observe(ctx)
 		if err != nil {
 			log.Error(err, "state observation failed")
 		} else {
-			observation := events.Observation{Provider: providerUniFi, State: state, ObservedAt: time.Now()}
+			observation := events.Observation{Provider: unifi.ProviderName, State: state, ObservedAt: time.Now()}
 			transitions := p.Store.Observe(observation)
 			log.V(1).Info("state observed", "state", state)
 			for _, t := range transitions {

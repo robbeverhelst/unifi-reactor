@@ -1,0 +1,313 @@
+{
+  "meta": {
+    "rc": "ok"
+  },
+  "data": [
+    {
+      "required_version": "1.3.4",
+      "last_seen": 1786627178,
+      "type": "usw",
+      "board_rev": 3,
+      "setup_id": "REDACTED",
+      "hw_caps": 128,
+      "reboot_duration": 60,
+      "config_network": {
+        "ip": "192.168.1.20",
+        "type": "dhcp"
+      },
+      "outlet_table": [
+        {
+          "index": 1,
+          "relay_group": 1,
+          "relay_state": true,
+          "cycle_enabled": false,
+          "name": "Outlet 1",
+          "outlet_caps": 65549
+        },
+        {
+          "index": 2,
+          "relay_group": 1,
+          "relay_state": true,
+          "cycle_enabled": false,
+          "name": "Outlet 2",
+          "outlet_caps": 65549
+        },
+        {
+          "index": 3,
+          "relay_group": 1,
+          "relay_state": true,
+          "cycle_enabled": false,
+          "name": "Outlet 3",
+          "outlet_caps": 65549
+        },
+        {
+          "index": 4,
+          "relay_group": 1,
+          "relay_state": true,
+          "cycle_enabled": false,
+          "name": "Outlet 4",
+          "outlet_caps": 65549
+        },
+        {
+          "index": 5,
+          "relay_group": 2,
+          "relay_state": true,
+          "cycle_enabled": false,
+          "name": "Outlet 5",
+          "outlet_caps": 65541
+        },
+        {
+          "index": 6,
+          "relay_group": 2,
+          "relay_state": true,
+          "cycle_enabled": false,
+          "name": "Outlet 6",
+          "outlet_caps": 65541
+        },
+        {
+          "index": 7,
+          "relay_group": 2,
+          "relay_state": true,
+          "cycle_enabled": false,
+          "name": "Outlet 7",
+          "outlet_caps": 65541
+        },
+        {
+          "index": 8,
+          "relay_group": 2,
+          "relay_state": true,
+          "cycle_enabled": false,
+          "name": "Outlet 8",
+          "outlet_caps": 65541
+        }
+      ],
+      "syslog_key": "REDACTED",
+      "model": "USWDA26",
+      "previous_firmware_version": "1.4.12.301",
+      "slimcfg_caps": 0,
+      "sysid": 55846,
+      "ip": "192.168.1.129",
+      "fw2_caps": 0,
+      "jumboframe_enabled": false,
+      "last_connection_network_name": "Default",
+      "shortname": "UPS26",
+      "version": "1.6.1.413",
+      "adoption_completed": true,
+      "unsupported_reason": 0,
+      "outlet_enabled": true,
+      "anon_id": "REDACTED",
+      "last_connection_network_id": "REDACTED",
+      "previous_firmware_url": "https://fw-download.ubnt.com/data/unifi-firmware/d409-USWDA26-1.4.12-af5fa8e0-8b5a-46dd-98bd-4f66d1445b93.bin",
+      "site_id": "0000000000000000000000ff",
+      "adopted_at": 1786540084,
+      "guid": "REDACTED",
+      "fw_caps": 16779264,
+      "_id": "REDACTED",
+      "external_id": "REDACTED",
+      "two_phase_adopt": false,
+      "connected_at": 1786541795,
+      "adoption_caps": 2,
+      "inform_ip": "192.168.1.1",
+      "cfgversion": "3d55fc2dbb3b3799",
+      "mac": "aa:bb:cc:00:11:33",
+      "provisioned_at": 1786541797,
+      "upgrade_duration": 0,
+      "inform_url": "http://unifi:8080/inform",
+      "flowctrl_enabled": false,
+      "unsupported": false,
+      "ble_caps": 0,
+      "fw3_caps": 0,
+      "sys_error_caps": 0,
+      "dot1x_portctrl_enabled": false,
+      "last_uplink": {
+        "port_idx": 1,
+        "uplink_mac": "aa:bb:cc:00:11:44",
+        "uplink_device_name": "US 48",
+        "uplink_remote_port": 1,
+        "type": "wire"
+      },
+      "x_aes_gcm": false,
+      "has_fan": false,
+      "smart_power_caps": 143,
+      "outlet_overrides": [
+        {
+          "cycle_enabled": false,
+          "name": "Outlet 1",
+          "relay_state": true,
+          "index": 1
+        },
+        {
+          "cycle_enabled": false,
+          "name": "Outlet 2",
+          "relay_state": true,
+          "index": 2
+        },
+        {
+          "cycle_enabled": false,
+          "name": "Outlet 3",
+          "relay_state": true,
+          "index": 3
+        },
+        {
+          "cycle_enabled": false,
+          "name": "Outlet 4",
+          "relay_state": true,
+          "index": 4
+        },
+        {
+          "cycle_enabled": false,
+          "name": "Outlet 5",
+          "relay_state": true,
+          "index": 5
+        },
+        {
+          "cycle_enabled": false,
+          "name": "Outlet 6",
+          "relay_state": true,
+          "index": 6
+        },
+        {
+          "cycle_enabled": false,
+          "name": "Outlet 7",
+          "relay_state": true,
+          "index": 7
+        },
+        {
+          "cycle_enabled": false,
+          "name": "Outlet 8",
+          "relay_state": true,
+          "index": 8
+        }
+      ],
+      "model_incompatible": false,
+      "x_authkey": "REDACTED",
+      "satisfaction": -1,
+      "model_in_eol": false,
+      "anomalies": -1,
+      "has_temperature": false,
+      "switch_caps": {
+        "vlan_caps": 7
+      },
+      "adopted_by_client": "web",
+      "model_in_lts": false,
+      "beep_enabled": true,
+      "serial": "REDACTED",
+      "power_source_ctrl_enabled": false,
+      "adopted": true,
+      "hash_id": "REDACTED",
+      "device_id": "REDACTED",
+      "uplink": {
+        "uplink_mac": "aa:bb:cc:00:11:44",
+        "uplink_device_name": "US 48",
+        "uplink_remote_port": 1,
+        "port_idx": 1,
+        "type": "wire",
+        "tx_bytes": 146908,
+        "rx_bytes": 119168,
+        "tx_packets": 1933,
+        "rx_packets": 1568,
+        "tx_bytes-r": 0.0,
+        "rx_bytes-r": 0.0,
+        "name": "eth0",
+        "mac": "aa:bb:cc:00:11:33",
+        "ip": "192.168.1.129",
+        "netmask": "255.255.255.0",
+        "num_port": 1,
+        "speed": 100,
+        "up": true,
+        "full_duplex": true,
+        "media": "FE",
+        "max_speed": 100,
+        "uplink_source": "lldp_downlink"
+      },
+      "state": 1,
+      "start_connected_millis": 1786541795202,
+      "start_disconnected_millis": 1786541690964,
+      "disconnected_at": 1786541690,
+      "next_interval": 39,
+      "disconnection_reason": "MISSED_INFORM, last_seen '1786541622', considered_lost '1786541632', state: 1",
+      "upgradable": false,
+      "adoptable_when_upgraded": false,
+      "rollupgrade": false,
+      "prev_non_busy_state": 5,
+      "known_cfgversion": "3d55fc2dbb3b3799",
+      "uptime": 87010,
+      "_uptime": 87010,
+      "locating": false,
+      "connect_request_ip": "192.168.1.129",
+      "connect_request_port": "60998",
+      "sys_stats": {},
+      "system-stats": {
+        "mem": "74.5",
+        "cpu": "3.7"
+      },
+      "displayable_version": "1.6.1",
+      "connection_network_id": "REDACTED",
+      "connection_network_name": "Default",
+      "startup_timestamp": 1786540169,
+      "is_access_point": false,
+      "safe_for_autoupgrade": true,
+      "overheating": false,
+      "uplink_depth": 1,
+      "vbms_table": {
+        "battpool": {
+          "batt_available_cnt": 1,
+          "batteryLevel": 100,
+          "battery_avr_time": -1,
+          "device_total_power_budget": 1000,
+          "device_total_power_output": 300,
+          "device_total_power_factor": 0.8417508006095886,
+          "device_output_voltage": 237.60000610351562,
+          "device_bypass_voltage": 237.60000610351562,
+          "device_output_current": 1.5,
+          "ischarging": true,
+          "readycnt": 1,
+          "timeToRemain": 1071
+        },
+        "bms_run_anomaly": 0,
+        "is_battery_mode": false,
+        "battery_table": []
+      },
+      "nut_client_table": [],
+      "nut_client_ips": [],
+      "watched": false,
+      "name": "UPS 2U",
+      "ipv4_lease_expiration_timestamp_seconds": 1786710183,
+      "stat": {
+        "sw": {
+          "site_id": "0000000000000000000000ff",
+          "o": "sw",
+          "oid": "aa:bb:cc:00:11:33",
+          "sw": "aa:bb:cc:00:11:33",
+          "time": 1786540500000,
+          "datetime": "2026-08-12T13:15:00Z",
+          "rx_packets": 0.0,
+          "rx_bytes": 0.0,
+          "rx_errors": 0.0,
+          "rx_dropped": 0.0,
+          "rx_crypts": 0.0,
+          "rx_frags": 0.0,
+          "tx_packets": 0.0,
+          "tx_bytes": 0.0,
+          "tx_errors": 0.0,
+          "tx_dropped": 0.0,
+          "tx_retries": 0.0,
+          "rx_multicast": 0.0,
+          "rx_broadcast": 0.0,
+          "tx_multicast": 0.0,
+          "tx_broadcast": 0.0,
+          "bytes": 0.0,
+          "duration": 8.646E+7
+        }
+      },
+      "tx_bytes": 119168,
+      "rx_bytes": 146908,
+      "bytes": 266076,
+      "link_aggregation_groups": [],
+      "num_sta": 0,
+      "user-num_sta": 0,
+      "guest-num_sta": 0,
+      "x_has_ssh_hostkey": false
+    }
+  ]
+}

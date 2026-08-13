@@ -176,42 +176,54 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
-##@ Dev Environment (bring your own cluster: kind, k3d, orbstack, ... — targets act on the current kubectl context)
+##@ Dev Environment (bring your own cluster: kind, k3d, orbstack, ...)
 
 DEV_IMG ?= unifi-reactor:dev
-DEV_NAMESPACE ?= unifi-reactor-system
+DEV_NAMESPACE ?= reactor-system
+DEV_RELEASE ?= reactor
+# Resolved once, then passed explicitly to every command below: the current
+# context can change between two commands in the same target, and these
+# targets install an operator with cluster-wide RBAC. Pin it with
+# `make dev-deploy DEV_CONTEXT=kind-reactor` to be certain which cluster you hit.
+DEV_CONTEXT ?= $(shell "$(KUBECTL)" config current-context)
+KUBECTL_DEV = "$(KUBECTL)" --context $(DEV_CONTEXT)
+
+.PHONY: dev-context
+dev-context: ## Print the cluster the dev targets will act on.
+	@echo "dev targets will act on context: $(DEV_CONTEXT)"
 
 .PHONY: dev-deploy
-dev-deploy: ## Build the image and deploy CRDs + controller to the current kubectl context.
-	$(MAKE) docker-build IMG=$(DEV_IMG)
-	$(MAKE) install
-	$(MAKE) deploy IMG=$(DEV_IMG)
-
-.PHONY: dev-unifi-env
-dev-unifi-env: ## Point the deployed controller at a UniFi console. Requires UNIFI_URL and UNIFI_API_KEY in the environment.
+dev-deploy: dev-context ## Build the image and install/upgrade the chart on DEV_CONTEXT. Requires UNIFI_URL and UNIFI_API_KEY.
 	@test -n "$(UNIFI_URL)" || (echo "UNIFI_URL is required (e.g. https://192.168.1.1, or your mock's URL)" && exit 1)
 	@test -n "$(UNIFI_API_KEY)" || (echo "UNIFI_API_KEY is required (any value works against the mock)" && exit 1)
-	"$(KUBECTL)" -n $(DEV_NAMESPACE) create secret generic unifi-credentials \
-		--from-literal=UNIFI_URL='$(UNIFI_URL)' \
+	$(MAKE) docker-build IMG=$(DEV_IMG)
+	$(KUBECTL_DEV) create namespace $(DEV_NAMESPACE) --dry-run=client -o yaml | $(KUBECTL_DEV) apply -f -
+	$(KUBECTL_DEV) -n $(DEV_NAMESPACE) create secret generic unifi-reactor-credentials \
 		--from-literal=UNIFI_API_KEY='$(UNIFI_API_KEY)' \
-		--from-literal=UNIFI_INSECURE_SKIP_VERIFY='$(if $(UNIFI_INSECURE_SKIP_VERIFY),$(UNIFI_INSECURE_SKIP_VERIFY),true)' \
-		--dry-run=client -o yaml | "$(KUBECTL)" apply -f -
-	"$(KUBECTL)" -n $(DEV_NAMESPACE) set env deployment/unifi-reactor-controller-manager --from=secret/unifi-credentials
-	"$(KUBECTL)" -n $(DEV_NAMESPACE) rollout restart deployment/unifi-reactor-controller-manager
-	"$(KUBECTL)" -n $(DEV_NAMESPACE) rollout status deployment/unifi-reactor-controller-manager --timeout=90s
+		--dry-run=client -o yaml | $(KUBECTL_DEV) apply -f -
+	$(HELM) upgrade --install $(DEV_RELEASE) charts/reactor \
+		--kube-context $(DEV_CONTEXT) --namespace $(DEV_NAMESPACE) \
+		--set unifi.url='$(UNIFI_URL)' \
+		--set unifi.insecureSkipVerify=$(if $(UNIFI_INSECURE_SKIP_VERIFY),$(UNIFI_INSECURE_SKIP_VERIFY),true) \
+		--set image.repository=$(word 1,$(subst :, ,$(DEV_IMG))) \
+		--set image.tag=$(word 2,$(subst :, ,$(DEV_IMG)))
+	$(KUBECTL_DEV) -n $(DEV_NAMESPACE) rollout restart deployment/$(DEV_RELEASE)
+	$(KUBECTL_DEV) -n $(DEV_NAMESPACE) rollout status deployment/$(DEV_RELEASE) --timeout=120s
 
 .PHONY: dev-hello
-dev-hello: ## Deploy the hello-world demo (nginx scaled by observed WAN state).
-	"$(KUBECTL)" apply -f hack/dev/hello.yaml
+dev-hello: dev-context ## Deploy the hello-world demos (nginx scaled by observed WAN and UPS state).
+	$(KUBECTL_DEV) apply -f hack/dev/hello.yaml
+	$(KUBECTL_DEV) apply -f hack/dev/hello-ups.yaml
 
 .PHONY: dev-mock
-dev-mock: ## Run a mock UniFi API on :9443 serving captured payloads. POST /flip to fail over.
+dev-mock: ## Run a mock UniFi API on :9443 serving captured payloads. POST /flip (WAN) or /ups (power).
 	go run ./hack/mock-unifi
 
 .PHONY: dev-clean
-dev-clean: ## Remove the hello demo and the controller from the current kubectl context.
-	"$(KUBECTL)" delete -f hack/dev/hello.yaml --ignore-not-found=true
-	$(MAKE) undeploy ignore-not-found=true
+dev-clean: dev-context ## Remove the demos and the controller from DEV_CONTEXT.
+	$(KUBECTL_DEV) delete -f hack/dev/hello-ups.yaml --ignore-not-found=true
+	$(KUBECTL_DEV) delete -f hack/dev/hello.yaml --ignore-not-found=true
+	$(HELM) uninstall $(DEV_RELEASE) --kube-context $(DEV_CONTEXT) --namespace $(DEV_NAMESPACE) --ignore-not-found
 
 ##@ Dependencies
 
@@ -222,6 +234,7 @@ $(LOCALBIN):
 
 ## Tool Binaries
 KUBECTL ?= kubectl
+HELM ?= helm
 KIND ?= kind
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen

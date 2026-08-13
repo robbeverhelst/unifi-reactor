@@ -45,6 +45,10 @@ spec:
               value: {{ .Values.unifi.pollInterval | quote }}
             - name: UNIFI_INSECURE_SKIP_VERIFY
               value: {{ .Values.unifi.insecureSkipVerify | quote }}
+            - name: UNIFI_UPS_LOW_BATTERY_PERCENT
+              value: {{ .Values.unifi.ups.lowBatteryPercent | quote }}
+            - name: UNIFI_UPS_CRITICAL_BATTERY_PERCENT
+              value: {{ .Values.unifi.ups.criticalBatteryPercent | quote }}
             - name: UNIFI_API_KEY
               valueFrom:
                 secretKeyRef:
