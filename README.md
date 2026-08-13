@@ -15,6 +15,7 @@
   <a href="#your-first-automation">First automation</a> ·
   <a href="#state-keys">State keys</a> ·
   <a href="#configuration">Configuration</a> ·
+  <a href="docs/troubleshooting.md">Troubleshooting</a> ·
   <a href="docs/spec.md">Design spec</a>
 </p>
 
@@ -68,9 +69,12 @@ kubectl apply -f https://github.com/robbeverhelst/unifi-reactor/releases/latest/
 Confirm it can see your hardware:
 
 ```sh
-kubectl -n reactor-system logs deploy/reactor | grep 'state observed'
-# {"state": {"ups":"online","ups.battery":"normal","wan":"primary"}}
+kubectl -n reactor-system logs deploy/reactor | grep 'state transition'
+# INFO state transition provider=unifi key=ups from= to=online
+# INFO state transition provider=unifi key=wan from= to=primary
 ```
+
+The first observation reports every key it can see, so these lines are your inventory. For the full per-poll state, set `log.level=debug`.
 
 ## Your first automation
 
@@ -127,7 +131,7 @@ Each key is published only when the matching hardware is adopted by your control
       ups.battery: critical
 ```
 
-If a provider stops reporting a key at all — the hardware dropped off the controller — Reactor holds the last known state and reports `Ready=False` with `StateKeyUnavailable` rather than treating lost visibility as a condition that ended.
+If a provider stops reporting a key at all — the hardware dropped off the controller — Reactor holds the last known state and reports `Ready=False` with `StateKeyUnavailable` rather than treating lost visibility as a condition that ended ([what to do about it](docs/troubleshooting.md#2-statekeyunavailable-and-held-state)).
 
 ## Configuration
 
@@ -150,6 +154,8 @@ Chart values ([full reference](charts/reactor/README.md)):
 
 ## Documentation
 
+- [Troubleshooting](docs/troubleshooting.md) — nothing is happening, `StateKeyUnavailable`, credentials, CRD upgrades, RBAC, stranded workloads
+- [Adding a provider](docs/adding-a-provider.md) — the `Observe` contract, the state vocabulary, and the capture policy, walked through the UniFi provider
 - [Design spec](docs/spec.md) — the architecture, the state-first rationale, and the roadmap in full
 - [Chart reference](charts/reactor/README.md) — every value, both RBAC modes
 - [Captured UniFi payloads](testdata/unifi/README.md) — the real API responses every parser is written and tested against
