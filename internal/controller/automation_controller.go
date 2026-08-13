@@ -23,11 +23,8 @@ import (
 	"strings"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -41,7 +38,13 @@ import (
 )
 
 const (
+	// conditionReady reports whether the Automation is valid and reconciling.
 	conditionReady = "Ready"
+	// conditionApplied reports whether what this Automation wants for its
+	// targets is what those targets actually have. The two are separate
+	// because an Automation can be perfectly healthy and still not be the one
+	// deciding a target's value.
+	conditionApplied = "Applied"
 	// providerUniFi is the provider name UniFi observations are stored under.
 	providerUniFi = unifi.ProviderName
 	// actionKubernetesScale is the only action type implemented in v0.1.
@@ -50,6 +53,24 @@ const (
 	// to the poller's StateStore when nothing else triggers a reconcile.
 	reevaluateInterval = 15 * time.Second
 )
+
+// desiredStateActions are the action types that express a level — what a
+// target should be — rather than an occurrence. Only these are arbitrated
+// across the Automations sharing a target, and only these are reconciled
+// continuously rather than run on a transition.
+//
+// Action types absent from this set are edge actions: they fire on their own
+// Automation's transitions, own no target and take part in no arbitration.
+// None exist yet. kubernetes.restart (#16) and the notification actions (#19)
+// will be the first, and they attach to the transition branch in Reconcile
+// rather than to arbitration.
+var desiredStateActions = map[string]bool{
+	actionKubernetesScale: true,
+}
+
+func isDesiredState(actionType string) bool {
+	return desiredStateActions[actionType]
+}
 
 // AutomationReconciler reconciles a Automation object against the provider
 // state observed by the pollers feeding the shared StateStore.
@@ -70,9 +91,59 @@ type AutomationReconciler struct {
 // +kubebuilder:rbac:groups=reactor.robbeverhelst.com,resources=automations/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
 
-// Reconcile evaluates one Automation against current provider state. Actions
-// run only on transitions: entering the matching state runs spec.actions,
-// leaving it runs spec.onExit. Repeated identical observations are no-ops.
+// evaluation is one Automation's condition assessed against current state.
+type evaluation struct {
+	// matching is whether every key the Automation asks for holds its wanted
+	// value. Only meaningful when known is true and missing is empty.
+	matching bool
+	// observed is the subset of provider state this Automation cares about.
+	observed map[string]string
+	// missing lists keys the provider has stopped reporting.
+	missing []string
+	// known is false when the provider has never reported anything.
+	known bool
+}
+
+// evaluate assesses an Automation's condition against the current observation.
+// It never consults status, so the same function serves both the Automation
+// being reconciled and its peers.
+func (r *AutomationReconciler) evaluate(automation *reactorv1alpha1.Automation) evaluation {
+	assessment := evaluation{matching: true, observed: map[string]string{}}
+	if automation.Spec.When == nil {
+		return assessment
+	}
+
+	observation, ok := r.Store.Get(automation.Spec.When.Provider)
+	if !ok {
+		return assessment
+	}
+	assessment.known = true
+
+	for key, want := range automation.Spec.When.State {
+		got, present := observation.State[key]
+		if !present {
+			assessment.missing = append(assessment.missing, key)
+			continue
+		}
+		assessment.observed[key] = got
+		if got != want {
+			assessment.matching = false
+		}
+	}
+	slices.Sort(assessment.missing)
+	return assessment
+}
+
+// Reconcile evaluates one Automation against current provider state and
+// reconciles the desired state of every target it references.
+//
+// A target's value is arbitrated across every Automation referencing it rather
+// than written by whichever one last saw a transition, so the outcome depends
+// only on which conditions currently hold — not on the order they were
+// observed in. Targets are therefore reconciled on every pass, not just on
+// this Automation's own transitions: a peer entering or leaving its state
+// changes what a shared target should be without anything about this one
+// changing.
 func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -84,14 +155,14 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if automation.Spec.When == nil {
 		// Event triggers are scheduled for v0.2; the schema exists but the
 		// engine does not process them yet.
-		r.setReady(&automation, metav1.ConditionFalse, "EventTriggersNotImplemented",
+		r.setCondition(&automation, conditionReady, metav1.ConditionFalse, "EventTriggersNotImplemented",
 			"spec.trigger automations are not processed yet (v0.2)")
 		return ctrl.Result{}, r.Status().Update(ctx, &automation)
 	}
 
-	observation, ok := r.Store.Get(automation.Spec.When.Provider)
-	if !ok {
-		r.setReady(&automation, metav1.ConditionFalse, "ProviderStateUnavailable",
+	assessment := r.evaluate(&automation)
+	if !assessment.known {
+		r.setCondition(&automation, conditionReady, metav1.ConditionFalse, "ProviderStateUnavailable",
 			fmt.Sprintf("no state observed yet for provider %q", automation.Spec.When.Provider))
 		if err := r.Status().Update(ctx, &automation); err != nil {
 			return ctrl.Result{}, err
@@ -99,134 +170,154 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{RequeueAfter: reevaluateInterval}, nil
 	}
 
-	matching := true
-	observed := map[string]string{}
-	var missing []string
-	for key, want := range automation.Spec.When.State {
-		got, present := observation.State[key]
-		if !present {
-			missing = append(missing, key)
-			continue
-		}
-		observed[key] = got
-		if got != want {
-			matching = false
-		}
-	}
-
 	// Losing sight of a state key is not evidence that the condition stopped
 	// holding: the hardware reporting it may simply have dropped off the
-	// controller. Treating it as "no longer matching" would run onExit — e.g.
-	// scaling workloads back up in the middle of a power failure. Hold the
-	// current matching state instead and say so in status.
-	if len(missing) > 0 {
-		slices.Sort(missing)
-		automation.Status.ObservedState = observed
-		r.setReady(&automation, metav1.ConditionFalse, "StateKeyUnavailable",
+	// controller. Treating it as "no longer matching" would drop this
+	// Automation's claim — e.g. releasing workloads in the middle of a power
+	// failure. Hold the current matching state instead and say so in status.
+	if len(assessment.missing) > 0 {
+		automation.Status.ObservedState = assessment.observed
+		r.setCondition(&automation, conditionReady, metav1.ConditionFalse, "StateKeyUnavailable",
 			fmt.Sprintf("provider %q is not reporting %s; holding last known state",
-				automation.Spec.When.Provider, strings.Join(missing, ", ")))
+				automation.Spec.When.Provider, strings.Join(assessment.missing, ", ")))
 		if err := r.Status().Update(ctx, &automation); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: reevaluateInterval}, nil
 	}
 
+	matching := assessment.matching
 	wasMatching := automation.Status.Matching
 	if matching != wasMatching {
-		actions := automation.Spec.Actions
-		onExit := !matching
-		if onExit {
-			actions = automation.Spec.OnExit
-		}
-		log.Info("state transition", "automation", automation.Name, "matching", matching, "onExit", onExit)
-
-		execution := &reactorv1alpha1.ExecutionStatus{Time: metav1.Now(), OnExit: onExit, Status: "Success"}
-		for _, action := range actions {
-			if err := r.execute(ctx, &automation, action); err != nil {
-				execution.Status = "Failed"
-				execution.Reason = err.Error()
-				automation.Status.LastExecution = execution
-				r.setReady(&automation, metav1.ConditionFalse, "ActionFailed", err.Error())
-				if statusErr := r.Status().Update(ctx, &automation); statusErr != nil {
-					return ctrl.Result{}, statusErr
-				}
-				return ctrl.Result{}, err // controller-runtime backoff retries
-			}
-		}
-		if len(actions) > 0 {
-			automation.Status.LastExecution = execution
-		}
-		automation.Status.Matching = matching
-		automation.Status.LastTransition = r.transitionFor(&automation, observation.State)
+		log.Info("state transition", "automation", automation.Name, "matching", matching)
 	}
 
-	automation.Status.ObservedState = observed
-	r.setReady(&automation, metav1.ConditionTrue, "Reconciled", "automation evaluated against observed state")
+	outcomes, applyErr := r.reconcileTargets(ctx, &automation, matching)
+
+	if applyErr == nil {
+		if matching != wasMatching {
+			automation.Status.LastTransition = r.transitionFor(&automation, assessment.observed)
+		}
+		automation.Status.Matching = matching
+	}
+	if changed := slices.ContainsFunc(outcomes, func(o targetOutcome) bool { return o.changed }); changed {
+		automation.Status.LastExecution = &reactorv1alpha1.ExecutionStatus{
+			Time: metav1.Now(), OnExit: !matching, Status: "Success",
+		}
+	}
+	automation.Status.ObservedState = assessment.observed
+	automation.Status.Targets = targetStatuses(outcomes)
+
+	if applyErr != nil {
+		automation.Status.LastExecution = &reactorv1alpha1.ExecutionStatus{
+			Time: metav1.Now(), OnExit: !matching, Status: "Failed", Reason: applyErr.Error(),
+		}
+		r.setCondition(&automation, conditionReady, metav1.ConditionFalse, "ActionFailed", applyErr.Error())
+		r.setCondition(&automation, conditionApplied, metav1.ConditionFalse, "ActionFailed", applyErr.Error())
+		if err := r.Status().Update(ctx, &automation); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, applyErr // controller-runtime backoff retries
+	}
+
+	r.setCondition(&automation, conditionReady, metav1.ConditionTrue, "Reconciled",
+		"automation evaluated against observed state")
+	r.setAppliedCondition(&automation, outcomes)
 	if err := r.Status().Update(ctx, &automation); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: reevaluateInterval}, nil
 }
 
+// reconcileTargets arbitrates and writes every target this Automation
+// references, stopping at the first failure so the error surfaces rather than
+// being masked by a later success.
+func (r *AutomationReconciler) reconcileTargets(
+	ctx context.Context,
+	automation *reactorv1alpha1.Automation,
+	matching bool,
+) ([]targetOutcome, error) {
+	var outcomes []targetOutcome
+	for _, key := range targetsOf(automation) {
+		outcome, err := r.reconcileTarget(ctx, key, automation, matching)
+		outcomes = append(outcomes, outcome)
+		if err != nil {
+			return outcomes, err
+		}
+	}
+	return outcomes, nil
+}
+
+func targetStatuses(outcomes []targetOutcome) []reactorv1alpha1.TargetStatus {
+	if len(outcomes) == 0 {
+		return nil
+	}
+	statuses := make([]reactorv1alpha1.TargetStatus, 0, len(outcomes))
+	for _, outcome := range outcomes {
+		statuses = append(statuses, reactorv1alpha1.TargetStatus{
+			Ref:        outcome.ref,
+			Desired:    outcome.desired,
+			Effective:  outcome.effective,
+			DeferredBy: outcome.deferredBy,
+		})
+	}
+	return statuses
+}
+
+// setAppliedCondition reports whether this Automation's intent is the one in
+// effect. Being outvoted is a normal, healthy outcome — it is how two
+// Automations sharing a workload are meant to behave — so it is reported as
+// Applied=False with an explanation rather than as an error.
+func (r *AutomationReconciler) setAppliedCondition(
+	automation *reactorv1alpha1.Automation,
+	outcomes []targetOutcome,
+) {
+	var deferred []string
+	for _, outcome := range outcomes {
+		if len(outcome.deferredBy) > 0 {
+			deferred = append(deferred, fmt.Sprintf("%s held by %s",
+				outcome.ref, strings.Join(outcome.deferredBy, ", ")))
+		}
+	}
+	if len(deferred) > 0 {
+		r.setCondition(automation, conditionApplied, metav1.ConditionFalse, "DeferredToOtherAutomation",
+			strings.Join(deferred, "; "))
+		return
+	}
+	r.setCondition(automation, conditionApplied, metav1.ConditionTrue, "InEffect",
+		"target state matches what this automation wants")
+}
+
 // transitionFor records the first state key whose value differs from the
 // previously observed one — with single-key triggers (the MVP case) this is
 // exactly the transition that flipped matching.
-func (r *AutomationReconciler) transitionFor(automation *reactorv1alpha1.Automation, current map[string]string) *reactorv1alpha1.StateTransition {
+func (r *AutomationReconciler) transitionFor(
+	automation *reactorv1alpha1.Automation,
+	current map[string]string,
+) *reactorv1alpha1.StateTransition {
 	for key := range automation.Spec.When.State {
 		prev := automation.Status.ObservedState[key]
 		if prev != current[key] {
-			return &reactorv1alpha1.StateTransition{Key: key, From: prev, To: current[key], Time: metav1.Now()}
+			return &reactorv1alpha1.StateTransition{
+				Key: key, From: prev, To: current[key], Time: metav1.Now(),
+			}
 		}
 	}
 	return automation.Status.LastTransition
 }
 
-func (r *AutomationReconciler) execute(ctx context.Context, automation *reactorv1alpha1.Automation, action reactorv1alpha1.Action) error {
-	switch action.Type {
-	case actionKubernetesScale:
-		return r.scale(ctx, automation, action)
-	default:
-		return fmt.Errorf("unsupported action type %q", action.Type)
-	}
-}
-
-func (r *AutomationReconciler) scale(ctx context.Context, automation *reactorv1alpha1.Automation, action reactorv1alpha1.Action) error {
-	if action.Target == nil || action.Replicas == nil {
-		return fmt.Errorf("kubernetes.scale requires target and replicas")
-	}
-	namespace := action.Target.Namespace
-	if namespace == "" {
-		namespace = automation.Namespace
-	}
-
-	var deployment appsv1.Deployment
-	key := types.NamespacedName{Namespace: namespace, Name: action.Target.Name}
-	if err := r.Get(ctx, key, &deployment); err != nil {
-		if errors.IsForbidden(err) {
-			return fmt.Errorf("target %s/%s not reachable with current RBAC (cross-namespace targets need cluster-wide permissions): %w", namespace, action.Target.Name, err)
-		}
-		return fmt.Errorf("getting target %s/%s: %w", namespace, action.Target.Name, err)
-	}
-	if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == *action.Replicas {
-		return nil // desired state already holds; retries stay idempotent
-	}
-	patch := client.MergeFrom(deployment.DeepCopy())
-	deployment.Spec.Replicas = action.Replicas
-	if err := r.Patch(ctx, &deployment, patch); err != nil {
-		return fmt.Errorf("scaling %s/%s to %d: %w", namespace, action.Target.Name, *action.Replicas, err)
-	}
-	logf.FromContext(ctx).Info("executed action", "type", action.Type,
-		"target", fmt.Sprintf("deployment/%s/%s", namespace, action.Target.Name), "replicas", *action.Replicas)
-	return nil
-}
-
-func (r *AutomationReconciler) setReady(automation *reactorv1alpha1.Automation, status metav1.ConditionStatus, reason, message string) {
+func (r *AutomationReconciler) setCondition(
+	automation *reactorv1alpha1.Automation,
+	conditionType string,
+	status metav1.ConditionStatus,
+	reason, message string,
+) {
 	meta := metav1.Condition{
-		Type: conditionReady, Status: status, Reason: reason, Message: message,
+		Type: conditionType, Status: status, Reason: reason, Message: message,
 		ObservedGeneration: automation.Generation,
 	}
 	for i, c := range automation.Status.Conditions {
-		if c.Type == conditionReady {
+		if c.Type == conditionType {
 			if c.Status != status || c.Reason != reason || c.Message != message {
 				meta.LastTransitionTime = metav1.Now()
 				automation.Status.Conditions[i] = meta

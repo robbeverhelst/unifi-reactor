@@ -27,7 +27,8 @@ Your UniFi gear already knows all of this. **UniFi Reactor** is a Kubernetes ope
 ## Why this exists
 
 - **State, not events** — Reactor polls the UniFi Network API and reconciles against what it observes. A dropped webhook, a network blip, or a controller restart can't strand your cluster in the wrong mode, because the next observation corrects it. Webhooks are an optimization, never the mechanism of record.
-- **Reversal is explicit** — an automation says what to do when a condition starts holding, and separately what to do when it stops. Nothing is inferred, undoing is never guessed, and every execution is recorded in the resource's status.
+- **Reversal is explicit** — an automation says what to do when a condition starts holding, and separately what it wants once it stops. Nothing is inferred, undoing is never guessed, and every execution is recorded in the resource's status.
+- **One workload, many automations** — a target's replica count is arbitrated across every automation pointing at it, not written by whichever one saw a transition last. Two automations can pause the same workload for unrelated reasons, and it stays paused until *neither* wants it down.
 - **Safe by default** — a dedicated ServiceAccount with exactly the verbs it needs, no `cluster-admin`, no arbitrary shell execution, and credentials read from Kubernetes Secrets. Actions are desired-state (`replicas = 0`), so retrying one is harmless.
 - **Boring to operate** — one static binary in a distroless image, no database, no queue, no UI. Small enough to forget about in a homelab.
 
@@ -42,7 +43,7 @@ flowchart LR
 
 The engine knows nothing about UniFi. A provider converts vendor-specific reality into normalized state, and the engine reconciles your `Automation` resources against it. That seam is what lets other providers — a UPS over NUT, Proxmox, Prometheus alerts — arrive later without touching the core.
 
-Actions run on **transitions only**. Observing `wan: backup` fifty times in a row does nothing fifty times; entering it runs `actions`, leaving it runs `onExit`.
+Observing `wan: backup` fifty times in a row does nothing fifty times. Scaling is a **desired state**, not a command: Reactor works out what every automation currently wants for a workload and reconciles it there, so the result depends only on which conditions hold — never on the order they were observed in.
 
 ## Quickstart
 
@@ -106,6 +107,50 @@ kubectl -n media get automation
 ```
 
 Shedding load during a power cut is the same shape, matching `ups: on-battery` instead.
+
+## When two automations share a workload
+
+qBittorrent genuinely should pause for *both* a metered uplink and a power cut. Point both automations at it and nothing has to be coordinated by hand:
+
+```sh
+kubectl -n media get automation
+# NAME                    PROVIDER   MATCHING   APPLIED   AGE
+# pause-on-backup-wan     unifi      false      False     3h
+# shed-on-battery         unifi      true       True      3h
+```
+
+While *any* automation's condition holds, the workload stays at the **most restrictive** replica count asked for. The WAN recovering above does not bring qBittorrent back, because the UPS automation still wants it down — and the automation that lost says so plainly:
+
+```sh
+kubectl -n media get automation pause-on-backup-wan -o jsonpath='{.status.targets[0]}'
+# {"ref":"Deployment/media/qbittorrent","desired":1,"effective":0,
+#  "deferredBy":["media/shed-on-battery"]}
+```
+
+The workload comes back only once **no** automation wants it down.
+
+### What "coming back" means
+
+`onExit` declares the value an automation wants once nothing is holding the workload down. Omit it and Reactor restores the **baseline** — what the workload was set to before it first claimed it, recorded on the Deployment itself:
+
+```sh
+kubectl -n media get deploy qbittorrent -o jsonpath='{.metadata.annotations}'
+# {"reactor.robbeverhelst.com/baseline-replicas":"1",
+#  "reactor.robbeverhelst.com/claimed-by":"media/shed-on-battery",
+#  "reactor.robbeverhelst.com/claimed-at":"2026-08-13T02:41:07Z"}
+```
+
+Those annotations are how a workload explains itself at 3am, and they are removed the moment nothing claims it — after which Reactor asserts nothing and you can scale it by hand freely.
+
+| `spec.reversal` | What the automation wants once nothing claims the target | Default when |
+| --- | --- | --- |
+| `Declared` | the values in `onExit` | `onExit` is set |
+| `Baseline` | whatever the target was before Reactor first claimed it | `onExit` is omitted |
+| `None` | nothing — leave it wherever it was left | never; opt in explicitly |
+
+> **Upgrading from v0.3.0:** an automation with no `onExit` used to leave its workload scaled down permanently. It now restores the baseline instead. Set `reversal: None` to keep the old behaviour.
+
+> **GitOps:** Reactor writes `spec.replicas` and the three annotations above onto target Deployments. If Flux or Argo CD manages those Deployments it will report drift and revert them. Exclude the fields on any workload you let Reactor act on — Argo CD `ignoreDifferences` on `/spec/replicas` and the `reactor.robbeverhelst.com` annotations, or a Flux `patch` with the same exclusions.
 
 ## State keys
 

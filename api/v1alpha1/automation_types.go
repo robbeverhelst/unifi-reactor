@@ -84,10 +84,33 @@ type Action struct {
 	Replicas *int32 `json:"replicas,omitempty"`
 }
 
+// ReversalPolicy selects what an Automation wants for its targets while its
+// condition does not hold.
+//
+// A target's value is arbitrated across every Automation that references it,
+// so an Automation is never simply "done" — it always either claims the target
+// or declares what it wants once nothing claims it any more.
+// +kubebuilder:validation:Enum=Declared;Baseline;None
+type ReversalPolicy string
+
+const (
+	// ReversalDeclared restores the values in spec.onExit. The default when
+	// spec.onExit is set.
+	ReversalDeclared ReversalPolicy = "Declared"
+	// ReversalBaseline restores what the target was set to before Reactor
+	// first claimed it. The default when spec.onExit is omitted.
+	ReversalBaseline ReversalPolicy = "Baseline"
+	// ReversalNone leaves the target wherever it was left. Reactor stops
+	// asserting a value for it entirely.
+	ReversalNone ReversalPolicy = "None"
+)
+
 // AutomationSpec defines the desired automation: exactly one trigger kind
 // (state-shaped `when` or event-shaped `trigger`) and the actions to run.
 // +kubebuilder:validation:XValidation:rule="has(self.when) != has(self.trigger)",message="exactly one of spec.when or spec.trigger must be set"
 // +kubebuilder:validation:XValidation:rule="has(self.when) || !has(self.onExit)",message="spec.onExit is only valid with a state trigger (spec.when)"
+// +kubebuilder:validation:XValidation:rule="has(self.when) || !has(self.reversal)",message="spec.reversal is only valid with a state trigger (spec.when)"
+// +kubebuilder:validation:XValidation:rule="!has(self.reversal) || self.reversal != 'Declared' || has(self.onExit)",message="spec.reversal: Declared requires spec.onExit"
 type AutomationSpec struct {
 	// When is a state trigger: active while the provider state matches.
 	// +optional
@@ -101,10 +124,34 @@ type AutomationSpec struct {
 	// +kubebuilder:validation:MinItems=1
 	Actions []Action `json:"actions"`
 
-	// OnExit actions run when a previously matching state condition stops
-	// matching. Reversal is always explicit, never inferred.
+	// OnExit declares what this Automation wants for its targets once its
+	// condition stops holding. For desired-state actions this is a level that
+	// is arbitrated against every other Automation sharing the target, not a
+	// list executed on the exit edge: leaving the matching state does not
+	// raise a target another Automation still holds down.
 	// +optional
 	OnExit []Action `json:"onExit,omitempty"`
+
+	// Reversal selects what this Automation wants while its condition does not
+	// hold. Defaults to Declared when spec.onExit is set, and to Baseline —
+	// restore what the target was before Reactor first touched it — when it is
+	// not. Set None to leave targets wherever they were left.
+	// +optional
+	Reversal ReversalPolicy `json:"reversal,omitempty"`
+}
+
+// EffectiveReversal resolves the reversal policy actually in force, applying
+// the defaults documented on the field. Callers must use this rather than
+// reading spec.reversal, which is empty on every Automation written before the
+// field existed.
+func (s *AutomationSpec) EffectiveReversal() ReversalPolicy {
+	if s.Reversal != "" {
+		return s.Reversal
+	}
+	if len(s.OnExit) > 0 {
+		return ReversalDeclared
+	}
+	return ReversalBaseline
 }
 
 // StateTransition records the last observed provider state transition that
@@ -132,10 +179,36 @@ type ExecutionStatus struct {
 	OnExit bool `json:"onExit,omitempty"`
 }
 
+// TargetStatus reports what this Automation wants for one target and what the
+// arbitration across every Automation sharing that target actually resolved
+// to. When the two differ, DeferredBy names who is holding it there.
+type TargetStatus struct {
+	// Ref is the target this entry describes, as "Kind/namespace/name".
+	Ref string `json:"ref"`
+
+	// Desired is the value this Automation alone wants right now, whether it
+	// is currently matching or reversing. Absent when it wants nothing —
+	// reversal None, or a reversal value it has no way to know.
+	// +optional
+	Desired *int32 `json:"desired,omitempty"`
+
+	// Effective is the value arbitration resolved to across every Automation
+	// claiming this target. Absent while nothing claims it.
+	// +optional
+	Effective *int32 `json:"effective,omitempty"`
+
+	// DeferredBy names the Automations whose more restrictive claim is holding
+	// the target away from Desired, as "namespace/name". Empty when this
+	// Automation's intent is the one in effect.
+	// +optional
+	DeferredBy []string `json:"deferredBy,omitempty"`
+}
+
 // AutomationStatus is the observed state of an Automation.
 type AutomationStatus struct {
 	// Conditions represent the current service state. "Ready" reports whether
-	// the Automation is valid and being reconciled.
+	// the Automation is valid and being reconciled; "Applied" reports whether
+	// what it wants is what its targets actually have.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
@@ -156,6 +229,11 @@ type AutomationStatus struct {
 	// onExit runs (recorded for auditability).
 	// +optional
 	LastExecution *ExecutionStatus `json:"lastExecution,omitempty"`
+
+	// Targets reports the arbitrated outcome per target, explaining why an
+	// Automation that wants something is not getting it.
+	// +optional
+	Targets []TargetStatus `json:"targets,omitempty"`
 }
 
 // +kubebuilder:object:root=true

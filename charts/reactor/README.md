@@ -74,6 +74,34 @@ spec:
       replicas: 1
 ```
 
+## Sharing a target between Automations
+
+A workload's replica count is arbitrated across every Automation referencing
+it: while any of their conditions hold, the target sits at the **most
+restrictive** count asked for, and it is restored only once none of them do.
+`spec.onExit` therefore declares what an Automation *wants* once nothing claims
+the target, not a list run the moment its own condition ends.
+
+Omit `onExit` and the target is restored to its **baseline** — what it was set
+to before Reactor first claimed it. Reactor records that on the Deployment:
+
+```yaml
+metadata:
+  annotations:
+    reactor.robbeverhelst.com/baseline-replicas: "1"
+    reactor.robbeverhelst.com/claimed-by: "media/shed-on-battery"
+    reactor.robbeverhelst.com/claimed-at: "2026-08-13T02:41:07Z"
+```
+
+The annotations are removed when the last claim is released, after which
+Reactor stops asserting a value for that workload entirely. Set
+`spec.reversal: None` to have an Automation leave its targets wherever they
+were left instead.
+
+If Flux or Argo CD manages a target Deployment, exclude `spec.replicas` and the
+`reactor.robbeverhelst.com` annotations from its drift detection, or the two
+controllers will fight over the workload.
+
 ## Pod Security
 
 The controller pod satisfies the **`restricted`** Pod Security Standard with no exemptions — it sets `runAsNonRoot`, `seccompProfile: RuntimeDefault`, drops all capabilities, and runs with `allowPrivilegeEscalation: false` and a read-only root filesystem. You can label its namespace accordingly without any trial and error:
