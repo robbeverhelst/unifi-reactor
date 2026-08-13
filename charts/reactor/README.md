@@ -16,6 +16,16 @@ helm install reactor oci://ghcr.io/robbeverhelst/charts/reactor \
 
 Create an API key in the UniFi UI under Settings → Control Plane → Integrations.
 
+## What this has been tested against
+
+UniFi Network **10.5.67** on a **UDM Pro** with a **UniFi UPS 2U**, and Kubernetes 1.25+ (CI runs
+an envtest 1.36 API server and the current kind default node image). The full matrix, including
+what is expected to work rather than verified, is in the
+[project README](https://github.com/robbeverhelst/unifi-reactor#compatibility).
+
+Reactor logs the UniFi Network version and the Kubernetes version it finds at startup, and warns
+— without refusing to start — when the console is outside that range.
+
 ## The CRD
 
 The `Automation` CRD is a **template** in this chart rather than a file under `crds/`. Helm installs a chart's `crds/` directory on first install and never touches it again on upgrade, silently — so a release that changed the schema would upgrade cleanly while the cluster kept the old CRD, and the operator would start writing fields the API server rejects.
@@ -146,8 +156,15 @@ hardware is adopted by the controller.
 | Key | Values | Source |
 | --- | --- | --- |
 | `wan` | `primary`, `backup` | which uplink the gateway is using |
+| `isp` | a slug (`telenet`), or `unknown` | the carrier behind the live uplink |
 | `ups` | `online`, `on-battery` | whether a UniFi UPS is on mains or battery |
 | `ups.battery` | `normal`, `low`, `critical` | remaining charge vs. the configured thresholds |
+
+`isp` is the only key with an open value set — it is your carrier's name, lowercased with
+non-alphanumerics turned into hyphens. Read it off a state transition line before matching on it.
+It is also Reactor's cross-check on `wan`: the two are independent answers to "did the uplink
+change", and when only one of them moves, Reactor logs the disagreement instead of picking a
+winner.
 
 `ups` and `ups.battery` are independent on purpose: an automation matching
 `ups: on-battery` stays matched for the whole outage as the battery drains,
@@ -343,7 +360,7 @@ networkPolicy:
 | `unifi.ups.lowBatteryPercent` | `30` | charge at or below this reports `ups.battery: low` |
 | `unifi.ups.criticalBatteryPercent` | `10` | charge at or below this reports `ups.battery: critical` |
 | `unifi.debounce.default` | `1` | consecutive observations a changed value needs before Reactor acts; each extra sample costs one `pollInterval` of reaction time |
-| `unifi.debounce.keys` | `{ups.battery: 2}` | per-key overrides for signals that settle rather than switch |
+| `unifi.debounce.keys` | `{ups.battery: 2, isp: 2}` | per-key overrides for signals that settle rather than switch |
 | `unifi.webhook.enabled` | `false` | Run the webhook receiver; a delivery triggers a poll, never a state change |
 | `unifi.webhook.port` | `9090` | Port the receiver listens on inside the pod |
 | `unifi.webhook.path` | `/webhooks/unifi` | URL path deliveries are accepted on |

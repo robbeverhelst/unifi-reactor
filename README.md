@@ -14,6 +14,7 @@
   <a href="#quickstart">Quickstart</a> ·
   <a href="#your-first-automation">First automation</a> ·
   <a href="#state-keys">State keys</a> ·
+  <a href="#compatibility">Compatibility</a> ·
   <a href="#configuration">Configuration</a> ·
   <a href="docs/troubleshooting.md">Troubleshooting</a> ·
   <a href="docs/spec.md">Design spec</a>
@@ -224,8 +225,27 @@ Each key is published only when the matching hardware is adopted by your control
 | Key | Values | Meaning |
 | --- | --- | --- |
 | `wan` | `primary`, `backup` | which uplink the gateway is currently using |
+| `isp` | a slug, e.g. `telenet`, or `unknown` | the carrier behind the live uplink |
 | `ups` | `online`, `on-battery` | whether a UniFi UPS is on mains or running on battery |
 | `ups.battery` | `normal`, `low`, `critical` | remaining charge against the configured thresholds |
+
+`isp` is the one key whose values are not a closed set: it is the carrier name your console geolocated your public address to, lowercased with everything non-alphanumeric turned into a hyphen. Look it up before matching on it —
+
+```sh
+kubectl -n reactor-system logs deploy/reactor | grep 'key=isp'
+# INFO state transition provider=unifi key=isp from= to=telenet
+```
+
+— and use it when *who* is carrying your traffic is what matters rather than which port it leaves by, which is usually the case for anything metered:
+
+```yaml
+  when:
+    provider: unifi
+    state:
+      isp: unknown        # or your backup carrier's slug
+```
+
+It exists for a second reason. `wan` and `isp` are independent answers to "did the uplink change", so Reactor compares them: if one moves and the other does not, it says so rather than quietly trusting either. Those lines are worth reading — see [`wan` and `isp` disagree](docs/troubleshooting.md#10-wan-and-isp-disagree-about-a-failover).
 
 `ups` and `ups.battery` are separate on purpose. An automation matching `ups: on-battery` stays matched for the whole outage as the battery drains — with a single escalating enum, dropping from `on-battery` to `low-battery` would leave the matching state and fire `onExit`, scaling workloads back **up** in the middle of a power failure. Express escalation by matching both keys instead; all keys in a `state` block must match.
 
@@ -249,11 +269,38 @@ unifi:
     default: 1          # react on the first observation
     keys:
       ups.battery: 2    # ...but let a threshold crossing settle
+      isp: 2            # ...and let a re-geolocated carrier settle
 ```
 
 Each extra sample costs one `pollInterval` of reaction time, so the default is `1`: a WAN failover and a power cut both deserve an immediate reaction, and neither flaps. `ups.battery` ships at `2` because it is a threshold crossing — a charge hovering at 30% would otherwise report `low`, `normal`, `low` — and because a battery drains over minutes, so spending one more poll to be sure costs nothing. At the default 30s poll that makes a battery-level escalation react in 60s worst case instead of 30s.
 
+`isp` ships at `2` for a different reason: it is not a link state but the result of a geolocation lookup on whatever public address the gateway currently holds, so it can report `unknown` for a poll or two while a new address is being resolved — precisely during the failover you would be reacting to. One extra sample skips that window. Nothing else needs it: `wan` and `ups` are switch positions, and they do not flap.
+
 Debouncing happens in the shared state store, so every automation sees the same settled value. Two automations can never disagree about the current state and fight over a workload they share.
+
+## Compatibility
+
+Everything here was built against one setup, and this table says which one. "Verified" means a real capture or a real cluster; "expected" means the code path is version-independent as far as anyone can tell, which is not the same thing.
+
+| | Verified | Expected to work | Known not to work |
+| --- | --- | --- | --- |
+| UniFi Network | 10.5.67 | 10.x | — |
+| Console | UDM Pro (gateway firmware 5.1.26) | UDM/UDM SE/UDR/UXG, Cloud Key with a gateway adopted | a site with no gateway and no UniFi UPS: nothing to observe |
+| UPS | UniFi UPS 2U (`USWDA26`, firmware 1.6.1) | any UniFi UPS reporting `vbms_table` | third-party UPS over NUT — a separate provider, not this one |
+| Kubernetes | CI: envtest 1.36 API server, and the current kind default node image for e2e | 1.25+ — only long-stable APIs are used (`apps/v1` scale, `policy/v1`, `apiextensions/v1`, leases) | — |
+| Helm | 3.x | — | — |
+
+Reactor asks the console what it is running and says so at startup:
+
+```sh
+kubectl -n reactor-system logs deploy/reactor | grep -E 'version detected|tested against'
+# INFO UniFi Network version detected version=10.5.67 verifiedAgainst=10.5.67 verifiedConsole="UDM Pro"
+# INFO Kubernetes version detected version=v1.34.1
+```
+
+Outside the range above it warns and **carries on**. Refusing to start against a console that would have worked fine is a worse failure than a log line, and most of them will work fine — the warning exists so that a missing state key reads as an incompatibility rather than as a configuration mistake. If your console is not in the table and it works, [say so](https://github.com/robbeverhelst/unifi-reactor/issues/new/choose): every row here started as somebody's report.
+
+State keys degrade one at a time, so a console with no UniFi UPS still reports `wan` and `isp`, and a gateway whose fields have moved still reports `ups`. Only observing nothing at all is an error.
 
 ## Configuration
 
@@ -310,7 +357,11 @@ The two-kind split itself is unchanged and still the design. `when` is what that
 
 **The name stays `unifi-reactor` through v1**, and adding providers does not change that. The user-facing surface is already provider-neutral — the API group is `reactor.robbeverhelst.com`, the kind is `Automation` with a `provider` field, the chart is `reactor`, the namespace is `reactor-system` — so a NUT, Proxmox, or Prometheus provider lands with no breaking change and nothing to migrate. Only the repository, the Go module path, and the image carry the `unifi-` prefix, and those are the surfaces you touch least. Discovery favours the specific name besides: people search for a UniFi Kubernetes operator, and `reactor` alone has a lot of prior art. If a second provider ever gains real users, renaming is a repository rename (GitHub redirects), a transition period publishing the image under both paths, and a major-version bump of the module path — a decision for when it has users, not for a version boundary on its own.
 
-Parsers are written against real captured API responses committed to [`testdata/`](testdata/unifi/), never against assumed formats. Two caveats worth stating plainly. The `wan` mapping is derived from a gateway with a second uplink configured, but a genuine failover has not yet been observed end-to-end, so treat `wan` as less battle-tested than `ups`. And the webhook fast path has been exercised against the mock console, not a real one — which is a large part of why it defaults off and why nothing depends on it being right.
+Parsers are written against real captured API responses committed to [`testdata/`](testdata/unifi/), never against assumed formats. Two caveats worth stating plainly.
+
+**A genuine WAN failover has still never been observed** ([#34](https://github.com/robbeverhelst/unifi-reactor/issues/34)). `wan` is derived from which port reports `is_uplink`, inferred from one capture in which only one uplink was live — so whether `is_uplink` follows the traffic or just marks the port configured as primary is unconfirmed. What has changed is that the guess is no longer silent or alone: the gateway's own uplink interface is used as a second opinion where `is_uplink` names no single live port, `isp` (from #6) is compared against `wan` across observations, and any disagreement between them is logged rather than resolved. The provider is exercised against five different hypotheses about what a failover looks like, in tests and in `make dev-mock`, and it reports something defensible under all of them. That is not the same as knowing. Treat `wan` as less battle-tested than `ups`, watch for the [disagreement warnings](docs/troubleshooting.md#10-wan-and-isp-disagree-about-a-failover), and if you have a gateway with two working uplinks, the [capture runbook](testdata/unifi/README.md#capturing-a-real-failover) is fifteen minutes that would close this.
+
+And the webhook fast path has been exercised against the mock console, not a real one — which is a large part of why it defaults off and why nothing depends on it being right.
 
 ## Roadmap
 

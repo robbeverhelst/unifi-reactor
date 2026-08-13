@@ -219,6 +219,8 @@ This is the single most important rule on this page, and the one that looks like
 
 **Values are a closed set.** Enumerate them in your constants file. Never pass through a vendor string that could gain a new variant in a firmware update. Lowercase, kebab-case, no spaces.
 
+The UniFi provider breaks this rule exactly once, and the shape of the exception is the useful part. `isp` passes a vendor string through, because the whole point of the key is to name a carrier the operator recognises, and an enum of carriers is not a thing anyone can write down. What it does instead is normalize the string into a slug (lowercase, non-alphanumerics collapsed to hyphens) so the value is always writable in YAML, and reserve one closed value — `unknown` — for "the field is there and says nothing". Break the rule only when the key's *purpose* is to carry an identity you cannot enumerate, and then still guarantee the shape of what you publish.
+
 **Dots namespace a sub-aspect.** `ups.battery` qualifies `ups`. Keep the hierarchy shallow.
 
 **Omit unobservable keys entirely**, as described above.

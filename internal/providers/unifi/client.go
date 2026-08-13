@@ -24,7 +24,10 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
+
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // Default battery thresholds, as percentages of remaining charge.
@@ -75,6 +78,14 @@ type Client struct {
 	// state key. Charge at or below the threshold reports that level.
 	LowBatteryPercent      int
 	CriticalBatteryPercent int
+
+	// mu guards previous only.
+	mu sync.Mutex
+	// previous remembers the last WAN signals so that a change in one can be
+	// checked against a change in the other. Nothing is ever derived from it:
+	// it exists so a disagreement between two independent signals is reported
+	// instead of one of them being silently trusted. See crossCheckOverTime.
+	previous struct{ wan, isp string }
 }
 
 // NewClient creates a UniFi client. UniFi OS consoles serve a self-signed
@@ -111,19 +122,47 @@ type deviceStatResponse struct {
 }
 
 type deviceRecord struct {
-	Model string     `json:"model"`
-	Type  string     `json:"type"`
-	Name  string     `json:"name"`
-	WAN1  *wanPort   `json:"wan1"`
-	WAN2  *wanPort   `json:"wan2"`
-	VBMS  *vbmsTable `json:"vbms_table"`
+	Model  string     `json:"model"`
+	Type   string     `json:"type"`
+	Name   string     `json:"name"`
+	WAN1   *wanPort   `json:"wan1"`
+	WAN2   *wanPort   `json:"wan2"`
+	Uplink *uplinkRef `json:"uplink"`
+	// ISP is the capture's name for active_geo_info.WAN.isp_name — the carrier
+	// the console geolocated the current public address to.
+	ISP string `json:"isp"`
+	// LastWANStatus is keyed by uplink (WAN, WAN2). It is deliberately not
+	// map[string]string: a value that turned out not to be a string on some
+	// other firmware would fail the decode and take the whole observation —
+	// including the UPS keys — down with it.
+	LastWANStatus map[string]any `json:"last_wan_status"`
+	VBMS          *vbmsTable     `json:"vbms_table"`
 }
 
 type wanPort struct {
 	IsUplink bool   `json:"is_uplink"`
 	Up       bool   `json:"up"`
 	IfName   string `json:"ifname"`
+	Name     string `json:"name"`
 	IP       string `json:"ip"`
+}
+
+// uplinkRef is the gateway's own statement of which interface it is uplinked
+// through. It is the second, independent answer to the question wan1/wan2
+// is_uplink answers.
+type uplinkRef struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+// named reports whether this port is the interface the given name refers to.
+// Captures carry the same value in ifname and name; matching either costs
+// nothing and does not assume which one a future firmware keeps.
+func (p *wanPort) named(name string) bool {
+	if p == nil || name == "" {
+		return false
+	}
+	return p.IfName == name || p.Name == name
 }
 
 // vbmsTable is the UniFi UPS battery-management block. Present on UniFi UPS
@@ -142,6 +181,7 @@ type vbmsTable struct {
 // the corresponding hardware is visible to the controller:
 //
 //	wan         primary | backup      (which uplink the gateway is using)
+//	isp         a slug, or unknown    (the carrier behind the live uplink)
 //	ups         online  | on-battery  (whether the UPS is running on mains)
 //	ups.battery normal  | low | critical
 //
@@ -175,23 +215,28 @@ func (c *Client) Observe(ctx context.Context) (map[string]string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return nil, fmt.Errorf("decoding unifi device state: %w", err)
 	}
-	return c.stateFromDevices(parsed)
+	return c.stateFromDevices(ctx, parsed)
 }
 
-// stateFromDevices derives the state map from a device list. The first
-// gateway with an active uplink and the first UPS reporting battery data win;
-// multiple gateways or UPS devices per site are out of scope for v1alpha1.
-func (c *Client) stateFromDevices(parsed deviceStatResponse) (map[string]string, error) {
+// stateFromDevices derives the state map from a device list. The first record
+// carrying WAN ports and the first UPS reporting battery data win; multiple
+// gateways or UPS devices per site are out of scope for v1alpha1.
+//
+// The two halves are independent on purpose: a site with no UPS still reports
+// wan, and a site whose gateway reports nothing recognisable still reports the
+// UPS keys. Only observing nothing at all is an error.
+func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse) (map[string]string, error) {
 	state := map[string]string{}
+	gatewaySeen := false
 
 	for _, d := range parsed.Data {
-		if _, seen := state[stateKeyWAN]; !seen {
-			switch {
-			case d.WAN2 != nil && d.WAN2.IsUplink:
-				state[stateKeyWAN] = wanBackup
-			case d.WAN1 != nil && d.WAN1.IsUplink:
-				state[stateKeyWAN] = wanPrimary
+		if !gatewaySeen && (d.WAN1 != nil || d.WAN2 != nil) {
+			gatewaySeen = true
+			if wan := c.wanFrom(ctx, d); wan != "" {
+				state[stateKeyWAN] = wan
 			}
+			state[stateKeyISP] = ispFrom(d)
+			c.crossCheckOverTime(ctx, state[stateKeyWAN], state[stateKeyISP])
 		}
 		if _, seen := state[stateKeyUPS]; !seen && d.VBMS != nil {
 			state[stateKeyUPS] = upsOnline
@@ -203,9 +248,194 @@ func (c *Client) stateFromDevices(parsed deviceStatResponse) (map[string]string,
 	}
 
 	if len(state) == 0 {
-		return nil, fmt.Errorf("no gateway with an active WAN uplink and no UPS found in device list")
+		return nil, fmt.Errorf(
+			"no gateway reporting WAN ports and no UPS found in the device list; "+
+				"the fields this provider reads were verified on UniFi Network %s (%s), "+
+				"and another version or console model may report them differently "+
+				"— see the compatibility matrix in the README",
+			VerifiedNetworkVersion, VerifiedConsoleModel)
 	}
 	return state, nil
+}
+
+// wanSignal is one field's answer to which uplink is live.
+type wanSignal struct {
+	// value is wanPrimary, wanBackup, or empty when the field says nothing.
+	value string
+	// ambiguous records that the field claimed both uplinks at once. That is
+	// itself information — it means the field does not mean what this provider
+	// takes it to mean — so it is kept apart from "said nothing".
+	ambiguous bool
+}
+
+// byIsUplink is the signal the wan mapping has always been derived from, and
+// the one issue #34 exists to verify: it has only ever been observed on a
+// gateway with a single live uplink, so "the port with is_uplink set is the
+// live one" is inference, not observation.
+func (d deviceRecord) byIsUplink() wanSignal {
+	primary := d.WAN1 != nil && d.WAN1.IsUplink
+	backup := d.WAN2 != nil && d.WAN2.IsUplink
+	return resolveSignal(primary, backup)
+}
+
+// byUplinkName is the independent second opinion: the gateway names the
+// interface it is uplinked through in its own uplink block, and each WAN port
+// names its interface. Matching one against the other answers the same
+// question through entirely different fields.
+func (d deviceRecord) byUplinkName() wanSignal {
+	if d.Uplink == nil {
+		return wanSignal{}
+	}
+	return resolveSignal(d.WAN1.named(d.Uplink.Name), d.WAN2.named(d.Uplink.Name))
+}
+
+func resolveSignal(primary, backup bool) wanSignal {
+	switch {
+	case primary && backup:
+		return wanSignal{ambiguous: true}
+	case backup:
+		return wanSignal{value: wanBackup}
+	case primary:
+		return wanSignal{value: wanPrimary}
+	}
+	return wanSignal{}
+}
+
+// wanFrom decides which uplink is live, and reports rather than resolves any
+// disagreement between the signals that say so.
+//
+// The rule is deliberately conservative: is_uplink keeps the cases it already
+// answers, so no behaviour a real deployment depends on changes on the
+// strength of a hypothesis. uplink.name only fills in the cases is_uplink
+// leaves blank — no uplink claimed, or both claimed — which today produce a
+// missing key and a coin flip respectively, so it can only be an improvement.
+// Everything else is a log line, because deciding which signal wins needs a
+// real failover to have been observed, and one has not been (issue #34).
+func (c *Client) wanFrom(ctx context.Context, d deviceRecord) string {
+	log := logf.FromContext(ctx).WithName("unifi-wan")
+	claimed, named := d.byIsUplink(), d.byUplinkName()
+
+	var wan string
+	switch {
+	case claimed.value != "" && named.value != "" && claimed.value != named.value:
+		log.Info("The gateway's WAN signals disagree about which uplink is live; "+
+			"trusting is_uplink, which is the signal this mapping has always used",
+			"byIsUplink", claimed.value, "byUplinkName", named.value, "uplink", d.Uplink.Name)
+		wan = claimed.value
+	case claimed.value != "":
+		wan = claimed.value
+	case named.value != "":
+		log.Info("is_uplink does not name a single live WAN port; "+
+			"deriving the live uplink from the gateway's uplink interface instead",
+			"byUplinkName", named.value, "uplink", d.Uplink.Name, "bothPortsClaimedUplink", claimed.ambiguous)
+		wan = named.value
+	case claimed.ambiguous:
+		// Both ports claim the uplink and nothing resolves it. Reporting the
+		// backup is what this provider has always done here; it is a guess,
+		// and saying so is the only honest thing available.
+		log.Info("Both WAN ports report is_uplink and nothing resolves which is live; "+
+			"reporting the backup uplink, which may be wrong",
+			"wan", wanBackup)
+		wan = wanBackup
+	default:
+		log.V(1).Info("No WAN port reports is_uplink and the gateway names no uplink interface; wan will not be published")
+		return ""
+	}
+
+	c.checkLastWANStatus(ctx, d, wan)
+	return wan
+}
+
+// checkLastWANStatus compares the derived uplink against the gateway's own
+// per-uplink status. Nothing is derived from that field because only one of
+// its values has ever been observed ("online", on the primary, with the
+// primary live) — so this reports the mismatch and leaves the interpretation
+// to whoever reads the log with the hardware in front of them.
+func (c *Client) checkLastWANStatus(ctx context.Context, d deviceRecord, wan string) {
+	if len(d.LastWANStatus) == 0 {
+		return
+	}
+	key := wanStatusKeyPrimary
+	if wan == wanBackup {
+		key = wanStatusKeyBackup
+	}
+	status, ok := d.LastWANStatus[key].(string)
+	if !ok || status == wanStatusOnline {
+		return
+	}
+	logf.FromContext(ctx).WithName("unifi-wan").Info(
+		"The uplink believed to be live does not report itself as online",
+		"wan", wan, "statusKey", key, "status", status, "lastWANStatus", fmt.Sprint(d.LastWANStatus))
+}
+
+// crossCheckOverTime reports when the uplink and the ISP behind it fail to
+// move together. Neither can confirm the other on its own — nothing says which
+// carrier belongs to which port — but across two observations they should
+// change at the same time, and an ISP that changes while wan does not is
+// exactly the shape a wrong wan mapping would have.
+//
+// Only real ISP names are remembered, so a momentary unknown during a failover
+// does not count as a change and does not erase what was known before it.
+func (c *Client) crossCheckOverTime(ctx context.Context, wan, isp string) {
+	c.mu.Lock()
+	was := c.previous
+	if wan != "" {
+		c.previous.wan = wan
+	}
+	if isp != "" && isp != ispUnknown {
+		c.previous.isp = isp
+	}
+	c.mu.Unlock()
+
+	if was.wan == "" || was.isp == "" || wan == "" || isp == "" || isp == ispUnknown {
+		return
+	}
+	wanMoved, ispMoved := wan != was.wan, isp != was.isp
+	if wanMoved == ispMoved {
+		return
+	}
+	log := logf.FromContext(ctx).WithName("unifi-wan")
+	if wanMoved {
+		log.Info("The gateway changed uplink but the ISP behind it did not change; "+
+			"one of the two signals is wrong and the wan mapping is the unverified one",
+			"wanFrom", was.wan, "wanTo", wan, "isp", isp)
+		return
+	}
+	log.Info("The ISP behind the uplink changed but the gateway still reports the same uplink; "+
+		"if this was a failover, the wan mapping missed it",
+		"wan", wan, "ispFrom", was.isp, "ispTo", isp)
+}
+
+// ispFrom normalizes the carrier name into a value that can be written in an
+// Automation. A gateway that names no carrier reports unknown rather than
+// dropping the key: the gateway is visible, so this is an observation about
+// it, not a loss of sight of it.
+func ispFrom(d deviceRecord) string {
+	if slug := slugify(d.ISP); slug != "" {
+		return slug
+	}
+	return ispUnknown
+}
+
+// slugify lowercases and collapses every run of non-alphanumeric characters
+// into a single hyphen, so "Telenet BV" becomes "telenet-bv".
+func slugify(name string) string {
+	var b strings.Builder
+	b.Grow(len(name))
+	pendingHyphen := false
+	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			if pendingHyphen && b.Len() > 0 {
+				b.WriteByte('-')
+			}
+			pendingHyphen = false
+			b.WriteRune(r)
+		default:
+			pendingHyphen = true
+		}
+	}
+	return b.String()
 }
 
 func (c *Client) batteryLevel(percent int) string {

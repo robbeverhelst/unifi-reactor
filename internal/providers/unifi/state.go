@@ -23,11 +23,32 @@ const (
 	ProviderName = "unifi"
 
 	stateKeyWAN        = "wan"
+	stateKeyISP        = "isp"
 	stateKeyUPS        = "ups"
 	stateKeyUPSBattery = "ups.battery"
 
 	wanPrimary = "primary"
 	wanBackup  = "backup"
+
+	// ispUnknown is published when a gateway is visible but names no ISP —
+	// which is a real observation, not missing hardware, and is expected to
+	// happen for a moment during a failover while the console re-derives the
+	// geolocation of a public address it has just been handed.
+	ispUnknown = "unknown"
+
+	// wanStatusOnline is the only value ever seen in the gateway's
+	// last_wan_status map, captured with the primary uplink live. What a failed
+	// uplink reports there is unknown, so nothing is derived from this field:
+	// it is only used to notice that the uplink believed to be live does not
+	// describe itself as online. See the failover capture runbook in
+	// testdata/unifi/README.md.
+	wanStatusOnline = "online"
+
+	// The keys last_wan_status and the health subsystem's uptime_stats use for
+	// each uplink. Both captures agree on WAN for the first and WAN2 for the
+	// second, and neither has been observed while the second was live.
+	wanStatusKeyPrimary = "WAN"
+	wanStatusKeyBackup  = "WAN2"
 
 	upsOnline    = "online"
 	upsOnBattery = "on-battery"
