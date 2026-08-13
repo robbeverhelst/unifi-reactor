@@ -5,6 +5,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "reactor.labels" . | nindent 4 }}
+  {{- with .Values.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
@@ -35,6 +39,8 @@ spec:
           args:
             - --leader-elect
             - --health-probe-bind-address=:8081
+            - --zap-log-level={{ .Values.log.level }}
+            - --zap-encoder={{ .Values.log.format }}
           env:
             {{- if .Values.unifi.url }}
             - name: UNIFI_URL
@@ -49,11 +55,11 @@ spec:
               value: {{ .Values.unifi.ups.lowBatteryPercent | quote }}
             - name: UNIFI_UPS_CRITICAL_BATTERY_PERCENT
               value: {{ .Values.unifi.ups.criticalBatteryPercent | quote }}
-            - name: UNIFI_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.unifi.existingSecret | quote }}
-                  key: UNIFI_API_KEY
+            # Read per poll from the mounted Secret rather than injected once
+            # at startup, so rotating the API key takes effect on the next
+            # poll instead of waiting for someone to restart the pod.
+            - name: UNIFI_API_KEY_FILE
+              value: /etc/unifi-reactor/credentials/UNIFI_API_KEY
             {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -77,6 +83,21 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.unifi.url }}
+          volumeMounts:
+            # Mounted as a whole directory, never through subPath — the
+            # kubelet updates a mounted Secret in place, but a subPath mount
+            # keeps the file it was created with for the pod's lifetime.
+            - name: unifi-credentials
+              mountPath: /etc/unifi-reactor/credentials
+              readOnly: true
+          {{- end }}
+      {{- if .Values.unifi.url }}
+      volumes:
+        - name: unifi-credentials
+          secret:
+            secretName: {{ .Values.unifi.existingSecret | quote }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

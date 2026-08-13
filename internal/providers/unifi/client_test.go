@@ -67,7 +67,7 @@ func serve(t *testing.T, payload []byte) *Client {
 		_, _ = w.Write(payload)
 	}))
 	t.Cleanup(srv.Close)
-	return NewClient(srv.URL, "test-key", "", false)
+	return NewClient(srv.URL, StaticAPIKey("test-key"), "", false)
 }
 
 func TestObserveAgainstCapturedGatewayAndUPS(t *testing.T) {
@@ -105,7 +105,7 @@ func TestObserveWithoutUPSOmitsUPSKeys(t *testing.T) {
 }
 
 func TestWANBackupWhenWAN2IsUplink(t *testing.T) {
-	c := NewClient("", "", "", false)
+	c := NewClient("", nil, "", false)
 	state, err := c.stateFromDevices(deviceStatResponse{Data: []deviceRecord{{
 		Model: "UDMPRO",
 		WAN1:  &wanPort{IsUplink: false, Up: false},
@@ -135,7 +135,7 @@ func TestUPSStateTransitions(t *testing.T) {
 		{"outage, at the critical threshold", true, 10, upsOnBattery, batteryCritical},
 		{"outage, nearly empty", true, 3, upsOnBattery, batteryCritical},
 	}
-	c := NewClient("", "", "", false)
+	c := NewClient("", nil, "", false)
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var vbms vbmsTable
@@ -159,7 +159,7 @@ func TestUPSStateTransitions(t *testing.T) {
 // An `ups: on-battery` automation must stay matched as the battery drains,
 // so its onExit actions never fire in the middle of a power failure.
 func TestUPSStaysOnBatteryAcrossBatteryLevels(t *testing.T) {
-	c := NewClient("", "", "", false)
+	c := NewClient("", nil, "", false)
 	for _, level := range []int{100, 50, 30, 10, 1} {
 		var vbms vbmsTable
 		vbms.IsBatteryMode = true
@@ -176,7 +176,7 @@ func TestUPSStaysOnBatteryAcrossBatteryLevels(t *testing.T) {
 }
 
 func TestCustomBatteryThresholds(t *testing.T) {
-	c := NewClient("", "", "", false)
+	c := NewClient("", nil, "", false)
 	c.LowBatteryPercent = 60
 	c.CriticalBatteryPercent = 40
 
@@ -194,8 +194,56 @@ func TestCustomBatteryThresholds(t *testing.T) {
 }
 
 func TestErrorsWhenNothingObservable(t *testing.T) {
-	c := NewClient("", "", "", false)
+	c := NewClient("", nil, "", false)
 	if _, err := c.stateFromDevices(deviceStatResponse{}); err == nil {
 		t.Fatal("expected error for empty device list")
+	}
+}
+
+// TestFileAPIKeyPicksUpRotation is the credential-rotation contract: the key
+// is read per request, so replacing the mounted Secret's contents changes what
+// the next poll authenticates with — no restart, no stale credential quietly
+// failing every poll.
+func TestFileAPIKeyPicksUpRotation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "UNIFI_API_KEY")
+	if err := os.WriteFile(path, []byte("first-key\n"), 0o600); err != nil {
+		t.Fatalf("writing key file: %v", err)
+	}
+
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Get("X-API-KEY"))
+		_, _ = w.Write(captured(t, "stat-device-gateway.json"))
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(srv.URL, FileAPIKey(path), "", false)
+
+	if _, err := c.Observe(context.Background()); err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	// A rotated Secret reaches the container as new file contents.
+	if err := os.WriteFile(path, []byte("second-key\n"), 0o600); err != nil {
+		t.Fatalf("rotating key file: %v", err)
+	}
+	if _, err := c.Observe(context.Background()); err != nil {
+		t.Fatalf("Observe after rotation: %v", err)
+	}
+
+	want := []string{"first-key", "second-key"}
+	if len(seen) != len(want) || seen[0] != want[0] || seen[1] != want[1] {
+		t.Fatalf("keys sent = %q, want %q", seen, want)
+	}
+}
+
+func TestFileAPIKeyFailsLoudlyWhenUnreadable(t *testing.T) {
+	if _, err := FileAPIKey(filepath.Join(t.TempDir(), "absent"))(); err == nil {
+		t.Fatal("expected an error for a missing key file")
+	}
+	empty := filepath.Join(t.TempDir(), "UNIFI_API_KEY")
+	if err := os.WriteFile(empty, []byte("  \n"), 0o600); err != nil {
+		t.Fatalf("writing key file: %v", err)
+	}
+	if _, err := FileAPIKey(empty)(); err == nil {
+		t.Fatal("expected an error for an empty key file")
 	}
 }

@@ -140,7 +140,8 @@ Chart values ([full reference](charts/reactor/README.md)):
 | `unifi.site` | `default` | UniFi Network site |
 | `unifi.pollInterval` | `30s` | how often WAN and UPS state are observed |
 | `unifi.insecureSkipVerify` | `true` | accept the console's self-signed certificate |
-| `unifi.existingSecret` | `unifi-reactor-credentials` | Secret holding `UNIFI_API_KEY` |
+| `unifi.existingSecret` | `unifi-reactor-credentials` | Secret holding `UNIFI_API_KEY`; re-read on every poll, so rotating the key needs no restart |
+| `log.level` | `info` | `debug` adds the per-observation lines used to work out why an automation did not fire |
 | `unifi.ups.lowBatteryPercent` | `30` | charge at or below this reports `ups.battery: low` |
 | `unifi.ups.criticalBatteryPercent` | `10` | charge at or below this reports `ups.battery: critical` |
 | `rbac.clusterWide` | `true` | when `false`, restricts the operator to its own namespace |

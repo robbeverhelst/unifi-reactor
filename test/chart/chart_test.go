@@ -32,21 +32,30 @@ import (
 )
 
 const (
-	crdKind    = "kind: CustomResourceDefinition"
-	crdName    = "automations.reactor.robbeverhelst.com"
-	keepPolicy = "helm.sh/resource-policy: keep"
+	crdKind        = "kind: CustomResourceDefinition"
+	crdName        = "automations.reactor.robbeverhelst.com"
+	keepPolicy     = "helm.sh/resource-policy: keep"
+	deploymentKind = "kind: Deployment"
+	// A UniFi URL has to be set for the provider — and so its credentials —
+	// to be part of the rendered Deployment at all.
+	unifiURL = "unifi.url=https://192.0.2.1"
 )
 
 func chartDir() string { return filepath.Join("..", "..", "charts", "reactor") }
 
-// render runs `helm template` the way a user's install or upgrade would, and
-// returns every manifest the release contains.
+// render runs `helm template` the way a user's install or upgrade would, with
+// each value given as it would be on the command line, and returns every
+// manifest the release contains.
 func render(t *testing.T, values ...string) string {
 	t.Helper()
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm is not installed; skipping chart render tests")
 	}
-	args := append([]string{"template", "reactor", chartDir()}, values...)
+	args := make([]string, 0, len(values)*2+3)
+	args = append(args, "template", "reactor", chartDir())
+	for _, value := range values {
+		args = append(args, "--set", value)
+	}
 	out, err := exec.Command("helm", args...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("helm template failed: %v\n%s", err, out)
@@ -80,11 +89,11 @@ func TestNoCRDsDirectory(t *testing.T) {
 // TestCRDCanBeManagedOutsideTheRelease covers the documented manual path, for
 // clusters where CRDs are applied by an admin or by GitOps.
 func TestCRDCanBeManagedOutsideTheRelease(t *testing.T) {
-	manifests := render(t, "--set", "crds.install=false")
+	manifests := render(t, "crds.install=false")
 	if strings.Contains(manifests, crdKind) {
 		t.Fatal("crds.install=false still rendered a CustomResourceDefinition")
 	}
-	if !strings.Contains(manifests, "kind: Deployment") {
+	if !strings.Contains(manifests, deploymentKind) {
 		t.Fatal("crds.install=false dropped the operator itself")
 	}
 }
@@ -118,4 +127,58 @@ func readSpec(t *testing.T, path string) string {
 	// The chart copy ends with the Helm guard; the generated one does not.
 	spec, _, _ = strings.Cut(spec, "\n{{- end }}")
 	return strings.TrimSpace(spec)
+}
+
+// TestLogLevelIsSettable covers the knob that makes the V(1) observation lines
+// reachable: before, args were hardcoded and debug meant hand-editing a
+// Deployment that Helm would overwrite on the next upgrade.
+func TestLogLevelIsSettable(t *testing.T) {
+	if got := render(t, "log.level=debug", "log.format=json"); !strings.Contains(got, "--zap-log-level=debug") ||
+		!strings.Contains(got, "--zap-encoder=json") {
+		t.Fatal("log.level / log.format did not reach the manager's arguments")
+	}
+	if got := render(t); !strings.Contains(got, "--zap-log-level=info") {
+		t.Fatal("the default log level is not passed at all, leaving it at the binary's own default")
+	}
+}
+
+// TestCredentialsAreMountedForRotation is the rotation contract at the chart
+// level: the key arrives as a file the kubelet keeps up to date, not as an
+// environment variable frozen at pod start.
+func TestCredentialsAreMountedForRotation(t *testing.T) {
+	manifests := render(t, unifiURL)
+	if !strings.Contains(manifests, "name: UNIFI_API_KEY_FILE") {
+		t.Fatal("the operator is not told to read its API key from a file")
+	}
+	if strings.Contains(manifests, "secretKeyRef") {
+		t.Fatal("the API key is still injected from a Secret at startup, which rotation cannot reach")
+	}
+	// A subPath mount is never updated when the Secret changes, which would
+	// silently reinstate the old behaviour.
+	if strings.Contains(manifests, "subPath:") {
+		t.Fatal("the credentials volume uses subPath, so a rotated Secret would never reach the container")
+	}
+	if !strings.Contains(manifests, "secretName: \"unifi-reactor-credentials\"") {
+		t.Fatal("the credentials Secret is not mounted")
+	}
+}
+
+// TestOperationalExtrasAreOptOut keeps upgrades boring: an existing install
+// that does not ask for them must render exactly what it rendered before.
+func TestOperationalExtrasAreOptOut(t *testing.T) {
+	defaults := render(t, unifiURL)
+	for _, kind := range []string{"kind: PodDisruptionBudget", "kind: NetworkPolicy"} {
+		if strings.Contains(defaults, kind) {
+			t.Errorf("%q is rendered by default; enabling it must be the user's choice", kind)
+		}
+	}
+
+	pdb := render(t, unifiURL, "podDisruptionBudget.enabled=true", "podDisruptionBudget.minAvailable=2")
+	if !strings.Contains(pdb, "kind: PodDisruptionBudget") || !strings.Contains(pdb, "minAvailable: 2") {
+		t.Error("podDisruptionBudget.enabled did not produce a budget")
+	}
+	netpol := render(t, unifiURL, "networkPolicy.enabled=true")
+	if !strings.Contains(netpol, "kind: NetworkPolicy") {
+		t.Error("networkPolicy.enabled did not produce a policy")
+	}
 }

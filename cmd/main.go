@@ -18,6 +18,7 @@ package main
 
 import (
 	"crypto/tls"
+	"errors"
 	"flag"
 	"os"
 	"strconv"
@@ -65,6 +66,25 @@ func (w targetAdmissionWarnings) HandleWarningHeader(code int, _ string, text st
 		return
 	}
 	w.log.V(1).Info("API server warning about a targeted resource; the request itself succeeded", "warning", text)
+}
+
+// unifiAPIKey resolves where the API key comes from, and fails fast if it
+// cannot be read at all. UNIFI_API_KEY_FILE points at a mounted Secret and is
+// re-read on every poll, so rotating the key takes effect without a restart;
+// UNIFI_API_KEY holds the key in the environment, where it is fixed for the
+// life of the process and rotation means restarting the pod.
+func unifiAPIKey() (unifi.APIKey, error) {
+	if path := os.Getenv("UNIFI_API_KEY_FILE"); path != "" {
+		key := unifi.FileAPIKey(path)
+		if _, err := key(); err != nil {
+			return nil, err
+		}
+		return key, nil
+	}
+	if key := os.Getenv("UNIFI_API_KEY"); key != "" {
+		return unifi.StaticAPIKey(key), nil
+	}
+	return nil, errors.New("UNIFI_URL is set but neither UNIFI_API_KEY_FILE nor UNIFI_API_KEY is")
 }
 
 func init() {
@@ -217,9 +237,9 @@ func main() {
 	// The UniFi provider is configured at the controller level (Helm values /
 	// env), not per-Automation: one UniFi console per Reactor install.
 	if unifiURL := os.Getenv("UNIFI_URL"); unifiURL != "" {
-		apiKey := os.Getenv("UNIFI_API_KEY")
-		if apiKey == "" {
-			setupLog.Error(nil, "UNIFI_URL is set but UNIFI_API_KEY is empty")
+		apiKey, err := unifiAPIKey()
+		if err != nil {
+			setupLog.Error(err, "Failed to resolve the UniFi API key")
 			os.Exit(1)
 		}
 		interval := 30 * time.Second
