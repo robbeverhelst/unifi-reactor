@@ -7,11 +7,23 @@ on:
 permissions: {}
 
 jobs:
-  test-e2e:
+  # Each suite gets its own runner, and so its own throwaway Kind cluster: they
+  # install cluster-wide RBAC and delete CRDs, which cannot be shared.
+  e2e:
     permissions:
       contents: read
-    name: Run on Ubuntu
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Manager
+            target: test-e2e
+          - name: Reaction
+            target: test-reaction
+          - name: Lifecycle
+            target: test-lifecycle
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -22,6 +34,11 @@ jobs:
         uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
           go-version-file: go.mod
+
+      # The reaction and lifecycle suites install the chart rather than the
+      # kustomize manifests, so helm has to be there rather than merely likely.
+      - name: Setup Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
 
       - name: Install the latest version of kind
         run: |
@@ -35,4 +52,4 @@ jobs:
       - name: Running Test e2e
         run: |
           go mod tidy
-          make test-e2e
+          make ${{ matrix.target }}

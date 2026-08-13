@@ -13,7 +13,7 @@ make build         # compile the manager binary
 make help          # every target
 ```
 
-Both `make test` and `make lint` must pass before a PR is ready. CI runs lint, tests, e2e, and a manifest-drift check. The chart tests in `test/chart/` need `helm` on your PATH to run at all — they render the chart and check, among other things, that its templated CRD has not drifted from `config/crd/bases`.
+Both `make test` and `make lint` must pass before a PR is ready. CI runs lint, tests, three e2e suites, and a manifest-drift check. The e2e suites (`make test-reaction`, `make test-lifecycle`, `make test-e2e`) each create and delete their own Kind cluster; see [Development](docs/development.md#end-to-end-tests) for what each one covers. The chart tests in `test/chart/` need `helm` on your PATH to run at all — they render the chart and check, among other things, that its templated CRD has not drifted from `config/crd/bases`.
 
 **No UniFi hardware is required.** `make dev-mock` serves the captured payloads on `:9443` and lets you drive state transitions by hand:
 

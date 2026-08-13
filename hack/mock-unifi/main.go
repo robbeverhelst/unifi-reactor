@@ -42,6 +42,13 @@ limitations under the License.
 //	curl -X POST 'http://localhost:9443/ups?level=5'     # drains to critical
 //	curl -X POST 'http://localhost:9443/ups?mode=mains'  # power restored
 //
+// Rehearse the UPS dropping off the console entirely — the ups keys vanish
+// from the state rather than reporting a value, which is what an Automation
+// holding its last known state has to cope with:
+//
+//	curl -X POST 'http://localhost:9443/ups?present=false'
+//	curl -X POST 'http://localhost:9443/ups?present=true'
+//
 // It also mocks enough of the undocumented Alarm Manager API
 // (docs/unifi-alarm-manager-api.md) for Reactor to register its own webhook
 // rule against, and can then fire a delivery at whatever URL that rule names:
@@ -159,6 +166,11 @@ type mock struct {
 	networkVersion string
 	onBatt         bool
 	battLvl        int
+	// noUPS drops the UPS from the device list, as an unadopted or powered-off
+	// one would be. The provider then publishes no ups keys at all rather than
+	// a placeholder value, which is the case that must not be read as "the
+	// outage ended".
+	noUPS bool
 
 	// delivery is the synthetic body /alarm-fire posts. It is a stand-in, not
 	// a capture: no real Alarm Manager delivery has been recorded yet.
@@ -253,11 +265,17 @@ func (m *mock) devices() []any {
 		log.Printf("re-reading the captured devices: %v", err)
 		return nil
 	}
+	visible := devices[:0]
 	for _, d := range devices {
 		device, ok := d.(map[string]any)
 		if !ok {
+			visible = append(visible, d)
 			continue
 		}
+		if _, isUPS := device["vbms_table"]; isUPS && m.noUPS {
+			continue
+		}
+		visible = append(visible, d)
 		if _, isGateway := device["wan1"]; isGateway && m.link == linkBackup {
 			m.failover(device)
 		}
@@ -269,7 +287,7 @@ func (m *mock) devices() []any {
 			}
 		}
 	}
-	return devices
+	return visible
 }
 
 // failover rewrites a captured gateway record the way the current variant says
@@ -428,7 +446,18 @@ func (m *mock) setUPS(w http.ResponseWriter, r *http.Request) {
 		}
 		m.battLvl = level
 	}
+	if raw := r.URL.Query().Get("present"); raw != "" {
+		present, err := strconv.ParseBool(raw)
+		if err != nil {
+			http.Error(w, "present must be a boolean", http.StatusBadRequest)
+			return
+		}
+		m.noUPS = !present
+	}
 	state := map[bool]string{false: "online", true: "on-battery"}[m.onBatt]
+	if m.noUPS {
+		state = "absent"
+	}
 	log.Printf("ups is now %s at %d%%", state, m.battLvl)
 	_, _ = fmt.Fprintf(w, `{"ups":%q,"battery":%d}`+"\n", state, m.battLvl)
 }

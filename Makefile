@@ -75,6 +75,9 @@ test: manifests generate fmt vet verify-testdata setup-envtest ## Run tests.
 # CertManager is installed by default; skip with:
 # - CERT_MANAGER_INSTALL_SKIP=true
 KIND_CLUSTER ?= unifi-reactor-test-e2e
+# Every e2e suite drives a rehearsed UniFi console inside the cluster and
+# reaches it over this node port mapping.
+KIND_CONFIG ?= test/e2e/kind-config.yaml
 
 .PHONY: setup-test-e2e
 setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
@@ -87,13 +90,37 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
 		*) \
 			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
+			$(KIND) create cluster --name $(KIND_CLUSTER) --config $(KIND_CONFIG) ;; \
 	esac
 
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
 	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
 	$(MAKE) cleanup-test-e2e
+
+# The suites below install the chart, drive a rehearsed console, and assert on
+# what happened to real workloads. Each gets its own throwaway cluster, torn
+# down whether or not the tests passed: they install cluster-wide RBAC and
+# delete CRDs, so nothing they touch may outlive them.
+.PHONY: test-reaction
+test-reaction: KIND_CLUSTER = unifi-reactor-reaction
+test-reaction: setup-test-e2e manifests generate fmt vet ## Run the reaction and arbitration e2e suite.
+	@set -o pipefail; \
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) \
+		go test -tags=e2e ./test/e2e/reaction/ -v -ginkgo.v -timeout 40m; \
+	status=$$?; \
+	$(MAKE) cleanup-test-e2e KIND_CLUSTER=$(KIND_CLUSTER); \
+	exit $$status
+
+.PHONY: test-lifecycle
+test-lifecycle: KIND_CLUSTER = unifi-reactor-lifecycle
+test-lifecycle: setup-test-e2e manifests generate fmt vet ## Run the uninstall and chart-upgrade e2e suite.
+	@set -o pipefail; \
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) \
+		go test -tags=e2e ./test/e2e/lifecycle/ -v -ginkgo.v -timeout 40m; \
+	status=$$?; \
+	$(MAKE) cleanup-test-e2e KIND_CLUSTER=$(KIND_CLUSTER); \
+	exit $$status
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests

@@ -1,6 +1,10 @@
 version: "2"
 run:
   allow-parallel-runners: true
+  # The e2e suites are behind this tag, so without it they are the only Go in
+  # the repository nothing checks.
+  build-tags:
+    - e2e
 linters:
   default: none
   enable:
