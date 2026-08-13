@@ -3,6 +3,8 @@
 # with all the plugins listed below.
 #
 # See: https://golangci-lint.run/plugins/module-plugins/
+# Must match GOLANGCI_LINT_VERSION in the Makefile.
+# renovate: datasource=github-releases depName=golangci/golangci-lint
 version: v2.12.2
 plugins:
   # logcheck validates structured logging calls and parameters (e.g., balanced key-value pairs)

@@ -15,7 +15,7 @@ internal/engine/       provider-agnostic core: state store, transition detection
 internal/events/       normalized Event and Observation models
 internal/providers/    provider implementations (currently unifi)
 internal/controller/   the reconciler and the UniFi poller
-charts/reactor/        Helm chart (CRDs are synced here by `make manifests`)
+charts/reactor/        Helm chart (`make manifests` regenerates its templated CRD)
 hack/mock-unifi/       mock UniFi API serving the captured payloads
 hack/dev/              demo Automations used by `make dev-hello`
 testdata/unifi/        real captured API responses — the parsers' ground truth
@@ -33,6 +33,8 @@ make help     # every target
 ```
 
 CI runs lint, tests, e2e, and a manifest-drift check, so `make manifests generate` output must be committed.
+
+`make manifests` also regenerates `charts/reactor/templates/crds.yaml` via `hack/sync-chart-crds.sh`. The CRD is a chart *template* deliberately: Helm installs a chart's `crds/` directory on first install only and never upgrades it, so every later schema change would ship silently broken. Don't hand-edit the chart's copy — the tests in `test/chart/` fail when it drifts from `config/crd/bases`, and they need `helm` on your PATH to run at all.
 
 ## Running against a cluster
 
@@ -92,5 +94,7 @@ git tag v0.3.0 && git push origin v0.3.0
 ```
 
 That builds the multi-arch image, packages the chart with `version`/`appVersion` taken from the tag, pushes both to GHCR, and attaches `install.yaml` to a GitHub Release with generated notes. Image and chart versions always move together.
+
+Both artifacts are signed by cosign keyless signing, using the workflow's OIDC token — nothing to configure, no key anywhere. The image also gets an SBOM and build provenance. [SECURITY.md](../SECURITY.md) has the `cosign verify` invocations.
 
 Use conventional commits (`feat:`, `fix:`, `docs:`, …) — they drive the generated release notes.

@@ -135,11 +135,13 @@ Chart values ([full reference](charts/reactor/README.md)):
 
 | Value | Default | Description |
 | --- | --- | --- |
+| `crds.install` | `true` | install and upgrade the `Automation` CRD with the release |
 | `unifi.url` | — | UniFi console base URL; the provider stays disabled until this is set |
 | `unifi.site` | `default` | UniFi Network site |
 | `unifi.pollInterval` | `30s` | how often WAN and UPS state are observed |
 | `unifi.insecureSkipVerify` | `true` | accept the console's self-signed certificate |
-| `unifi.existingSecret` | `unifi-reactor-credentials` | Secret holding `UNIFI_API_KEY` |
+| `unifi.existingSecret` | `unifi-reactor-credentials` | Secret holding `UNIFI_API_KEY`; re-read on every poll, so rotating the key needs no restart |
+| `log.level` | `info` | `debug` adds the per-observation lines used to work out why an automation did not fire |
 | `unifi.ups.lowBatteryPercent` | `30` | charge at or below this reports `ups.battery: low` |
 | `unifi.ups.criticalBatteryPercent` | `10` | charge at or below this reports `ups.battery: critical` |
 | `rbac.clusterWide` | `true` | when `false`, restricts the operator to its own namespace |
@@ -153,6 +155,7 @@ Chart values ([full reference](charts/reactor/README.md)):
 - [Captured UniFi payloads](testdata/unifi/README.md) — the real API responses every parser is written and tested against
 - [UniFi Alarm Manager API](docs/unifi-alarm-manager-api.md) — reverse-engineered notes on configuring UniFi's outbound webhooks programmatically
 - [Development](docs/development.md) — building, testing, and running against a local cluster
+- [Security policy](SECURITY.md) — how to report a vulnerability, and how to verify a signed release
 
 ## Stability
 

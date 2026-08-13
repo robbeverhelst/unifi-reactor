@@ -1,3 +1,13 @@
+crds:
+  # The Automation CRD ships as a chart template, not in crds/, because Helm
+  # installs crds/ on first install only and never upgrades it. It carries
+  # helm.sh/resource-policy: keep, so uninstalling the release leaves the CRD —
+  # and every Automation stored under it — in place.
+  # Set to false when the CRD is managed outside this release (GitOps, or a
+  # cluster where only an admin may touch CRDs); the chart README documents
+  # what to apply and when.
+  install: true
+
 image:
   repository: ghcr.io/robbeverhelst/unifi-reactor
   # Defaults to the chart's appVersion.
@@ -24,6 +34,14 @@ unifi:
   #     --from-literal=UNIFI_API_KEY=<your API key>
   existingSecret: unifi-reactor-credentials
 
+log:
+  # Verbosity: "debug", "info", "error", or a V-level number ("1", "2").
+  # debug turns on the per-observation lines you want while working out why a
+  # trigger did or did not fire.
+  level: info
+  # "console" for human-readable logs, "json" for a log collector.
+  format: console
+
 rbac:
   # cluster-wide: the operator may act on any namespace, enabling the optional
   #   Automation spec.actions[].target.namespace field.
@@ -46,8 +64,40 @@ resources:
     cpu: 500m
     memory: 128Mi
 
+podDisruptionBudget:
+  # Off by default. With a single replica a budget cannot protect anything:
+  # minAvailable: 1 turns a node drain into a hang instead. Enable it alongside
+  # replicaCount: 2 — leader election keeps exactly one instance acting, so the
+  # second is a warm standby that makes drains safe.
+  enabled: false
+  # Set one of the two; leave the other empty.
+  minAvailable: 1
+  maxUnavailable: ""
+
+networkPolicy:
+  # Off by default so enabling the chart never changes what the pod can reach.
+  # When enabled, nothing may reach the operator and egress is whatever the
+  # rules below allow — narrow them to your API server, DNS, and console.
+  enabled: false
+  # Nothing needs to reach the operator: it serves only kubelet health probes,
+  # which most CNIs deliver from the node outside policy enforcement.
+  ingress: []
+  # Unrestricted by default, so enabling the policy cannot silently break
+  # polling or the operator's connection to the API server. See the chart
+  # README for a narrowed example.
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+
 nodeSelector: {}
 tolerations: []
 affinity: {}
 podAnnotations: {}
+# Annotations on the Deployment itself. Rotation of the UniFi API key needs no
+# restart (the key is re-read from the mounted Secret), but if you would rather
+# restart on change and already run reloader:
+#   annotations:
+#     secret.reloader.stakater.com/reload: unifi-reactor-credentials
+annotations: {}
 imagePullSecrets: []

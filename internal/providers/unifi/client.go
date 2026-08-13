@@ -22,6 +22,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -31,12 +33,41 @@ const (
 	DefaultCriticalBatteryPercent = 10
 )
 
+// APIKey supplies the key sent with a request. It is resolved per request
+// rather than held from startup so that rotating the credential does not
+// require restarting the operator.
+type APIKey func() (string, error)
+
+// StaticAPIKey returns the same key for the lifetime of the process. Use it
+// when the key arrives through the environment, where it cannot change.
+func StaticAPIKey(key string) APIKey {
+	return func() (string, error) { return key, nil }
+}
+
+// FileAPIKey reads the key from path on every use, which is what makes
+// credential rotation automatic: the kubelet updates a mounted Secret in place
+// (as long as it is not mounted through subPath), so the next poll after a
+// rotation authenticates with the new key.
+func FileAPIKey(path string) APIKey {
+	return func() (string, error) {
+		contents, err := os.ReadFile(path) // #nosec G304 -- operator-supplied credentials path
+		if err != nil {
+			return "", fmt.Errorf("reading unifi api key from %s: %w", path, err)
+		}
+		key := strings.TrimSpace(string(contents))
+		if key == "" {
+			return "", fmt.Errorf("unifi api key file %s is empty", path)
+		}
+		return key, nil
+	}
+}
+
 // Client talks to the UniFi Network application on a UniFi OS console using
 // an API key (X-API-KEY works on both the Integration API and the legacy
 // /proxy/network/api endpoints as of Network 10.5).
 type Client struct {
 	baseURL string
-	apiKey  string
+	apiKey  APIKey
 	site    string
 	http    *http.Client
 
@@ -49,9 +80,12 @@ type Client struct {
 // NewClient creates a UniFi client. UniFi OS consoles serve a self-signed
 // certificate by default, so insecureSkipVerify is commonly required for
 // LAN access by IP.
-func NewClient(baseURL, apiKey, site string, insecureSkipVerify bool) *Client {
+func NewClient(baseURL string, apiKey APIKey, site string, insecureSkipVerify bool) *Client {
 	if site == "" {
 		site = "default"
+	}
+	if apiKey == nil {
+		apiKey = StaticAPIKey("")
 	}
 	return &Client{
 		baseURL:                baseURL,
@@ -121,7 +155,11 @@ func (c *Client) Observe(ctx context.Context) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("X-API-KEY", c.apiKey)
+	apiKey, err := c.apiKey()
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-API-KEY", apiKey)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.http.Do(req)

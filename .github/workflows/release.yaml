@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
   packages: write
+  # Keyless signing: cosign exchanges this workflow's OIDC token for a
+  # short-lived certificate, so there is no signing key to hold or leak.
+  id-token: write
 
 jobs:
   release:
@@ -15,10 +18,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
           go-version-file: go.mod
 
@@ -29,20 +34,24 @@ jobs:
           echo "image=ghcr.io/${{ github.repository }}" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
       - name: Build and push multi-arch image
-        uses: docker/build-push-action@v6
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -52,24 +61,48 @@ jobs:
             ${{ steps.version.outputs.image }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # An SBOM and full build provenance, pushed alongside the image as
+          # attestations, so what is in a release is a question with an answer.
+          sbom: true
+          provenance: mode=max
+
+      - name: Sign the image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ steps.version.outputs.image }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
 
       - name: Set up Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
 
       - name: Package and push Helm chart (OCI)
+        id: chart
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          OWNER: ${{ github.repository_owner }}
         run: |
           helm registry login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
           helm package charts/reactor \
-            --version "${{ steps.version.outputs.version }}" \
+            --version "${VERSION}" \
             --app-version "${{ github.ref_name }}"
-          helm push "reactor-${{ steps.version.outputs.version }}.tgz" \
-            "oci://ghcr.io/${{ github.repository_owner }}/charts"
+          helm push "reactor-${VERSION}.tgz" "oci://ghcr.io/${OWNER}/charts" 2>&1 | tee push.log
+          # helm prints the pushed manifest digest; cosign signs digests, never
+          # tags, so that the signature cannot be moved to different content.
+          digest="$(awk '/^Digest: /{print $2}' push.log)"
+          test -n "${digest}"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign the chart
+        env:
+          DIGEST: ${{ steps.chart.outputs.digest }}
+          OWNER: ${{ github.repository_owner }}
+        run: cosign sign --yes "ghcr.io/${OWNER}/charts/reactor@${DIGEST}"
 
       - name: Build install manifest
         run: make build-installer IMG=${{ steps.version.outputs.image }}:${{ github.ref_name }}
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: dist/install.yaml
           generate_release_notes: true
