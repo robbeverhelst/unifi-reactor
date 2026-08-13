@@ -23,6 +23,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -33,7 +34,9 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -108,6 +111,38 @@ func unifiDebounce() (engine.DebounceConfig, error) {
 		config.PerKey[strings.TrimSpace(key)] = samples
 	}
 	return config, nil
+}
+
+// kubernetesVersionTimeout bounds the one discovery call made at startup, so a
+// slow API server delays a log line rather than the operator.
+const kubernetesVersionTimeout = 10 * time.Second
+
+// logKubernetesVersion reports which cluster this is running against.
+//
+// It is informational and never fatal. Reactor uses only long-stable APIs, so
+// there is no Kubernetes version it refuses to start on; what this buys is that
+// a bug report carries the version without anyone having to ask for it, and
+// that the compatibility matrix in the README can be checked against reality.
+func logKubernetesVersion(config *rest.Config) {
+	bounded := rest.CopyConfig(config)
+	bounded.Timeout = kubernetesVersionTimeout
+
+	version, err := func() (string, error) {
+		client, err := discovery.NewDiscoveryClientForConfig(bounded)
+		if err != nil {
+			return "", err
+		}
+		info, err := client.ServerVersion()
+		if err != nil {
+			return "", err
+		}
+		return info.GitVersion, nil
+	}()
+	if err != nil {
+		setupLog.V(1).Info("Could not determine the Kubernetes version; continuing", "error", err.Error())
+		return
+	}
+	setupLog.Info("Kubernetes version detected", "version", version)
 }
 
 // runReleaseClaims hands every claimed target back and exits. It talks to the
@@ -271,6 +306,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	logKubernetesVersion(restConfig)
+
 	debounce, err := unifiDebounce()
 	if err != nil {
 		setupLog.Error(err, "Invalid debounce configuration")
@@ -337,6 +374,13 @@ func setupUniFi(mgr ctrl.Manager, cfg unifi.Config, store *engine.StateStore, wa
 	unifiClient := unifi.NewClient(cfg.URL, cfg.APIKey, cfg.Site, cfg.InsecureSkipVerify)
 	unifiClient.LowBatteryPercent = cfg.LowBatteryPercent
 	unifiClient.CriticalBatteryPercent = cfg.CriticalBatteryPercent
+
+	// What the console is running, logged once at startup. It is added before
+	// the poller so that when a moved field makes an observation come back
+	// empty, the line saying which version is talking is already above it.
+	if err := mgr.Add(&unifi.VersionGuard{Client: unifiClient}); err != nil {
+		return err
+	}
 
 	poller := &controller.UniFiPoller{
 		Client:             unifiClient,

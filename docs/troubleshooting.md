@@ -461,7 +461,36 @@ turn into an answer.
 
 ---
 
-## 11. Still stuck
+## 11. Reactor warns about your UniFi Network version
+
+```text
+INFO This UniFi Network version is newer than anything Reactor has been tested against;
+     if state keys are missing, an incompatible API is the first thing to suspect
+     version=11.0.0 supported="10.x (verified on 10.5.67)"
+```
+
+This is a warning, not a refusal — Reactor starts and polls normally. It is here so that
+`no gateway reporting WAN ports and no UPS found in the device list` reads as an incompatibility
+rather than as a configuration mistake, which is what it looks like otherwise.
+
+If everything works, nothing needs doing, and a note on
+[#43](https://github.com/robbeverhelst/unifi-reactor/issues/43) saying which console and version
+worked is worth more than the warning is. If state keys *are* missing, the fields the parser
+reads have probably moved, and a capture from your console
+([`hack/capture-unifi.sh`](../testdata/unifi/README.md)) is what makes that fixable — it keeps an
+allowlist of fields, so it is safe to run and share the result of.
+
+`Could not determine the UniFi Network version` instead means the Integration API endpoint did
+not answer: older Network releases do not serve it, and a console that is unreachable for the
+first seconds of a pod's life looks the same. Reactor retries a few times and then carries on;
+only the version report is lost, and the poller's own errors tell you if the console is really
+unreachable.
+
+The [compatibility matrix](../README.md#compatibility) is what these lines are checked against.
+
+---
+
+## 12. Still stuck
 
 Collect these and open an issue — the [bug report template](https://github.com/robbeverhelst/unifi-reactor/issues/new/choose) asks for exactly this, and without it nothing is reproducible:
 

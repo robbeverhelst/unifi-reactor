@@ -248,7 +248,12 @@ func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse
 	}
 
 	if len(state) == 0 {
-		return nil, fmt.Errorf("no gateway with an active WAN uplink and no UPS found in device list")
+		return nil, fmt.Errorf(
+			"no gateway reporting WAN ports and no UPS found in the device list; "+
+				"the fields this provider reads were verified on UniFi Network %s (%s), "+
+				"and another version or console model may report them differently "+
+				"— see the compatibility matrix in the README",
+			VerifiedNetworkVersion, VerifiedConsoleModel)
 	}
 	return state, nil
 }

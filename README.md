@@ -14,6 +14,7 @@
   <a href="#quickstart">Quickstart</a> ·
   <a href="#your-first-automation">First automation</a> ·
   <a href="#state-keys">State keys</a> ·
+  <a href="#compatibility">Compatibility</a> ·
   <a href="#configuration">Configuration</a> ·
   <a href="docs/troubleshooting.md">Troubleshooting</a> ·
   <a href="docs/spec.md">Design spec</a>
@@ -247,6 +248,30 @@ Each extra sample costs one `pollInterval` of reaction time, so the default is `
 `isp` ships at `2` for a different reason: it is not a link state but the result of a geolocation lookup on whatever public address the gateway currently holds, so it can report `unknown` for a poll or two while a new address is being resolved — precisely during the failover you would be reacting to. One extra sample skips that window. Nothing else needs it: `wan` and `ups` are switch positions, and they do not flap.
 
 Debouncing happens in the shared state store, so every automation sees the same settled value. Two automations can never disagree about the current state and fight over a workload they share.
+
+## Compatibility
+
+Everything here was built against one setup, and this table says which one. "Verified" means a real capture or a real cluster; "expected" means the code path is version-independent as far as anyone can tell, which is not the same thing.
+
+| | Verified | Expected to work | Known not to work |
+| --- | --- | --- | --- |
+| UniFi Network | 10.5.67 | 10.x | — |
+| Console | UDM Pro (gateway firmware 5.1.26) | UDM/UDM SE/UDR/UXG, Cloud Key with a gateway adopted | a site with no gateway and no UniFi UPS: nothing to observe |
+| UPS | UniFi UPS 2U (`USWDA26`, firmware 1.6.1) | any UniFi UPS reporting `vbms_table` | third-party UPS over NUT — a separate provider, not this one |
+| Kubernetes | CI: envtest 1.36 API server, and the current kind default node image for e2e | 1.25+ — only long-stable APIs are used (`apps/v1` scale, `policy/v1`, `apiextensions/v1`, leases) | — |
+| Helm | 3.x | — | — |
+
+Reactor asks the console what it is running and says so at startup:
+
+```sh
+kubectl -n reactor-system logs deploy/reactor | grep -E 'version detected|tested against'
+# INFO UniFi Network version detected version=10.5.67 verifiedAgainst=10.5.67 verifiedConsole="UDM Pro"
+# INFO Kubernetes version detected version=v1.34.1
+```
+
+Outside the range above it warns and **carries on**. Refusing to start against a console that would have worked fine is a worse failure than a log line, and most of them will work fine — the warning exists so that a missing state key reads as an incompatibility rather than as a configuration mistake. If your console is not in the table and it works, [say so](https://github.com/robbeverhelst/unifi-reactor/issues/new/choose): every row here started as somebody's report.
+
+State keys degrade one at a time, so a console with no UniFi UPS still reports `wan` and `isp`, and a gateway whose fields have moved still reports `ups`. Only observing nothing at all is an error.
 
 ## Configuration
 

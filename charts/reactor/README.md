@@ -16,6 +16,16 @@ helm install reactor oci://ghcr.io/robbeverhelst/charts/reactor \
 
 Create an API key in the UniFi UI under Settings → Control Plane → Integrations.
 
+## What this has been tested against
+
+UniFi Network **10.5.67** on a **UDM Pro** with a **UniFi UPS 2U**, and Kubernetes 1.25+ (CI runs
+an envtest 1.36 API server and the current kind default node image). The full matrix, including
+what is expected to work rather than verified, is in the
+[project README](https://github.com/robbeverhelst/unifi-reactor#compatibility).
+
+Reactor logs the UniFi Network version and the Kubernetes version it finds at startup, and warns
+— without refusing to start — when the console is outside that range.
+
 ## The CRD
 
 The `Automation` CRD is a **template** in this chart rather than a file under `crds/`. Helm installs a chart's `crds/` directory on first install and never touches it again on upgrade, silently — so a release that changed the schema would upgrade cleanly while the cluster kept the old CRD, and the operator would start writing fields the API server rejects.
