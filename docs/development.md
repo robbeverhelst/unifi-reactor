@@ -95,4 +95,6 @@ git tag v0.3.0 && git push origin v0.3.0
 
 That builds the multi-arch image, packages the chart with `version`/`appVersion` taken from the tag, pushes both to GHCR, and attaches `install.yaml` to a GitHub Release with generated notes. Image and chart versions always move together.
 
+Both artifacts are signed by cosign keyless signing, using the workflow's OIDC token — nothing to configure, no key anywhere. The image also gets an SBOM and build provenance. [SECURITY.md](../SECURITY.md) has the `cosign verify` invocations.
+
 Use conventional commits (`feat:`, `fix:`, `docs:`, …) — they drive the generated release notes.

@@ -155,6 +155,7 @@ Chart values ([full reference](charts/reactor/README.md)):
 - [Captured UniFi payloads](testdata/unifi/README.md) — the real API responses every parser is written and tested against
 - [UniFi Alarm Manager API](docs/unifi-alarm-manager-api.md) — reverse-engineered notes on configuring UniFi's outbound webhooks programmatically
 - [Development](docs/development.md) — building, testing, and running against a local cluster
+- [Security policy](SECURITY.md) — how to report a vulnerability, and how to verify a signed release
 
 ## Stability
 
