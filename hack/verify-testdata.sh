@@ -47,6 +47,24 @@ for file in testdata/unifi/api/*.json testdata/unifi/webhooks/*.json; do
   done < <(grep -oiE '\b([0-9a-f]{2}:){5}[0-9a-f]{2}\b' "$file" | grep -viE '^aa:bb:cc:' | sort -u || true)
 done
 
+# Webhook captures carry one risk the API captures do not: a delivery arrives
+# with Reactor's own shared secret in an Authorization header, so a fixture made
+# by keeping "the request" rather than "these fields of the request" leaks the
+# credential that protects the endpoint.
+for file in testdata/unifi/webhooks/*.json; do
+  [ -e "$file" ] || continue
+
+  while IFS= read -r hit; do
+    echo "$file: delivery credential material: $hit"
+    failed=1
+  done < <(grep -oiE '"(authorization|x-reactor-token|cookie|set-cookie|x-csrf-token|token|bodyBase64)"' "$file" || true)
+
+  while IFS= read -r hit; do
+    echo "$file: bearer credential: $hit"
+    failed=1
+  done < <(grep -oiE 'bearer [a-z0-9._~+/-]+' "$file" || true)
+done
+
 if [ "$failed" -ne 0 ]; then
   echo
   echo "Captures must be sanitized before committing — see testdata/unifi/README.md."

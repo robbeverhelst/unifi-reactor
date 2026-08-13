@@ -47,4 +47,19 @@ A UniFi UPS is reported as a switch-type device (`USWDA26`) carrying:
 
 ## Webhooks
 
-`webhooks/` will hold captured Alarm Manager deliveries. `hack/webhook-logger.mjs` dumps incoming requests verbatim to `webhooks/raw/` (gitignored) — review, allowlist, and sanitize before committing anything from there.
+`webhooks/` will hold captured Alarm Manager deliveries. **It is still empty**: capturing one requires a real console configured to post to a real receiver, and that has not been done yet.
+
+Nothing depends on it. The receiver never reads a delivery body — a delivery only ever asks for a re-observation, and the observation decides the state — so there is no parser here waiting for ground truth. These fixtures are for the event triggers that come later, where a payload *is* the data.
+
+Capturing one is two steps, and the second is not optional:
+
+```sh
+node hack/webhook-logger.mjs 8080                     # dumps verbatim to webhooks/raw/ (gitignored)
+
+./hack/sanitize-webhook-capture.sh --paths webhooks/raw/<file>.json
+./hack/sanitize-webhook-capture.sh webhooks/raw/<file>.json <name> alarm.trigger,alarm.title
+```
+
+`--paths` prints every field path in the body; the second command keeps the ones named and discards everything else, along with every header except `content-type`.
+
+Dropping the headers is the point. A delivery arrives with Reactor's own shared secret in an `Authorization` header, so a fixture made by keeping *the request* rather than *these fields of the request* publishes the credential that protects the endpoint. `hack/verify-testdata.sh` rejects leftover credential material in this directory, but as with the API captures, that is the safety net and the script is the mechanism.
