@@ -512,7 +512,38 @@ The [compatibility matrix](../README.md#compatibility) is what these lines are c
 
 ---
 
-## 12. Still stuck
+## 12. A notification or HTTP request did not arrive
+
+Outbound actions never fail the Automation — the scale is the thing that had to happen, the notification is the report of it — so `Ready` stays `True` and the answer is in `status.edgeActions` and in the resource's Events:
+
+```sh
+kubectl -n media get automation notify-on-failover -o jsonpath='{.status.edgeActions}' | jq
+kubectl -n media describe automation notify-on-failover | grep EdgeAction
+```
+
+| `reason` contains | What it means | Fix |
+| --- | --- | --- |
+| `outbound actions are disabled on this install` | `actions.allowedDestinations` is empty, which is the default | Add the destination to the chart value |
+| `is not allowed by this install` | The destination is not on the allowlist. The message names it as `scheme://host:port` | Add exactly that, port included |
+| `refusing to dial ... loopback` / `link-local` | The host resolved to an address that is refused whatever the allowlist says | Not a misconfiguration to work around; see [SECURITY.md](../SECURITY.md#outbound-actions-http-request-and-notification) |
+| `refusing to follow a redirect to` | The endpoint answered with a redirect. Redirects name a destination the allowlist never approved | Point the action at the final URL |
+| `reading secret ... not found` | No credential Secret of that name in the **Automation's** namespace | Create it there; there is no cross-namespace read |
+| `has no "url" key` | The Secret exists but carries no destination | Add `url` to it |
+| `responded 4xx` | The endpoint rejected it. A 401 or 403 is a credential problem | Check the Secret's `url` and `authorization` |
+| `rendering template` | A message referenced a field or state key that does not exist | `{{ .State.wan }}` errors on a typo, by design |
+
+An empty `status.edgeActions` when you expected one means the action never fired rather than failed. That is one of:
+
+- **Nothing transitioned.** Edge actions fire on a change of `status.matching`, not on every reconcile. `kubectl get automation` shows the current value.
+- **The workload could not be scaled.** A transition whose desired-state action failed is not committed, so nothing is announced until the retry succeeds — deliberately, so no message says a workload was paused while it is still running. Look at `status.lastExecution`.
+- **The automation is suspended.** `spec.suspend: true` sends nothing, the same way a deleted one does not.
+- **It was a deletion.** Deleting an Automation is not a state transition and fires no edge action.
+
+A destination is only ever reported as `scheme://host:port`. That is not a truncation bug: for every notification transport the path is the credential, so it is kept out of status, logs and Events on purpose.
+
+---
+
+## 13. Still stuck
 
 Collect these and open an issue — the [bug report template](https://github.com/robbeverhelst/unifi-reactor/issues/new/choose) asks for exactly this, and without it nothing is reproducible:
 

@@ -253,6 +253,62 @@ Worth knowing before switching it on:
   Custom Webhook action at the receiver with a bearer token, or with an `Authorization` header in
   the action's custom-headers list.
 
+## Outbound actions
+
+`http.request` and the `notification.*` action types send a request out of the cluster. Both are **off until you say where they may go**:
+
+```yaml
+actions:
+  allowedDestinations:
+    - https://ntfy.example.com
+    - https://discord.com
+    - http://hooks.example.com:8080     # a non-default port has to be written out
+    - https://*.example.com             # one leading wildcard label
+```
+
+With the list empty — the default — every such action is refused, and the Automation says which destination to add:
+
+```bash
+kubectl -n media get automation notify-on-failover -o jsonpath='{.status.edgeActions[0].reason}'
+# outbound actions are disabled on this install: no destination is allowed, so https://ntfy.example.com:443 was refused
+```
+
+**Why this is a chart value and not an Automation field.** Anyone who can create an `Automation` in their own namespace can ask Reactor to make a request, and it goes out from inside the cluster with the operator's network position rather than theirs — reaching `ClusterIP` Services, your gateway, and whatever else this pod can route to. Which destinations that is worth is a cluster decision, so it lives here. [SECURITY.md](../../SECURITY.md#outbound-actions-http-request-and-notification) has the full threat model.
+
+Two things are refused regardless of what you list: the loopback interface, and link-local addresses (`169.254.0.0/16`, `fe80::/10`) where cloud instance metadata services live. Redirects are never followed. Private ranges are **not** blocked — an ntfy box on the LAN is a legitimate destination and nothing can tell it apart from a `ClusterIP` Service, which is why the list is default-deny.
+
+### The RBAC this implies
+
+Setting `actions.allowedDestinations` adds one rule to the manager's Role or ClusterRole:
+
+```yaml
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get"]
+```
+
+Credentials for outbound actions live in Secrets in the namespace of the `Automation` that references them, so this follows `rbac.clusterWide` like the rest of the manager's rules. Leave the list empty and the permission is not granted at all. Reactor reads these with an uncached client, so no Secret is held in the operator's memory beyond the request that used it.
+
+If you run with `networkPolicy.enabled: true` and a narrowed `networkPolicy.egress`, remember to allow the destinations too — the allowlist is Reactor's own control, not a Kubernetes one.
+
+### Creating a credential Secret
+
+For every notification transport, the webhook URL *is* the credential, so it lives in the Secret rather than in the `Automation`:
+
+```bash
+kubectl -n media create secret generic ntfy-credentials \
+  --from-literal=url=https://ntfy.example.com/your-topic \
+  --from-literal=authorization="Bearer tk_example"
+```
+
+| Key | Used for |
+| --- | --- |
+| `url` | The destination. Required for `notification.*`; an alternative to `request.url` for `http.request` |
+| `authorization` | Sent as the `Authorization` header |
+| `header-<Name>` | Sent as the header `<Name>`, e.g. `header-X-Api-Key` |
+
+The Secret must live in the `Automation`'s own namespace — there is no namespace field on `secretRef`, on purpose. Nothing from it is logged, put in status, or attached to an `Event`; a destination is only ever reported as `scheme://host:port`.
+
 ## Operations
 
 ### Log level
@@ -376,6 +432,7 @@ networkPolicy:
 | `unifi.webhook.registration.publicURL` | `""` | URL the console should POST to (required when registering) |
 | `unifi.webhook.registration.ruleTitle` | `unifi-reactor` | Title of the rule Reactor creates and recognizes |
 | `unifi.webhook.registration.existingSecret` | `unifi-reactor-console` | Secret containing `UNIFI_USERNAME` and `UNIFI_PASSWORD` |
+| `actions.allowedDestinations` | `[]` | Where outbound actions may go. Empty refuses all of them; see [Outbound actions](#outbound-actions) |
 | `uninstall.releaseClaims` | `true` | Run a pre-delete Job that hands every held workload back before the operator is removed |
 | `uninstall.timeoutSeconds` | `120` | Hard bound on that Job, so a stuck release delays rather than blocks the uninstall |
 | `rbac.clusterWide` | `true` | `false` restricts the operator to the release namespace (cross-namespace `target.namespace` stops working) |

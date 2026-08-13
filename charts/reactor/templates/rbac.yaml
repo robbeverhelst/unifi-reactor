@@ -38,6 +38,20 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
+{{- if .Values.actions.allowedDestinations }}
+  # Credentials for outbound actions live in Secrets in the namespace of the
+  # Automation that references them, which is why this follows the manager's
+  # scope rather than the release namespace.
+  #
+  # It is granted only when actions.allowedDestinations is set: with no
+  # destination allowed there is no outbound action to authenticate, so an
+  # install that does not use the feature never gives the operator read access
+  # to Secrets at all. Reactor reads these with an uncached client, so no Secret
+  # is held in the operator's memory beyond the request that used it.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 {{- if .Values.rbac.clusterWide }}

@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	reactorv1alpha1 "github.com/robbeverhelst/unifi-reactor/api/v1alpha1"
+	"github.com/robbeverhelst/unifi-reactor/internal/actions"
 	"github.com/robbeverhelst/unifi-reactor/internal/engine"
 	"github.com/robbeverhelst/unifi-reactor/internal/providers/unifi"
 )
@@ -57,6 +58,9 @@ const (
 	// reasonSuspended is reported while spec.suspend takes an Automation out
 	// of force.
 	reasonSuspended = "Suspended"
+	// reasonActionFailed is reported when a desired-state action could not be
+	// applied to its target.
+	reasonActionFailed = "ActionFailed"
 	// actionKubernetesScale is the only action type implemented in v0.1.
 	actionKubernetesScale = "kubernetes.scale"
 	// reevaluateInterval bounds how stale a matching decision can get relative
@@ -70,6 +74,19 @@ const (
 	defaultActionTimeout = 30 * time.Second
 	// maxActionAttempts is how many consecutive failures a target gets before
 	// Reactor stops retrying it and waits for the state to change instead.
+	//
+	// This is the desired-state half of the retry policy, and it is generous
+	// because it costs nothing to be: a desired-state action is idempotent by
+	// construction, so the reconcile loop is already the retry and this only
+	// decides how eagerly it runs.
+	//
+	// The edge half is the opposite shape and lives in edge_actions.go. An edge
+	// action fires on an occurrence that has already passed, so it is never
+	// retried across reconciles — a later reconcile has no new transition, and
+	// re-sending there would be a duplicate rather than a retry. Whether it may
+	// be repeated at all within its one reconcile is decided per type in
+	// retryable(): notifications are publishes and retry, an arbitrary POST or
+	// PATCH might not be and is attempted exactly once.
 	maxActionAttempts = 5
 	// retryBackoffBase and retryBackoffCap bound the exponential delay between
 	// those attempts.
@@ -84,7 +101,7 @@ const (
 // run that last succeeded starts the count again, so a target that recovers
 // and fails later gets the full budget rather than the remainder of an old one.
 func attemptsAfter(last *reactorv1alpha1.ExecutionStatus) int32 {
-	if last == nil || last.Status != "Failed" {
+	if last == nil || last.Status != executionFailed {
 		return 1
 	}
 	return last.Attempts + 1
@@ -108,9 +125,12 @@ func retryBackoff(attempts int32) time.Duration {
 //
 // Action types absent from this set are edge actions: they fire on their own
 // Automation's transitions, own no target and take part in no arbitration.
-// None exist yet. kubernetes.restart (#16) and the notification actions (#19)
-// will be the first, and they attach to the transition branch in Reconcile
-// rather than to arbitration.
+// http.request and notification.* are the first of those; they are executed by
+// runEdgeActions, off the matching != wasMatching branch in Reconcile, and
+// their retry policy is the one recorded on maxActionAttempts below.
+//
+// The rule for a new action type: if you cannot define a meet with an identity
+// element for it, it is an edge action and belongs out of this map.
 var desiredStateActions = map[string]bool{
 	actionKubernetesScale: true,
 }
@@ -134,8 +154,18 @@ type AutomationReconciler struct {
 
 	// Recorder surfaces the cases an operator has to know about but would
 	// otherwise only find in logs — notably giving up on releasing a deleted
-	// Automation's targets.
+	// Automation's targets, and every edge action that did or did not fire.
 	Recorder events.EventRecorder
+
+	// Outbound sends the edge actions that leave the cluster. Optional; nil
+	// means every such action is refused with a reason rather than attempted.
+	Outbound actions.Doer
+
+	// SecretReader reads action credentials. It must be an uncached reader —
+	// the manager's APIReader — because a cached Get on a Secret starts an
+	// informer that holds every Secret in the cluster in memory. Falls back to
+	// Client when unset, which is only ever the case in tests.
+	SecretReader client.Reader
 }
 
 // +kubebuilder:rbac:groups=reactor.robbeverhelst.com,resources=automations,verbs=get;list;watch;create;update;patch;delete
@@ -143,6 +173,7 @@ type AutomationReconciler struct {
 // +kubebuilder:rbac:groups=reactor.robbeverhelst.com,resources=automations/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 
 // evaluation is one Automation's condition assessed against current state.
 type evaluation struct {
@@ -296,7 +327,7 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 	if changed := slices.ContainsFunc(outcomes, func(o targetOutcome) bool { return o.changed }); changed {
 		automation.Status.LastExecution = &reactorv1alpha1.ExecutionStatus{
-			Time: metav1.Now(), OnExit: !claiming, Status: "Success",
+			Time: metav1.Now(), OnExit: !claiming, Status: executionSuccess,
 		}
 	}
 	if readable {
@@ -305,34 +336,7 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	automation.Status.Targets = targetStatuses(outcomes)
 
 	if applyErr != nil {
-		attempts := attemptsAfter(automation.Status.LastExecution)
-		automation.Status.LastExecution = &reactorv1alpha1.ExecutionStatus{
-			Time: metav1.Now(), OnExit: !claiming, Status: "Failed",
-			Reason: applyErr.Error(), Attempts: attempts,
-		}
-		r.setCondition(&automation, conditionReady, metav1.ConditionFalse, "ActionFailed", applyErr.Error())
-
-		// Retry is bounded here rather than by returning the error and
-		// inheriting controller-runtime's requeue, so that giving up is a
-		// decision with a visible reason instead of an unbounded backoff
-		// nobody can see the end of.
-		if attempts >= maxActionAttempts {
-			r.setCondition(&automation, conditionApplied, metav1.ConditionFalse, "RetryBudgetExhausted",
-				fmt.Sprintf("giving up after %d attempts, will try again on the next state change: %v",
-					attempts, applyErr))
-			log.Error(applyErr, "giving up on target after repeated failures",
-				"automation", automation.Name, "attempts", attempts)
-			if err := r.Status().Update(ctx, &automation); err != nil {
-				return ctrl.Result{}, err
-			}
-			return ctrl.Result{RequeueAfter: reevaluateInterval}, nil
-		}
-
-		r.setCondition(&automation, conditionApplied, metav1.ConditionFalse, "ActionFailed", applyErr.Error())
-		if err := r.Status().Update(ctx, &automation); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{RequeueAfter: retryBackoff(attempts)}, nil
+		return r.recordApplyFailure(ctx, &automation, applyErr, claiming)
 	}
 
 	if inForce {
@@ -352,7 +356,71 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.Status().Update(ctx, &automation); err != nil {
 		return ctrl.Result{}, err
 	}
+
+	// The edge, and the only place edge actions run. It is after the status
+	// write on purpose: the write above is what makes this transition
+	// observed, so anything fired before it would be sent again by the retry
+	// that follows a conflicting or failed write.
+	//
+	// A suspended Automation reaches here with inForce false and sends nothing.
+	// Suspension is a reversible delete, and a deleted Automation does not
+	// announce transitions it is no longer acting on.
+	if matching != wasMatching && inForce {
+		if results := r.runEdgeActions(ctx, &automation, matching); len(results) > 0 {
+			automation.Status.EdgeActions = results
+			if err := r.Status().Update(ctx, &automation); err != nil {
+				// Logged rather than returned: the actions have already been
+				// sent, and requeueing would re-send them on the next pass.
+				log.Error(err, "recording edge action results failed",
+					"automation", claimantOf(&automation))
+			}
+		}
+	}
 	return ctrl.Result{RequeueAfter: reevaluateInterval}, nil
+}
+
+// recordApplyFailure reports a target that could not be written and decides
+// when to try again.
+//
+// status.matching is deliberately left where it was, which is what keeps the
+// transition uncommitted: the next reconcile still sees an edge, so the
+// desired-state action is retried and any edge action attached to the same
+// transition fires once the target actually changed — not while it is still
+// where it was.
+func (r *AutomationReconciler) recordApplyFailure(
+	ctx context.Context,
+	automation *reactorv1alpha1.Automation,
+	applyErr error,
+	claiming bool,
+) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	attempts := attemptsAfter(automation.Status.LastExecution)
+	automation.Status.LastExecution = &reactorv1alpha1.ExecutionStatus{
+		Time: metav1.Now(), OnExit: !claiming, Status: executionFailed,
+		Reason: applyErr.Error(), Attempts: attempts,
+	}
+	r.setCondition(automation, conditionReady, metav1.ConditionFalse, reasonActionFailed, applyErr.Error())
+
+	// Retry is bounded here rather than by returning the error and inheriting
+	// controller-runtime's requeue, so that giving up is a decision with a
+	// visible reason instead of an unbounded backoff nobody can see the end of.
+	if attempts >= maxActionAttempts {
+		r.setCondition(automation, conditionApplied, metav1.ConditionFalse, "RetryBudgetExhausted",
+			fmt.Sprintf("giving up after %d attempts, will try again on the next state change: %v",
+				attempts, applyErr))
+		log.Error(applyErr, "giving up on target after repeated failures",
+			"automation", automation.Name, "attempts", attempts)
+		if err := r.Status().Update(ctx, automation); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: reevaluateInterval}, nil
+	}
+
+	r.setCondition(automation, conditionApplied, metav1.ConditionFalse, reasonActionFailed, applyErr.Error())
+	if err := r.Status().Update(ctx, automation); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: retryBackoff(attempts)}, nil
 }
 
 // finalize hands a deleted Automation's targets back before letting it go.
@@ -441,6 +509,15 @@ func (r *AutomationReconciler) setAppliedCondition(
 	automation *reactorv1alpha1.Automation,
 	outcomes []targetOutcome,
 ) {
+	if len(outcomes) == 0 {
+		// Nothing to be in effect: an Automation whose actions are all edge
+		// actions owns no target. Reporting Applied=True here would be
+		// vacuously true and would read as a claim it is not making.
+		r.setCondition(automation, conditionApplied, metav1.ConditionTrue, "NoTargets",
+			"this automation only has edge actions, so it holds no target")
+		return
+	}
+
 	var deferred []string
 	for _, outcome := range outcomes {
 		if len(outcome.deferredBy) > 0 {

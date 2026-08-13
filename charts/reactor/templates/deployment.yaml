@@ -119,6 +119,12 @@ spec:
             {{- end }}
             {{- end }}
             {{- end }}
+            {{- with .Values.actions.allowedDestinations }}
+            # Outside the unifi.url block on purpose: outbound actions are
+            # provider-agnostic and work on an install with no console at all.
+            - name: REACTOR_ACTION_ALLOWED_DESTINATIONS
+              value: {{ join "," . | quote }}
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

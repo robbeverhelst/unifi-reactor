@@ -50,13 +50,13 @@ func TestALeftOverEventTriggerAutomationStaysInert(t *testing.T) {
 
 	replicas := int32(3)
 	target := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "qbittorrent", Namespace: testNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: targetQbit, Namespace: testNamespace},
 		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
 	}
 	stale := legacyAutomation("notify-on-client-connect")
 	stale.Spec.Actions = []reactorv1alpha1.Action{{
 		Type:     actionKubernetesScale,
-		Target:   &reactorv1alpha1.TargetRef{Kind: "Deployment", Name: "qbittorrent"},
+		Target:   &reactorv1alpha1.TargetRef{Kind: kindDeployment, Name: targetQbit},
 		Replicas: new(int32),
 	}}
 

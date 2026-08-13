@@ -47,6 +47,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	reactorv1alpha1 "github.com/robbeverhelst/unifi-reactor/api/v1alpha1"
+	"github.com/robbeverhelst/unifi-reactor/internal/actions"
 	"github.com/robbeverhelst/unifi-reactor/internal/controller"
 	"github.com/robbeverhelst/unifi-reactor/internal/engine"
 	"github.com/robbeverhelst/unifi-reactor/internal/providers/unifi"
@@ -335,12 +336,30 @@ func main() {
 		setupLog.Info("UniFi provider disabled (UNIFI_URL not set); state triggers will stay pending")
 	}
 
+	// Where Reactor may send an outbound edge action. Empty by default, which
+	// refuses every one of them: anyone who can create an Automation in their
+	// own namespace can ask the operator to make a request from inside the
+	// cluster, so which destinations that is worth is the operator's call.
+	destinations, err := actions.PolicyFromEnv(os.Getenv)
+	if err != nil {
+		setupLog.Error(err, "Invalid outbound action configuration")
+		os.Exit(1)
+	}
+	if destinations.Empty() {
+		setupLog.Info("Outbound actions disabled (no allowed destinations configured); " +
+			"http.request and notification.* actions will be refused")
+	}
+
 	if err := (&controller.AutomationReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		Store:    store,
 		Wake:     wake,
 		Recorder: mgr.GetEventRecorder("automation"),
+		Outbound: actions.NewClient(destinations),
+		// Uncached on purpose: a cached Get on a Secret would start an informer
+		// and keep every Secret in the cluster in this process's memory.
+		SecretReader: mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "automation")
 		os.Exit(1)

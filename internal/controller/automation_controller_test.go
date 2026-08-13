@@ -35,13 +35,16 @@ import (
 )
 
 const (
-	testNamespace = "default"
-	wanPrimary    = "primary"
-	wanBackup     = "backup"
-	keyWAN        = "wan"
-	keyUPS        = "ups"
-	upsOnline     = "online"
-	upsOnBattery  = "on-battery"
+	testNamespace  = "default"
+	wanPrimary     = "primary"
+	wanBackup      = "backup"
+	keyWAN         = "wan"
+	keyUPS         = "ups"
+	upsOnline      = "online"
+	upsOnBattery   = "on-battery"
+	kindDeployment = "Deployment"
+	targetQbit     = "qbittorrent"
+	labelApp       = "app"
 )
 
 // stallingClient stands in for a target that has stopped answering: reads of
@@ -89,7 +92,7 @@ var _ = Describe("Automation Controller", func() {
 	scaleTo := func(target string, replicas int32) reactorv1alpha1.Action {
 		return reactorv1alpha1.Action{
 			Type:     actionKubernetesScale,
-			Target:   &reactorv1alpha1.TargetRef{Kind: "Deployment", Name: target},
+			Target:   &reactorv1alpha1.TargetRef{Kind: kindDeployment, Name: target},
 			Replicas: &replicas,
 		}
 	}
@@ -99,9 +102,9 @@ var _ = Describe("Automation Controller", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
 			Spec: appsv1.DeploymentSpec{
 				Replicas: &replicas,
-				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": name}},
+				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{labelApp: name}},
 				Template: corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": name}},
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{labelApp: name}},
 					Spec: corev1.PodSpec{Containers: []corev1.Container{
 						{Name: name, Image: "example/" + name},
 					}},

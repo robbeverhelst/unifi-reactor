@@ -1,4 +1,5 @@
 ## Append samples of your project ##
 resources:
 - reactor_v1alpha1_automation.yaml
+- reactor_v1alpha1_automation_notify.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples
