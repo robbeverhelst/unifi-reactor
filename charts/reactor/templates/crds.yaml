@@ -30,6 +30,9 @@ spec:
     - jsonPath: .status.matching
       name: Matching
       type: boolean
+    - jsonPath: .spec.suspend
+      name: Suspended
+      type: boolean
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
       type: string
@@ -61,12 +64,18 @@ spec:
             type: object
           spec:
             description: |-
-              AutomationSpec defines the desired automation: exactly one trigger kind
-              (state-shaped `when` or event-shaped `trigger`) and the actions to run.
+              AutomationSpec defines the desired automation: the state condition to watch
+              and the actions to run while it holds.
+
+              v1alpha1 has one trigger kind. The event-shaped `spec.trigger` this schema
+              used to accept was removed because nothing implemented it: no captured
+              delivery payload exists to match against, and every action type is a
+              desired-state action that is arbitrated continuously rather than fired on an
+              occurrence. It returns in a later API version once both exist. Nothing about
+              `when` changes when it does.
             properties:
               actions:
-                description: Actions run when the trigger fires (state entered, or
-                  event matched).
+                description: Actions run while the state condition holds.
                 items:
                   description: |-
                     Action is a single normalized action. Type selects the action provider;
@@ -190,28 +199,24 @@ spec:
                 - Baseline
                 - None
                 type: string
-              trigger:
-                description: Trigger is an event trigger for genuine point-in-time
-                  events.
-                properties:
-                  event:
-                    description: Event is the normalized event type, e.g. "client.connected".
-                    minLength: 1
-                    type: string
-                  match:
-                    additionalProperties:
-                      type: string
-                    description: Match optionally narrows events by exact payload
-                      field values.
-                    type: object
-                  provider:
-                    description: Provider is the event provider, e.g. "unifi".
-                    minLength: 1
-                    type: string
-                required:
-                - event
-                - provider
-                type: object
+              suspend:
+                default: false
+                description: |-
+                  Suspend takes this Automation out of force without deleting it: it goes
+                  on observing state and reporting it, and stops claiming its targets
+                  entirely.
+
+                  Suspending is a reversible delete, not a freeze. Targets are arbitrated
+                  as if this Automation did not exist, so whatever it was holding down is
+                  handed back to the other Automations claiming it — or, if none do, to
+                  this Automation's own spec.reversal, exactly as deleting it would. Which
+                  also means a suspended Automation writes nothing and can hold nothing
+                  down: scale its targets by hand while you work.
+
+                  Resuming re-evaluates against current state rather than replaying
+                  anything, so an Automation whose condition still holds re-claims its
+                  targets on the next reconcile.
+                type: boolean
               when:
                 description: 'When is a state trigger: active while the provider state
                   matches.'
@@ -234,14 +239,9 @@ spec:
                 type: object
             required:
             - actions
+            - when
             type: object
             x-kubernetes-validations:
-            - message: exactly one of spec.when or spec.trigger must be set
-              rule: has(self.when) != has(self.trigger)
-            - message: spec.onExit is only valid with a state trigger (spec.when)
-              rule: has(self.when) || !has(self.onExit)
-            - message: spec.reversal is only valid with a state trigger (spec.when)
-              rule: has(self.when) || !has(self.reversal)
             - message: 'spec.reversal: Declared requires spec.onExit'
               rule: '!has(self.reversal) || self.reversal != ''Declared'' || has(self.onExit)'
           status:

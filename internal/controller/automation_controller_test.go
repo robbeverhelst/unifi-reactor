@@ -309,6 +309,139 @@ var _ = Describe("Automation Controller", func() {
 		})
 	})
 
+	Context("when an automation is suspended", func() {
+		suspend := func(name string, suspended bool) {
+			var automation reactorv1alpha1.Automation
+			key := types.NamespacedName{Name: name, Namespace: testNamespace}
+			Expect(k8sClient.Get(ctx, key, &automation)).To(Succeed())
+			automation.Spec.Suspend = suspended
+			Expect(k8sClient.Update(ctx, &automation)).To(Succeed())
+		}
+
+		// Suspending is a reversible delete, not a freeze: it takes the policy
+		// out of force, and a policy that is not in force cannot hold a
+		// workload down. The alternative — keeping the claim but ignoring new
+		// transitions — would leave the target pinned by an automation that has
+		// stopped reacting, and would re-assert that value over any manual
+		// scale, which is the opposite of an off switch.
+		It("hands its targets back and stops asserting anything", func() {
+			const target = "suspend-single"
+			createDeployment(target, 2)
+			createAutomation(target, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyUPS: upsOnBattery},
+				},
+				Actions: []reactorv1alpha1.Action{scaleTo(target, 0)},
+				OnExit:  []reactorv1alpha1.Action{scaleTo(target, 2)},
+			})
+
+			observe(map[string]string{keyUPS: upsOnBattery})
+			reconcileOnce(target)
+			Expect(replicasOf(target)).To(Equal(int32(0)))
+
+			By("releasing the target while the condition still holds")
+			suspend(target, true)
+			reconcileOnce(target)
+			Expect(replicasOf(target)).To(Equal(int32(2)),
+				"a suspended automation claims nothing, exactly as a deleted one does")
+			Expect(annotationsOf(target)).NotTo(HaveKey(annotationBaselineReplicas))
+			Expect(annotationsOf(target)).NotTo(HaveKey(annotationClaimedBy))
+
+			By("still reporting what it observes, so it stays useful for debugging")
+			status := statusOf(target)
+			Expect(status.Matching).To(BeTrue())
+			Expect(status.ObservedState).To(HaveKeyWithValue(keyUPS, upsOnBattery))
+			Expect(conditionOf(status, conditionReady).Status).To(Equal(metav1.ConditionTrue))
+			Expect(conditionOf(status, conditionReady).Reason).To(Equal(reasonSuspended))
+			applied := conditionOf(status, conditionApplied)
+			Expect(applied.Status).To(Equal(metav1.ConditionFalse))
+			Expect(applied.Reason).To(Equal(reasonSuspended))
+
+			By("leaving the target alone afterwards, including a manual scale")
+			scaleBy(target, 5)
+			reconcileOnce(target)
+			Expect(replicasOf(target)).To(Equal(int32(5)))
+
+			By("re-claiming from current state on resume, without replaying anything")
+			suspend(target, false)
+			reconcileOnce(target)
+			Expect(replicasOf(target)).To(Equal(int32(0)))
+			Expect(annotationsOf(target)).To(HaveKeyWithValue(annotationBaselineReplicas, "5"))
+			Expect(conditionOf(statusOf(target), conditionApplied).Reason).To(Equal("InEffect"))
+		})
+
+		// Pausing is most useful in the middle of an incident, which is exactly
+		// when the console may be unreachable. A claim that outlives the
+		// observation would make the off switch fail when it is needed.
+		It("releases even when no provider state can be observed", func() {
+			const target = "suspend-blind"
+			createDeployment(target, 3)
+			createAutomation(target, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyUPS: upsOnBattery},
+				},
+				Actions: []reactorv1alpha1.Action{scaleTo(target, 0)},
+			})
+
+			observe(map[string]string{keyUPS: upsOnBattery})
+			reconcileOnce(target)
+			Expect(replicasOf(target)).To(Equal(int32(0)))
+
+			By("suspending it after a restart that has observed nothing yet")
+			suspend(target, true)
+			reconciler.Store = engine.NewStateStore()
+			reconcileOnce(target)
+			Expect(replicasOf(target)).To(Equal(int32(3)), "the recorded baseline is restored")
+			Expect(statusOf(target).Matching).To(BeTrue(), "the last known matching is held, not guessed")
+		})
+
+		It("does not release a target another automation still claims", func() {
+			const (
+				target = "suspend-shared"
+				paused = "suspend-paused"
+				peer   = "suspend-peer"
+			)
+			createDeployment(target, 2)
+			for _, name := range []string{paused, peer} {
+				createAutomation(name, reactorv1alpha1.AutomationSpec{
+					When: &reactorv1alpha1.StateTrigger{
+						Provider: providerUniFi, State: map[string]string{keyUPS: upsOnBattery},
+					},
+					Actions: []reactorv1alpha1.Action{scaleTo(target, 0)},
+					OnExit:  []reactorv1alpha1.Action{scaleTo(target, 2)},
+				})
+			}
+
+			observe(map[string]string{keyUPS: upsOnBattery})
+			reconcileOnce(paused)
+			reconcileOnce(peer)
+			Expect(replicasOf(target)).To(Equal(int32(0)))
+
+			By("suspending one of the two")
+			suspend(paused, true)
+			reconcileOnce(paused)
+			Expect(replicasOf(target)).To(Equal(int32(0)),
+				"the automation still in force keeps its claim")
+			Expect(annotationsOf(target)).To(HaveKeyWithValue(annotationClaimedBy,
+				testNamespace+"/"+peer), "a suspended automation is not listed as a claimant")
+
+			By("deleting the suspended one, which is holding nothing")
+			var automation reactorv1alpha1.Automation
+			key := types.NamespacedName{Name: paused, Namespace: testNamespace}
+			Expect(k8sClient.Get(ctx, key, &automation)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &automation)).To(Succeed())
+			reconcileOnce(paused)
+			Expect(k8sClient.Get(ctx, key, &automation)).To(MatchError(ContainSubstring("not found")),
+				"the finalizer must not block deleting an automation that claims nothing")
+			Expect(replicasOf(target)).To(Equal(int32(0)))
+
+			By("releasing once the survivor's condition ends")
+			observe(map[string]string{keyUPS: upsOnline})
+			reconcileOnce(peer)
+			Expect(replicasOf(target)).To(Equal(int32(2)))
+		})
+	})
+
 	Context("when a target will not answer", func() {
 		reconcileFor := func(name string) (reconcile.Result, error) {
 			return reconciler.Reconcile(ctx, reconcile.Request{

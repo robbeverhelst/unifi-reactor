@@ -234,11 +234,12 @@ func (r *AutomationReconciler) reconcileTarget(
 	for _, peer := range peers {
 		matching := selfMatching
 		if claimantOf(peer) != claimantOf(self) {
-			// A peer being deleted has stopped claiming, exactly as this
-			// Automation does when it is the one being deleted. Its reversal
-			// still counts, which is what restores a workload when the
-			// Automation holding it down is removed mid-outage.
-			matching = peer.DeletionTimestamp.IsZero() && r.matchingOf(peer)
+			// A peer that is being deleted or is suspended has stopped
+			// claiming, exactly as this Automation does when it is the one
+			// being deleted or suspended. Its reversal still counts, which is
+			// what restores a workload when the Automation holding it down is
+			// removed or paused mid-outage.
+			matching = peer.InForce() && r.matchingOf(peer)
 		}
 		if claim, ok := claimFor(peer, key, matching); ok {
 			claims = append(claims, claim)

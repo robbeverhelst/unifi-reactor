@@ -106,8 +106,8 @@ spec:
 
 ```sh
 kubectl -n media get automation
-# NAME                           PROVIDER   MATCHING   READY   AGE
-# pause-downloads-on-backup-wan  unifi      false      True    12s
+# NAME                           PROVIDER   MATCHING   SUSPENDED   READY   AGE
+# pause-downloads-on-backup-wan  unifi      false      false       True    12s
 ```
 
 Shedding load during a power cut is the same shape, matching `ups: on-battery` instead.
@@ -118,9 +118,9 @@ qBittorrent genuinely should pause for *both* a metered uplink and a power cut. 
 
 ```sh
 kubectl -n media get automation
-# NAME                    PROVIDER   MATCHING   APPLIED   AGE
-# pause-on-backup-wan     unifi      false      False     3h
-# shed-on-battery         unifi      true       True      3h
+# NAME                    PROVIDER   MATCHING   SUSPENDED   READY   AGE
+# pause-on-backup-wan     unifi      false      false       True    3h
+# shed-on-battery         unifi      true       false       True    3h
 ```
 
 While *any* automation's condition holds, the workload stays at the **most restrictive** replica count asked for. The WAN recovering above does not bring qBittorrent back, because the UPS automation still wants it down — and the automation that lost says so plainly:
@@ -167,6 +167,35 @@ kubectl -n media get automation pause-on-backup-wan -o jsonpath='{.status.condit
 ```
 
 `Ready` tells you whether an automation is healthy; `Applied` tells you whether what it wants is what its targets have. An automation that is outvoted by a more restrictive claim is `Ready=True, Applied=False` — working exactly as intended.
+
+### Pausing an automation
+
+`spec.suspend: true` takes an automation out of force without deleting it — during an incident, while testing, or when one is misbehaving:
+
+```sh
+kubectl -n media patch automation shed-on-battery --type=merge -p '{"spec":{"suspend":true}}'
+
+kubectl -n media get automation
+# NAME                    PROVIDER   MATCHING   SUSPENDED   READY   AGE
+# pause-on-backup-wan     unifi      false      false       True    3h
+# shed-on-battery         unifi      true       true        True    3h
+```
+
+**Suspending is a reversible delete, not a freeze.** A suspended automation keeps observing state and reporting `matching`, `observedState` and `lastTransition` — that is what makes it worth leaving in place while you debug — and stops claiming its targets entirely. Each target is arbitrated as if the automation were not there, so it goes back to whatever the other automations claiming it want, or to this one's [`reversal`](#what-coming-back-means) if none do. It reports `Ready=True`, `Applied=False` with reason `Suspended`.
+
+Deletion gives the same answer, on purpose: "pause this" and "remove this" should not mean different things to a workload one of them is holding down. Two consequences worth knowing:
+
+- **A suspended automation cannot strand a workload**, because it is not holding one. Deleting one is equally uneventful — its finalizer has nothing left to release.
+- **It never fights you.** A suspended automation writes nothing. If it was the only claimant, Reactor's annotations come off the target as it lets go and you can scale that workload by hand; if another automation still claims it, that one is still in charge and `claimed-by` names it.
+
+Resuming re-evaluates against current state and replays nothing: an automation whose condition still holds re-claims its targets on the next reconcile, recording a fresh baseline from whatever the workload is at then.
+
+If what you wanted was "leave the workload exactly where it is", say that explicitly — with nothing else claiming the target, this pauses the automation *and* stops Reactor asserting a value for it:
+
+```sh
+kubectl -n media patch automation shed-on-battery --type=merge \
+  -p '{"spec":{"suspend":true,"reversal":"None"}}'
+```
 
 ### Removing an automation, or Reactor itself
 
@@ -268,7 +297,16 @@ See the [chart reference](charts/reactor/README.md#webhook-fast-path-optional-of
 
 ## Stability
 
-Early days: the API group is `v1alpha1` and the project is pre-1.0, so expect breaking changes between minor versions. The two trigger kinds (`when` for state, `trigger` for events) are settled and won't be collapsed — that split exists precisely so state-shaped automations never have to migrate.
+Early days: the API group is `v1alpha1` and the project is pre-1.0, so expect breaking changes between minor versions.
+
+**`spec.trigger` — the event-shaped trigger kind — has been removed from `v1alpha1`.** Up to v0.3.0 the CRD accepted it, CEL-validated it, and then ignored it: no version of the engine has ever processed an event trigger. A v1 whose API accepts configuration it silently drops is worse than one that does not offer the field at all, so it is gone until it is real. Two things have to exist before it comes back:
+
+- **a captured delivery to match against.** `trigger.match` matched on payload fields, and no UniFi Alarm Manager payload has ever been captured — [`testdata/unifi/webhooks/`](testdata/unifi/README.md) is empty, and the webhook fast path deliberately never reads a delivery body. Parsers here are written against real captures, never against an assumed shape, and an event matcher is a parser.
+- **an action that expresses an occurrence.** Every action type today is a *desired-state* action: it declares a level that is arbitrated continuously across the automations sharing a target. An event trigger has no level to contribute — it needs an edge action (`kubernetes.restart`, a notification, an HTTP call), and none of those exist yet.
+
+The two-kind split itself is unchanged and still the design. `when` is what that promise protects: nothing with an observable current value will be re-modelled as an event, and no state automation has to migrate when `trigger` returns in `v1alpha2` with the shape it always had.
+
+> **Upgrading from v0.3.0:** an Automation using `spec.trigger` can no longer be created or updated, and `spec.when` is now required. Existing ones survive in etcd — Helm never deletes your resources — and keep doing what they always did, which is nothing. Reactor names them in its log and in an Event on the resource; `kubectl delete` them.
 
 **The name stays `unifi-reactor` through v1**, and adding providers does not change that. The user-facing surface is already provider-neutral — the API group is `reactor.robbeverhelst.com`, the kind is `Automation` with a `provider` field, the chart is `reactor`, the namespace is `reactor-system` — so a NUT, Proxmox, or Prometheus provider lands with no breaking change and nothing to migrate. Only the repository, the Go module path, and the image carry the `unifi-` prefix, and those are the surfaces you touch least. Discovery favours the specific name besides: people search for a UniFi Kubernetes operator, and `reactor` alone has a lot of prior art. If a second provider ever gains real users, renaming is a repository rename (GitHub redirects), a transition period publishing the image under both paths, and a major-version bump of the module path — a decision for when it has users, not for a version boundary on its own.
 
@@ -276,7 +314,7 @@ Parsers are written against real captured API responses committed to [`testdata/
 
 ## Roadmap
 
-- Event triggers for genuinely point-in-time things, like a client connecting
+- Event triggers for genuinely point-in-time things, like a client connecting — returning as `spec.trigger` in `v1alpha2`, once a real delivery payload has been captured and there is an edge action to run ([why it is not in `v1alpha1`](#stability))
 - More actions: HTTP requests, notifications, `restart`, CronJob suspend
 - Prometheus metrics and richer status conditions
 - More providers, driven by demand: NUT, Proxmox, Prometheus alerts, Home Assistant

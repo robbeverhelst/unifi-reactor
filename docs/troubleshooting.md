@@ -55,10 +55,20 @@ status:
 | Reason | Meaning | Where to look |
 | --- | --- | --- |
 | `Reconciled` | Normal. Evaluated against observed state. | — |
+| `Suspended` | `spec.suspend: true`. State is still observed; no target is claimed. | [§1](#1-nothing-happens-when-the-state-changes) |
 | `ProviderStateUnavailable` | No state has been observed yet for this provider. | [§1](#1-nothing-happens-when-the-state-changes) |
 | `StateKeyUnavailable` | A key this Automation needs vanished from the observation. Last known matching state is held. | [§2](#2-statekeyunavailable-and-held-state) |
 | `ActionFailed` | An action returned an error. `status.lastExecution.reason` has the message. | [§5](#5-rbac-refuses-a-cross-namespace-target), [§6](#6-the-crd-invalid-ownership-metadata-or-a-stale-schema) |
-| `EventTriggersNotImplemented` | The resource uses `spec.trigger`. Event triggers are not processed yet. | Use `spec.when` for anything with an observable current value. |
+
+An Automation left over from before `spec.trigger` was removed has no conditions at all: `spec.when` is now required, so the API server rejects any write to it, status included. It is reported once per reconcile in the operator log and as a Warning Event on the resource instead:
+
+```sh
+kubectl -n media describe automation notify-on-client-connect | tail -5
+# Warning  EventTriggerRemoved  spec.trigger was removed from v1alpha1 and was never
+#          implemented; this automation does nothing, delete it
+```
+
+Delete it. Event triggers never ran on any version, so nothing is lost, and nothing it referenced was ever claimed. See the README's [Stability](../README.md#stability) section for when they come back.
 
 > On v0.3.0, `ActionFailed` is reported with `status: "True"` — a bug where the condition status was not flipped alongside the reason. Read the *reason*, not the status, on that version. Fixed in the target-ownership batch.
 
@@ -67,6 +77,16 @@ status:
 ## 1. Nothing happens when the state changes
 
 Work down this list; it is ordered by likelihood.
+
+**It is suspended.** The cheapest check, and it survives restarts and upgrades because it is spec, not state:
+
+```sh
+kubectl -n media get automation
+# NAME                           PROVIDER   MATCHING   SUSPENDED   READY   AGE
+# pause-downloads-on-backup-wan  unifi      false      true        True    3h
+```
+
+A suspended Automation observes and reports state but claims nothing, so its targets sit wherever the automations still in force put them — see [pausing an automation](../README.md#pausing-an-automation). `kubectl patch automation <name> --type=merge -p '{"spec":{"suspend":false}}'` puts it back in force, and it re-claims on the next reconcile if its condition still holds.
 
 **The provider is not enabled.** Without `unifi.url` set, the provider never starts and every state Automation sits at `ProviderStateUnavailable` forever. The startup log says so plainly:
 
@@ -215,6 +235,8 @@ Rotating this secret is not restart-free the way the API key is, and it takes tw
 `onExit` declares **the level you want while the condition does not hold**, not a script that runs at the moment of exit. Most surprises come from reading it the second way.
 
 **It fired and you expected nothing.** A key you match on changed value. With `when: {ups: on-battery, ups.battery: critical}`, a battery recovering from 8% to 15% moves `ups.battery` from `critical` to `low`, the condition stops holding, and the reversal applies — even though the power is still out. That is the semantics working; the fix is matching only the keys you actually care about.
+
+**It fired the moment you suspended the Automation.** That is the same semantics again: suspending takes the policy out of force, so the target is arbitrated as if the Automation were gone, and the reversal applies even though the condition still holds — `status.matching` stays `true` and says so. See [pausing an automation](../README.md#pausing-an-automation) for why that matches what deleting does, and for the `reversal: None` patch that freezes the workload instead.
 
 **It did not fire and you expected it to.** Three candidates, in order:
 

@@ -51,6 +51,12 @@ const (
 	conditionApplied = "Applied"
 	// providerUniFi is the provider name UniFi observations are stored under.
 	providerUniFi = unifi.ProviderName
+	// reasonTriggerRemoved is reported for an Automation left over from when
+	// the API had a second, never-implemented trigger kind.
+	reasonTriggerRemoved = "EventTriggerRemoved"
+	// reasonSuspended is reported while spec.suspend takes an Automation out
+	// of force.
+	reasonSuspended = "Suspended"
 	// actionKubernetesScale is the only action type implemented in v0.1.
 	actionKubernetesScale = "kubernetes.scale"
 	// reevaluateInterval bounds how stale a matching decision can get relative
@@ -204,11 +210,22 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	if automation.Spec.When == nil {
-		// Event triggers are scheduled for v0.2; the schema exists but the
-		// engine does not process them yet.
-		r.setCondition(&automation, conditionReady, metav1.ConditionFalse, "EventTriggersNotImplemented",
-			"spec.trigger automations are not processed yet (v0.2)")
-		return ctrl.Result{}, r.Status().Update(ctx, &automation)
+		// Written before spec.trigger was removed from v1alpha1: the schema no
+		// longer offers a second trigger kind, but objects that used one
+		// survive in etcd. They never did anything — the engine never
+		// processed event triggers — so this is a report, not a migration.
+		//
+		// Deliberately no status write: spec.when is now required, so the API
+		// server rejects any update to an object that has none, status
+		// subresource included. Saying so once per reconcile beats an
+		// error-backoff loop nobody can act on.
+		log.Info("automation has no spec.when and will never act; spec.trigger was removed from v1alpha1, delete it",
+			"automation", claimantOf(&automation))
+		if r.Recorder != nil {
+			r.Recorder.Eventf(&automation, nil, corev1.EventTypeWarning, reasonTriggerRemoved, "Reconcile",
+				"spec.trigger was removed from v1alpha1 and was never implemented; this automation does nothing, delete it")
+		}
+		return ctrl.Result{}, nil
 	}
 
 	// Registered before the first claim is ever made, so there is no window in
@@ -219,8 +236,15 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 	}
 
+	// A suspended Automation is out of force, so its condition no longer
+	// decides anything and the two guards below — which exist to stop it
+	// acting on state it cannot see — have nothing to protect. Skipping them
+	// is what makes pausing work during the incident you are pausing for: the
+	// console being unreachable must not be able to keep a claim alive.
+	inForce := automation.InForce()
+
 	assessment := r.evaluate(&automation)
-	if !assessment.known {
+	if inForce && !assessment.known {
 		r.setCondition(&automation, conditionReady, metav1.ConditionFalse, "ProviderStateUnavailable",
 			fmt.Sprintf("no state observed yet for provider %q", automation.Spec.When.Provider))
 		if err := r.Status().Update(ctx, &automation); err != nil {
@@ -234,7 +258,7 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// controller. Treating it as "no longer matching" would drop this
 	// Automation's claim — e.g. releasing workloads in the middle of a power
 	// failure. Hold the current matching state instead and say so in status.
-	if len(assessment.missing) > 0 {
+	if inForce && len(assessment.missing) > 0 {
 		automation.Status.ObservedState = assessment.observed
 		r.setCondition(&automation, conditionReady, metav1.ConditionFalse, "StateKeyUnavailable",
 			fmt.Sprintf("provider %q is not reporting %s; holding last known state",
@@ -245,13 +269,24 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{RequeueAfter: reevaluateInterval}, nil
 	}
 
-	matching := assessment.matching
+	// A suspended Automation keeps reporting what it observes — that is most of
+	// what makes it useful to leave in place while debugging — but it holds its
+	// last known matching whenever the state it needs is unavailable, the same
+	// rule as above.
+	readable := assessment.known && len(assessment.missing) == 0
+	matching := automation.Status.Matching
+	if readable {
+		matching = assessment.matching
+	}
 	wasMatching := automation.Status.Matching
 	if matching != wasMatching {
-		log.Info("state transition", "automation", automation.Name, "matching", matching)
+		log.Info("state transition", "automation", automation.Name, "matching", matching, "inForce", inForce)
 	}
 
-	outcomes, applyErr := r.reconcileTargets(ctx, &automation, matching)
+	// claiming, not matching: a suspended Automation's condition can hold
+	// without it asking for anything.
+	claiming := matching && inForce
+	outcomes, applyErr := r.reconcileTargets(ctx, &automation, claiming)
 
 	if applyErr == nil {
 		if matching != wasMatching {
@@ -261,16 +296,18 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 	if changed := slices.ContainsFunc(outcomes, func(o targetOutcome) bool { return o.changed }); changed {
 		automation.Status.LastExecution = &reactorv1alpha1.ExecutionStatus{
-			Time: metav1.Now(), OnExit: !matching, Status: "Success",
+			Time: metav1.Now(), OnExit: !claiming, Status: "Success",
 		}
 	}
-	automation.Status.ObservedState = assessment.observed
+	if readable {
+		automation.Status.ObservedState = assessment.observed
+	}
 	automation.Status.Targets = targetStatuses(outcomes)
 
 	if applyErr != nil {
 		attempts := attemptsAfter(automation.Status.LastExecution)
 		automation.Status.LastExecution = &reactorv1alpha1.ExecutionStatus{
-			Time: metav1.Now(), OnExit: !matching, Status: "Failed",
+			Time: metav1.Now(), OnExit: !claiming, Status: "Failed",
 			Reason: applyErr.Error(), Attempts: attempts,
 		}
 		r.setCondition(&automation, conditionReady, metav1.ConditionFalse, "ActionFailed", applyErr.Error())
@@ -298,9 +335,20 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{RequeueAfter: retryBackoff(attempts)}, nil
 	}
 
-	r.setCondition(&automation, conditionReady, metav1.ConditionTrue, "Reconciled",
-		"automation evaluated against observed state")
-	r.setAppliedCondition(&automation, outcomes)
+	if inForce {
+		r.setCondition(&automation, conditionReady, metav1.ConditionTrue, "Reconciled",
+			"automation evaluated against observed state")
+		r.setAppliedCondition(&automation, outcomes)
+	} else {
+		// Ready, because a suspended Automation is healthy and still being
+		// reconciled; not Applied, because what it wants is deliberately not
+		// what its targets are being held at. Reporting it any other way would
+		// make an operator's own pause look like a fault.
+		r.setCondition(&automation, conditionReady, metav1.ConditionTrue, reasonSuspended,
+			"spec.suspend is true: state is still observed, and no target is claimed")
+		r.setCondition(&automation, conditionApplied, metav1.ConditionFalse, reasonSuspended,
+			"suspended, so this automation's targets are arbitrated as if it did not exist")
+	}
 	if err := r.Status().Update(ctx, &automation); err != nil {
 		return ctrl.Result{}, err
 	}
