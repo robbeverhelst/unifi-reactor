@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="248" viewBox="0 0 880 248" role="img" aria-label="UniFi Reactor — event-driven automation for UniFi networks and Kubernetes. UniFi state flows into Reactor, which acts on Kubernetes.">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8c959f"/>
+    </marker>
+  </defs>
+  <style>
+    .title { font: 700 46px ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Helvetica, Arial, sans-serif; fill: #1f2328; }
+    .tag   { font: 400 17px ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Helvetica, Arial, sans-serif; fill: #59636e; }
+    .node  { font: 600 14px ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Helvetica, Arial, sans-serif; fill: #1f2328; }
+    .sub   { font: 400 12px ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; fill: #59636e; }
+    .box   { fill: #ffffff; stroke: #d1d9e0; stroke-width: 1.5; }
+    .boxhi { fill: #ddf4ff; stroke: #0193d7; stroke-width: 1.5; }
+    .link  { stroke: #8c959f; stroke-width: 1.5; }
+  </style>
+
+  <text class="title" x="440" y="62" text-anchor="middle">UniFi <tspan fill="#0193d7">Reactor</tspan></text>
+  <text class="tag" x="440" y="92" text-anchor="middle">Event-driven automation for UniFi networks and Kubernetes</text>
+
+  <g transform="translate(0,132)">
+    <rect class="box" x="96" y="0" width="180" height="62" rx="10"/>
+    <text class="node" x="186" y="26" text-anchor="middle">UniFi state</text>
+    <text class="sub"  x="186" y="46" text-anchor="middle">wan · ups · battery</text>
+
+    <line class="link" x1="284" y1="31" x2="342" y2="31" marker-end="url(#arrow)"/>
+
+    <rect class="boxhi" x="350" y="0" width="180" height="62" rx="10"/>
+    <text class="node" x="440" y="26" text-anchor="middle">Reactor</text>
+    <text class="sub"  x="440" y="46" text-anchor="middle">match · transition</text>
+
+    <line class="link" x1="538" y1="31" x2="596" y2="31" marker-end="url(#arrow)"/>
+
+    <rect class="box" x="604" y="0" width="180" height="62" rx="10"/>
+    <text class="node" x="694" y="26" text-anchor="middle">Kubernetes</text>
+    <text class="sub"  x="694" y="46" text-anchor="middle">scale · restart</text>
+  </g>
+</svg>
