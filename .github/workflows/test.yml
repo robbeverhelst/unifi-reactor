@@ -23,7 +23,23 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # The chart render tests skip themselves without it, which would hide the
+      # packaging regressions they exist to catch.
+      - name: Setup Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+
       - name: Running Tests
         run: |
           go mod tidy
           make test
+
+      # make test regenerates manifests, the chart's CRD, and deepcopy code.
+      # Anything it changes here was not committed.
+      - name: Check generated output is committed
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::Generated output is out of date; run 'make manifests generate' and commit the result"
+            git status --porcelain
+            git diff
+            exit 1
+          fi

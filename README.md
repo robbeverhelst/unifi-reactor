@@ -135,6 +135,7 @@ Chart values ([full reference](charts/reactor/README.md)):
 
 | Value | Default | Description |
 | --- | --- | --- |
+| `crds.install` | `true` | install and upgrade the `Automation` CRD with the release |
 | `unifi.url` | — | UniFi console base URL; the provider stays disabled until this is set |
 | `unifi.site` | `default` | UniFi Network site |
 | `unifi.pollInterval` | `30s` | how often WAN and UPS state are observed |

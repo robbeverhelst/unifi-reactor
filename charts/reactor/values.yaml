@@ -1,3 +1,13 @@
+crds:
+  # The Automation CRD ships as a chart template, not in crds/, because Helm
+  # installs crds/ on first install only and never upgrades it. It carries
+  # helm.sh/resource-policy: keep, so uninstalling the release leaves the CRD —
+  # and every Automation stored under it — in place.
+  # Set to false when the CRD is managed outside this release (GitOps, or a
+  # cluster where only an admin may touch CRDs); the chart README documents
+  # what to apply and when.
+  install: true
+
 image:
   repository: ghcr.io/robbeverhelst/unifi-reactor
   # Defaults to the chart's appVersion.

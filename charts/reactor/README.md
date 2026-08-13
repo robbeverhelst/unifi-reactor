@@ -16,6 +16,41 @@ helm install reactor oci://ghcr.io/robbeverhelst/charts/reactor \
 
 Create an API key in the UniFi UI under Settings → Control Plane → Integrations.
 
+## The CRD
+
+The `Automation` CRD is a **template** in this chart rather than a file under `crds/`. Helm installs a chart's `crds/` directory on first install and never touches it again on upgrade, silently — so a release that changed the schema would upgrade cleanly while the cluster kept the old CRD, and the operator would start writing fields the API server rejects.
+
+As a template it upgrades with everything else. It carries `helm.sh/resource-policy: keep`, so `helm uninstall` leaves both the CRD and every `Automation` stored under it in place. Removing it is a deliberate act:
+
+```bash
+kubectl delete crd automations.reactor.robbeverhelst.com   # also deletes every Automation
+```
+
+### Upgrading from chart 0.3.0 or earlier
+
+Those versions installed the CRD through `crds/`, which Helm does not record as part of the release. The first upgrade to a chart that templates it fails with `invalid ownership metadata` until the existing CRD is handed over to the release:
+
+```bash
+kubectl label crd automations.reactor.robbeverhelst.com \
+  app.kubernetes.io/managed-by=Helm --overwrite
+kubectl annotate crd automations.reactor.robbeverhelst.com \
+  meta.helm.sh/release-name=reactor \
+  meta.helm.sh/release-namespace=reactor-system --overwrite
+```
+
+Use your own release name and namespace. Nothing is deleted or recreated — the CRD stays live, and your Automations with it.
+
+### Managing the CRD outside the release
+
+Set `crds.install=false` where an admin or a GitOps controller owns CRDs. Apply the CRD **before** upgrading the release, so the schema is never older than the operator expecting it:
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/robbeverhelst/unifi-reactor/v<chart-version>/config/crd/bases/reactor.robbeverhelst.com_automations.yaml
+
+helm upgrade reactor oci://ghcr.io/robbeverhelst/charts/reactor \
+  --namespace reactor-system --set crds.install=false
+```
+
 ## First Automation
 
 ```yaml
@@ -78,6 +113,7 @@ escalation:
 
 | Key | Default | Description |
 | --- | --- | --- |
+| `crds.install` | `true` | install and upgrade the `Automation` CRD with the release; `false` when you manage it yourself |
 | `unifi.url` | `""` | UniFi console base URL (required to enable the provider) |
 | `unifi.site` | `default` | UniFi Network site |
 | `unifi.pollInterval` | `30s` | WAN state poll interval (polling is the source of truth) |
