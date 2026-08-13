@@ -194,6 +194,22 @@ Each key is published only when the matching hardware is adopted by your control
 
 If a provider stops reporting a key at all — the hardware dropped off the controller — Reactor holds the last known state and reports `Ready=False` with `StateKeyUnavailable` rather than treating lost visibility as a condition that ended.
 
+### Settling a noisy signal
+
+A changed value can be required to hold for several consecutive observations before Reactor acts on it, which stops one flapping signal driving repeated actions:
+
+```yaml
+unifi:
+  debounce:
+    default: 1          # react on the first observation
+    keys:
+      ups.battery: 2    # ...but let a threshold crossing settle
+```
+
+Each extra sample costs one `pollInterval` of reaction time, so the default is `1`: a WAN failover and a power cut both deserve an immediate reaction, and neither flaps. `ups.battery` ships at `2` because it is a threshold crossing — a charge hovering at 30% would otherwise report `low`, `normal`, `low` — and because a battery drains over minutes, so spending one more poll to be sure costs nothing. At the default 30s poll that makes a battery-level escalation react in 60s worst case instead of 30s.
+
+Debouncing happens in the shared state store, so every automation sees the same settled value. Two automations can never disagree about the current state and fight over a workload they share.
+
 ## Configuration
 
 Chart values ([full reference](charts/reactor/README.md)):

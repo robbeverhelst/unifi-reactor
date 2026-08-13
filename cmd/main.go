@@ -20,8 +20,10 @@ import (
 	"crypto/tls"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -94,6 +96,39 @@ func init() {
 
 	utilruntime.Must(reactorv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
+}
+
+// unifiDebounce reads how long a changed UniFi value must hold before Reactor
+// acts on it. The keys arrive as opaque data so the engine stays free of any
+// knowledge of what they mean; deciding that a battery threshold should settle
+// but a WAN failover should not is the provider's call, not the core's.
+func unifiDebounce() (engine.DebounceConfig, error) {
+	config := engine.DebounceConfig{Default: 1, PerKey: map[string]int{}}
+
+	if raw := os.Getenv("UNIFI_DEBOUNCE_DEFAULT"); raw != "" {
+		samples, err := strconv.Atoi(raw)
+		if err != nil {
+			return config, fmt.Errorf("UNIFI_DEBOUNCE_DEFAULT %q: %w", raw, err)
+		}
+		config.Default = samples
+	}
+
+	for pair := range strings.SplitSeq(os.Getenv("UNIFI_DEBOUNCE_KEYS"), ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		key, raw, found := strings.Cut(pair, "=")
+		if !found {
+			return config, fmt.Errorf("UNIFI_DEBOUNCE_KEYS %q is not key=samples", pair)
+		}
+		samples, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil {
+			return config, fmt.Errorf("UNIFI_DEBOUNCE_KEYS %q: %w", pair, err)
+		}
+		config.PerKey[strings.TrimSpace(key)] = samples
+	}
+	return config, nil
 }
 
 // runReleaseClaims hands every claimed target back and exits. It talks to the
@@ -257,7 +292,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	store := engine.NewStateStore()
+	debounce, err := unifiDebounce()
+	if err != nil {
+		setupLog.Error(err, "Invalid debounce configuration")
+		os.Exit(1)
+	}
+	store := engine.NewStateStore(engine.WithDebounce(unifi.ProviderName, debounce))
 	// Providers push onto this when they observe a state change so the
 	// affected Automations reconcile immediately; the periodic re-evaluation
 	// in the reconciler is the backstop, not the mechanism.

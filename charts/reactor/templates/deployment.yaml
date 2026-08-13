@@ -55,6 +55,13 @@ spec:
               value: {{ .Values.unifi.ups.lowBatteryPercent | quote }}
             - name: UNIFI_UPS_CRITICAL_BATTERY_PERCENT
               value: {{ .Values.unifi.ups.criticalBatteryPercent | quote }}
+            - name: UNIFI_DEBOUNCE_DEFAULT
+              value: {{ .Values.unifi.debounce.default | quote }}
+            {{- with .Values.unifi.debounce.keys }}
+            {{- $samples := . }}
+            - name: UNIFI_DEBOUNCE_KEYS
+              value: "{{- range $i, $key := (keys $samples | sortAlpha) }}{{ if $i }},{{ end }}{{ $key }}={{ get $samples $key }}{{- end }}"
+            {{- end }}
             # Read per poll from the mounted Secret rather than injected once
             # at startup, so rotating the API key takes effect on the next
             # poll instead of waiting for someone to restart the pod.

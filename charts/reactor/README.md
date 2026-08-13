@@ -252,6 +252,8 @@ networkPolicy:
 | `podAnnotations` | `{}` | annotations on the pod |
 | `unifi.ups.lowBatteryPercent` | `30` | charge at or below this reports `ups.battery: low` |
 | `unifi.ups.criticalBatteryPercent` | `10` | charge at or below this reports `ups.battery: critical` |
+| `unifi.debounce.default` | `1` | consecutive observations a changed value needs before Reactor acts; each extra sample costs one `pollInterval` of reaction time |
+| `unifi.debounce.keys` | `{ups.battery: 2}` | per-key overrides for signals that settle rather than switch |
 | `uninstall.releaseClaims` | `true` | Run a pre-delete Job that hands every held workload back before the operator is removed |
 | `uninstall.timeoutSeconds` | `120` | Hard bound on that Job, so a stuck release delays rather than blocks the uninstall |
 | `rbac.clusterWide` | `true` | `false` restricts the operator to the release namespace (cross-namespace `target.namespace` stops working) |
