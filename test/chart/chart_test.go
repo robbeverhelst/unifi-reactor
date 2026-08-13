@@ -182,3 +182,68 @@ func TestOperationalExtrasAreOptOut(t *testing.T) {
 		t.Error("networkPolicy.enabled did not produce a policy")
 	}
 }
+
+// TestWebhookFastPathIsOptOut is the upgrade guarantee for the fast path: an
+// existing install that does not ask for it gains no listening port, no
+// Service, and no second credential.
+func TestWebhookFastPathIsOptOut(t *testing.T) {
+	defaults := render(t, unifiURL)
+	for _, absent := range []string{"UNIFI_WEBHOOK_ENABLED", "containerPort: 9090", "-webhook"} {
+		if strings.Contains(defaults, absent) {
+			t.Errorf("a default install renders %q; the webhook must be opt-in", absent)
+		}
+	}
+
+	enabled := render(t, unifiURL, "unifi.webhook.enabled=true")
+	for _, present := range []string{"UNIFI_WEBHOOK_ENABLED", "UNIFI_WEBHOOK_TOKEN", "containerPort: 9090"} {
+		if !strings.Contains(enabled, present) {
+			t.Errorf("unifi.webhook.enabled did not render %q", present)
+		}
+	}
+	// A ClusterIP cannot be reached by a console outside the cluster, which is
+	// the point: exposing the receiver stays the operator's explicit decision.
+	if !strings.Contains(enabled, "type: ClusterIP") {
+		t.Error("the webhook Service is not a ClusterIP by default")
+	}
+	// Self-registration writes to the user's gateway, so it needs its own yes.
+	if strings.Contains(enabled, "UNIFI_WEBHOOK_REGISTER") {
+		t.Error("enabling the receiver also enabled self-registration")
+	}
+}
+
+// TestWebhookMisconfigurationsFailAtInstall covers the combinations that
+// cannot work, where rendering something plausible would mean debugging a
+// silent no-op later instead.
+func TestWebhookMisconfigurationsFailAtInstall(t *testing.T) {
+	for name, values := range map[string][]string{
+		"receiver without a console":    {"unifi.webhook.enabled=true"},
+		"registration without receiver": {unifiURL, "unifi.webhook.registration.enabled=true"},
+		"registration without a public URL": {unifiURL, "unifi.webhook.enabled=true",
+			"unifi.webhook.registration.enabled=true"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if renderFails(t, values...) == "" {
+				t.Error("expected the chart to refuse this combination")
+			}
+		})
+	}
+}
+
+// renderFails returns the error output of a render expected to fail, or "" if
+// it unexpectedly succeeded.
+func renderFails(t *testing.T, values ...string) string {
+	t.Helper()
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm is not installed; skipping chart render tests")
+	}
+	args := make([]string, 0, len(values)*2+3)
+	args = append(args, "template", "reactor", chartDir())
+	for _, value := range values {
+		args = append(args, "--set", value)
+	}
+	out, err := exec.Command("helm", args...).CombinedOutput()
+	if err == nil {
+		return ""
+	}
+	return string(out)
+}

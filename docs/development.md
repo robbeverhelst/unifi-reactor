@@ -69,6 +69,64 @@ curl -X POST 'http://localhost:9443/ups?mode=mains&level=100'  # power restored
 
 Point the operator at it with `UNIFI_URL=http://<your-host>:9443 UNIFI_API_KEY=mock`. Use a LAN address rather than `localhost` so the pod can reach your machine.
 
+## Webhook fast path
+
+The receiver turns a UniFi Alarm Manager delivery into an immediate re-observation. It is off by default, and everything about it degrades to poll-only:
+
+```sh
+make dev-deploy DEV_CONTEXT=kind-reactor \
+  UNIFI_URL=http://<your-host>:9443 UNIFI_API_KEY=mock \
+  HELM_EXTRA_ARGS="--set unifi.webhook.enabled=true"
+```
+
+The receiver needs a Secret with the shared secret it will demand from every delivery:
+
+```sh
+kubectl -n reactor-system create secret generic unifi-reactor-webhook \
+  --from-literal=UNIFI_WEBHOOK_TOKEN="$(openssl rand -hex 32)"
+```
+
+Send a delivery by hand — the payload is never read, so any body will do:
+
+```sh
+curl -X POST http://<receiver>:9090/webhooks/unifi \
+  -H 'Authorization: Bearer <token>' \
+  -H 'Content-Type: application/json' \
+  -d @hack/dev/webhook-delivery.json
+```
+
+The logs show the delivery and the observation it caused, in that order:
+
+```sh
+kubectl -n reactor-system logs deploy/reactor | grep -E 'webhook delivery|state observed'
+```
+
+`hack/dev/webhook-delivery.json` is **synthetic**, not a capture. Nothing in Reactor parses a delivery, so a stand-in is enough to drive the path.
+
+### Rehearsing self-registration
+
+`make dev-mock` also mocks the Alarm Manager API, so the registration path can be exercised without touching a real console. Run the mock, start Reactor with `unifi.webhook.registration.enabled=true`, and then have the mock fire a delivery at whatever rule Reactor registered:
+
+```sh
+make dev-webhook
+```
+
+The mock's alarm responses are built from `docs/unifi-alarm-manager-api.md`, not captured from a console. Registration succeeding against the mock proves Reactor sends what those notes describe. It does not prove a real console accepts it.
+
+### Capturing real deliveries
+
+`hack/webhook-logger.mjs` dumps incoming requests verbatim to `testdata/unifi/webhooks/raw/` (gitignored). Raw records contain every header, including the `Authorization` header carrying Reactor's own shared secret, so nothing goes from there into `testdata/` by hand:
+
+```sh
+node hack/webhook-logger.mjs 8080
+
+./hack/sanitize-webhook-capture.sh --paths testdata/unifi/webhooks/raw/<file>.json
+./hack/sanitize-webhook-capture.sh testdata/unifi/webhooks/raw/<file>.json \
+  internet-disconnected alarm.trigger,alarm.title
+```
+
+The first command prints every field path in the body; the second keeps the ones you name and discards the rest, along with every header but `content-type`. Same allowlist discipline as `hack/capture-unifi.sh`, and `hack/verify-testdata.sh` rejects leftover credential material in `testdata/unifi/webhooks/` as a safety net.
+
 ## Captured payloads
 
 Parsers are written and tested against real responses in [`testdata/unifi/`](../testdata/unifi/README.md), never against assumed formats. Capture them with:

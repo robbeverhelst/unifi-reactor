@@ -1,0 +1,35 @@
+{{- if and .Values.unifi.webhook.enabled .Values.unifi.webhook.service.enabled }}
+# Service for the webhook fast path.
+#
+# A ClusterIP — the default — is NOT reachable from a UniFi console: the
+# gateway is not in the cluster. Reaching it needs a deliberate choice about
+# exposure: type LoadBalancer on a LAN-routable address, type NodePort, or your
+# own Ingress pointed at this Service. Reactor does not guess, because the wrong
+# guess publishes an endpoint the operator did not ask to publish.
+#
+# Whatever the exposure, deliveries still have to present the shared secret, and
+# the worst an accepted one can do is cause an extra poll.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "reactor.fullname" . }}-webhook
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reactor.labels" . | nindent 4 }}
+  {{- with .Values.unifi.webhook.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.unifi.webhook.service.type }}
+  {{- with .Values.unifi.webhook.service.loadBalancerIP }}
+  loadBalancerIP: {{ . | quote }}
+  {{- end }}
+  selector:
+    {{- include "reactor.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: webhook
+      port: {{ .Values.unifi.webhook.service.port }}
+      targetPort: webhook
+      protocol: TCP
+{{- end }}

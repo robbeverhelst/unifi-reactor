@@ -183,6 +183,21 @@ func (s *StateStore) Observe(o events.Observation) []Transition {
 	return transitions
 }
 
+// Proving reports whether any of a provider's keys is part-way through its
+// debounce threshold: a changed value has been seen, but not yet often enough
+// to be reported.
+//
+// It exists so that anything able to ask for an out-of-band observation cannot
+// also supply the samples that promote a value. Debounce is a statement about
+// how much evidence a change needs before it is believed, and evidence
+// gathered on demand by whoever asked for it is not evidence. Callers that
+// have no such input can ignore this entirely.
+func (s *StateStore) Proving(provider string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.current[provider].pending) > 0
+}
+
 // Get returns the latest reported state for a provider. Values still proving
 // themselves against the debounce threshold are deliberately not visible here:
 // every caller must see the same state.

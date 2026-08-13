@@ -168,3 +168,50 @@ func TestStateStoreProvidersAreIndependent(t *testing.T) {
 		t.Fatal("unifi observation lost")
 	}
 }
+
+// Proving is what lets a caller distinguish "nothing is changing" from "a
+// change is part-way through proving itself", so that a caller able to force
+// an observation cannot also supply the samples that promote a value.
+func TestProvingReportsValuesPartWayThroughDebounce(t *testing.T) {
+	store := NewStateStore(WithDebounce("p", DebounceConfig{Default: 3}))
+
+	if store.Proving("p") {
+		t.Error("an empty store has nothing proving itself")
+	}
+
+	// A first sighting is reported immediately and proves nothing.
+	store.Observe(events.Observation{Provider: "p", State: map[string]string{"k": "a"}})
+	if store.Proving("p") {
+		t.Error("a first observation should not leave anything proving itself")
+	}
+
+	// A change now needs three consecutive samples.
+	store.Observe(events.Observation{Provider: "p", State: map[string]string{"k": "b"}})
+	if !store.Proving("p") {
+		t.Fatal("a changed value below its threshold should be proving itself")
+	}
+	if got, _ := store.Get("p"); got.State["k"] != "a" {
+		t.Errorf("a value still proving itself must not be reported, got %q", got.State["k"])
+	}
+
+	store.Observe(events.Observation{Provider: "p", State: map[string]string{"k": "b"}})
+	transitions := store.Observe(events.Observation{Provider: "p", State: map[string]string{"k": "b"}})
+	if len(transitions) != 1 {
+		t.Fatalf("expected the third sample to promote the value, got %v", transitions)
+	}
+	if store.Proving("p") {
+		t.Error("nothing should be proving itself once the value is reported")
+	}
+
+	// Falling back to the reported value abandons the candidate.
+	store.Observe(events.Observation{Provider: "p", State: map[string]string{"k": "c"}})
+	store.Observe(events.Observation{Provider: "p", State: map[string]string{"k": "b"}})
+	if store.Proving("p") {
+		t.Error("a value that went back to the reported one is no longer proving anything")
+	}
+
+	// An unknown provider is not proving anything, and asking must not create it.
+	if store.Proving("nobody") {
+		t.Error("an unknown provider has nothing proving itself")
+	}
+}

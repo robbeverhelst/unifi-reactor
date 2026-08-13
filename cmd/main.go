@@ -18,13 +18,11 @@ package main
 
 import (
 	"crypto/tls"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -70,25 +68,6 @@ func (w targetAdmissionWarnings) HandleWarningHeader(code int, _ string, text st
 		return
 	}
 	w.log.V(1).Info("API server warning about a targeted resource; the request itself succeeded", "warning", text)
-}
-
-// unifiAPIKey resolves where the API key comes from, and fails fast if it
-// cannot be read at all. UNIFI_API_KEY_FILE points at a mounted Secret and is
-// re-read on every poll, so rotating the key takes effect without a restart;
-// UNIFI_API_KEY holds the key in the environment, where it is fixed for the
-// life of the process and rotation means restarting the pod.
-func unifiAPIKey() (unifi.APIKey, error) {
-	if path := os.Getenv("UNIFI_API_KEY_FILE"); path != "" {
-		key := unifi.FileAPIKey(path)
-		if _, err := key(); err != nil {
-			return nil, err
-		}
-		return key, nil
-	}
-	if key := os.Getenv("UNIFI_API_KEY"); key != "" {
-		return unifi.StaticAPIKey(key), nil
-	}
-	return nil, errors.New("UNIFI_URL is set but neither UNIFI_API_KEY_FILE nor UNIFI_API_KEY is")
 }
 
 func init() {
@@ -305,53 +284,16 @@ func main() {
 
 	// The UniFi provider is configured at the controller level (Helm values /
 	// env), not per-Automation: one UniFi console per Reactor install.
-	if unifiURL := os.Getenv("UNIFI_URL"); unifiURL != "" {
-		apiKey, err := unifiAPIKey()
-		if err != nil {
-			setupLog.Error(err, "Failed to resolve the UniFi API key")
+	unifiConfig, unifiEnabled, err := unifi.ConfigFromEnv(os.Getenv)
+	if err != nil {
+		setupLog.Error(err, "Failed to configure the UniFi provider")
+		os.Exit(1)
+	}
+	if unifiEnabled {
+		if err := setupUniFi(mgr, unifiConfig, store, wake); err != nil {
+			setupLog.Error(err, "Failed to set up the UniFi provider")
 			os.Exit(1)
 		}
-		interval := 30 * time.Second
-		if v := os.Getenv("UNIFI_POLL_INTERVAL"); v != "" {
-			parsed, err := time.ParseDuration(v)
-			if err != nil {
-				setupLog.Error(err, "Invalid UNIFI_POLL_INTERVAL", "value", v)
-				os.Exit(1)
-			}
-			interval = parsed
-		}
-		unifiClient := unifi.NewClient(unifiURL, apiKey, os.Getenv("UNIFI_SITE"),
-			os.Getenv("UNIFI_INSECURE_SKIP_VERIFY") == "true")
-		for _, threshold := range []struct {
-			env    string
-			target *int
-		}{
-			{"UNIFI_UPS_LOW_BATTERY_PERCENT", &unifiClient.LowBatteryPercent},
-			{"UNIFI_UPS_CRITICAL_BATTERY_PERCENT", &unifiClient.CriticalBatteryPercent},
-		} {
-			v := os.Getenv(threshold.env)
-			if v == "" {
-				continue
-			}
-			parsed, err := strconv.Atoi(v)
-			if err != nil {
-				setupLog.Error(err, "Invalid battery threshold", "var", threshold.env, "value", v)
-				os.Exit(1)
-			}
-			*threshold.target = parsed
-		}
-		poller := &controller.UniFiPoller{
-			Client:   unifiClient,
-			Store:    store,
-			Interval: interval,
-			Reader:   mgr.GetClient(),
-			Events:   wake,
-		}
-		if err := mgr.Add(poller); err != nil {
-			setupLog.Error(err, "Failed to add UniFi poller")
-			os.Exit(1)
-		}
-		setupLog.Info("UniFi provider enabled", "url", unifiURL, "interval", interval)
 	} else {
 		setupLog.Info("UniFi provider disabled (UNIFI_URL not set); state triggers will stay pending")
 	}
@@ -382,4 +324,57 @@ func main() {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}
+}
+
+// setupUniFi wires the poller — the mechanism of record — and, when it is
+// configured, the webhook fast path in front of it.
+//
+// The ordering of failures here is the point: anything wrong with the fast path
+// is reported and skipped, and the poller is added regardless. Reactor with a
+// broken optimization reacts on the poll interval; Reactor without a poller
+// does not react at all.
+func setupUniFi(mgr ctrl.Manager, cfg unifi.Config, store *engine.StateStore, wake chan event.GenericEvent) error {
+	unifiClient := unifi.NewClient(cfg.URL, cfg.APIKey, cfg.Site, cfg.InsecureSkipVerify)
+	unifiClient.LowBatteryPercent = cfg.LowBatteryPercent
+	unifiClient.CriticalBatteryPercent = cfg.CriticalBatteryPercent
+
+	poller := &controller.UniFiPoller{
+		Client:             unifiClient,
+		Store:              store,
+		Interval:           cfg.PollInterval,
+		Reader:             mgr.GetClient(),
+		Events:             wake,
+		MinObserveInterval: cfg.Webhook.MinObserveInterval,
+	}
+
+	switch err := cfg.Webhook.Validate(); {
+	case err != nil:
+		setupLog.Error(err, "Webhook fast path not started; UniFi state still converges on the poll interval")
+	case cfg.Webhook.Enabled:
+		receiver := unifi.NewReceiver(cfg.Webhook)
+		poller.Nudge = receiver.Requests()
+		if err := mgr.Add(receiver); err != nil {
+			return err
+		}
+		setupLog.Info("Webhook fast path enabled",
+			"address", cfg.Webhook.BindAddress, "path", cfg.Webhook.Path,
+			"minObserveInterval", cfg.Webhook.MinObserveInterval)
+		if cfg.Webhook.Register {
+			registrar, err := unifi.NewAlarmRegistrar(cfg)
+			if err != nil {
+				return err
+			}
+			if err := mgr.Add(registrar); err != nil {
+				return err
+			}
+			setupLog.Info("Alarm Manager self-registration enabled",
+				"rule", cfg.Webhook.RuleTitle, "callbackURL", cfg.Webhook.PublicURL)
+		}
+	}
+
+	if err := mgr.Add(poller); err != nil {
+		return err
+	}
+	setupLog.Info("UniFi provider enabled", "url", cfg.URL, "interval", cfg.PollInterval)
+	return nil
 }

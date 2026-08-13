@@ -211,7 +211,8 @@ dev-deploy: dev-context ## Build the image and install/upgrade the chart on DEV_
 		--set unifi.insecureSkipVerify=$(if $(UNIFI_INSECURE_SKIP_VERIFY),$(UNIFI_INSECURE_SKIP_VERIFY),true) \
 		$(if $(UNIFI_POLL_INTERVAL),--set unifi.pollInterval=$(UNIFI_POLL_INTERVAL),) \
 		--set image.repository=$(word 1,$(subst :, ,$(DEV_IMG))) \
-		--set image.tag=$(word 2,$(subst :, ,$(DEV_IMG)))
+		--set image.tag=$(word 2,$(subst :, ,$(DEV_IMG))) \
+		$(HELM_EXTRA_ARGS)
 	$(KUBECTL_DEV) -n $(DEV_NAMESPACE) rollout restart deployment/$(DEV_RELEASE)
 	$(KUBECTL_DEV) -n $(DEV_NAMESPACE) rollout status deployment/$(DEV_RELEASE) --timeout=120s
 
@@ -221,8 +222,16 @@ dev-hello: dev-context ## Deploy the hello-world demos (nginx scaled by observed
 	$(KUBECTL_DEV) apply -f hack/dev/hello-ups.yaml
 
 .PHONY: dev-mock
-dev-mock: ## Run a mock UniFi API on :9443 serving captured payloads. POST /flip (WAN) or /ups (power).
+dev-mock: ## Run a mock UniFi API on :9443 serving captured payloads. POST /flip (WAN), /ups (power), /alarm-fire (webhook).
 	go run ./hack/mock-unifi
+
+.PHONY: dev-webhook
+dev-webhook: ## Make the mock console fire a webhook delivery at whatever rule Reactor registered with it.
+	curl -sS -X POST http://localhost:9443/alarm-fire
+
+.PHONY: sanitize-webhook-capture
+sanitize-webhook-capture: ## Turn a raw delivery from hack/webhook-logger.mjs into a committable fixture. Run with no args for usage.
+	./hack/sanitize-webhook-capture.sh $(ARGS)
 
 .PHONY: dev-clean
 dev-clean: dev-context ## Remove the demos and the controller from DEV_CONTEXT.

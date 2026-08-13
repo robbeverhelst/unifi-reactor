@@ -125,25 +125,67 @@ A full wake channel must never stall observation. The wake is an optimization; t
 
 `wake` filters the Automation list by `Spec.When.Provider`, so your poller only wakes its own. That filter is currently written once per poller. When the second provider lands, the obvious refactor is lifting it into a shared helper parameterized by provider name — a change inside `internal/controller/`, not `internal/engine/`.
 
+**Do not confuse `Events` with `Nudge`.** They point in opposite directions and only one is required. `Events` is outbound — the poller telling the reconciler that something changed, as above. `Nudge` is inbound and optional: something outside the loop asking for an observation to happen *sooner*, which is how the UniFi webhook fast path works. It is a separate `<-chan struct{}` in the same `select`, and a nil channel simply means the provider has no fast path:
+
+```go
+select {
+case <-ctx.Done():
+    return nil
+case <-ticker.C:
+case <-p.Nudge:
+    // A nudge says "look now". It never says what changed.
+    if !waitFor(ctx, minInterval-time.Since(observedAt)) {
+        return nil
+    }
+}
+```
+
+Three properties make that safe to copy. The nudge channel holds a **single slot** with a non-blocking send at the other end, so a burst of requests coalesces into one pending observation rather than one per request. `MinObserveInterval` floors the gap between two observations, so whoever is sending nudges — including someone who should not be — cannot turn them into unbounded upstream traffic. And the observation that follows is what decides the state; a nudge carries no data at all.
+
+**A nudge must not interact with debounce.** This is the one place the fast path and the settling policy below genuinely meet, and getting it wrong is a security bug rather than a bug. Debounce reports a changed value only after N consecutive observations — but if a nudge can cause an observation, then anyone able to send nudges can also supply those N samples, and push a debounced key through its settling time in a fraction of the intended window. The fix is one condition, using `StateStore.Proving` to ask whether anything is part-way through its threshold:
+
+```go
+case <-p.Nudge:
+    if p.Store.Proving(unifi.ProviderName) {
+        // A delivery may make Reactor look sooner. It may not make
+        // Reactor believe something sooner.
+        continue
+    }
+```
+
+A nudge is still allowed to *start* a debounce — that is "look sooner", and it costs one observation. Every later nudge is refused until the value is either promoted or abandoned, so the samples that promote it always come from the poll cadence. If your provider has an inbound trigger and any debounced key, copy this condition too.
+
 ### 4. `cmd/main.go` — the wiring
 
 The provider is constructed only when its configuration is present, and its absence is logged rather than fatal:
 
 ```go
-if unifiURL := os.Getenv("UNIFI_URL"); unifiURL != "" {
-    // ... read config, construct client ...
-    poller := &controller.UniFiPoller{
-        Client: unifiClient, Store: store, Interval: interval,
-        Reader: mgr.GetClient(), Events: wake,
-    }
-    if err := mgr.Add(poller); err != nil { /* fatal */ }
-    setupLog.Info("UniFi provider enabled", "url", unifiURL, "interval", interval)
+unifiConfig, unifiEnabled, err := unifi.ConfigFromEnv(os.Getenv)
+if err != nil { /* fatal */ }
+if unifiEnabled {
+    if err := setupUniFi(mgr, unifiConfig, store, wake); err != nil { /* fatal */ }
 } else {
     setupLog.Info("UniFi provider disabled (UNIFI_URL not set); state triggers will stay pending")
 }
 ```
 
-Both `store` and `wake` are created once and shared by every provider. A second provider adds a second `if` block against the same two values. Missing *credentials* when the provider is enabled is fatal — `unifiAPIKey()` resolves the key and `main` exits if it cannot be read at all — while a *disabled* provider is not. Follow that split: an operator that silently polls nothing is worse than one that refuses to start.
+Reading the environment lives in the provider package, not in `main`: `unifi.ConfigFromEnv` takes a `lookup func(string) string`, returns a `Config` plus whether the provider is configured at all, and is unit-tested without touching process state. `main` keeps only the wiring. Copy that split — `main` grows one block per provider and stays readable, and the mapping from environment to behaviour gets tests instead of a code review.
+
+Both `store` and `wake` are created once and shared by every provider. A second provider adds a second block against the same two values. Missing *credentials* when the provider is enabled is fatal — `ConfigFromEnv` resolves the key and `main` exits if it cannot be read at all — while a *disabled* provider is not. Follow that split: an operator that silently polls nothing is worse than one that refuses to start.
+
+The one place that rule bends is an **optional** part of a provider that is not the mechanism of record. `setupUniFi` validates the webhook fast path separately, and a fast path that cannot start is logged and skipped while the poller is added regardless:
+
+```go
+switch err := cfg.Webhook.Validate(); {
+case err != nil:
+    setupLog.Error(err, "Webhook fast path not started; UniFi state still converges on the poll interval")
+case cfg.Webhook.Enabled:
+    // ... receiver, and optionally self-registration ...
+}
+if err := mgr.Add(poller); err != nil { return err }
+```
+
+The test for which side of that line something sits on: if it is broken, does the operator still converge? A missing credential means it never observes anything, so that is fatal. A misconfigured optimization only costs latency, so it is a log line.
 
 ### Credentials: resolve per request, not at startup
 
@@ -209,11 +251,12 @@ Three layers, all runnable with `make test` and none needing hardware:
 
 - [ ] `internal/providers/<name>/state.go` — `ProviderName` plus unexported key and value constants
 - [ ] `internal/providers/<name>/client.go` — `Observe(ctx) (map[string]string, error)`, transport split from derivation
+- [ ] `internal/providers/<name>/config.go` — `ConfigFromEnv(lookup)`, so the environment mapping is tested rather than reviewed
 - [ ] `hack/capture-<name>.sh` — allowlist-first capture, placeholders for anything identifying
 - [ ] `testdata/<name>/` fixtures plus a README recording hardware, version, and inferred mappings
 - [ ] `hack/verify-testdata.sh` extended with the new provider's secret-bearing fields
 - [ ] `internal/controller/<name>_poller.go` — `Runnable`, `NeedLeaderElection() true`, non-blocking wake
-- [ ] `cmd/main.go` — construct only when configured, log clearly when disabled, share `store` and `wake`
+- [ ] `cmd/main.go` — construct only when configured, log clearly when disabled, share `store` and `wake`; anything optional fails soft while the poller is added regardless
 - [ ] `charts/reactor/values.yaml` and `templates/deployment.yaml` — config values and env, credentials mounted as a directory and pointed at by a `*_FILE` variable
 - [ ] Tests at all three layers
 - [ ] Docs: the state-key table in `README.md` and `charts/reactor/README.md`
@@ -223,8 +266,8 @@ Three layers, all runnable with `make test` and none needing hardware:
 
 Some things genuinely belong in the core, and the test is whether the engine would have to learn a provider's vocabulary:
 
-- **Debounce** — requiring N consecutive identical observations before a value is reported. This belongs in `StateStore.Observe`, not in your provider, so that every Automation reads the same value. Configuration comes from the provider as an opaque key → sample-count map; the engine never learns that `ups` should react fast. Tracked in #30.
-- **A webhook fast path** — a receiver that triggers an immediate re-observation. It never executes actions and never bypasses the poller; it just makes the next observation happen sooner. Tracked in #32 for UniFi.
+- **Debounce** — requiring N consecutive identical observations before a value is reported. This lives in `StateStore.Observe`, not in your provider, so that every Automation reads the same value. Configuration arrives from the provider as an opaque key → sample-count map; the engine never learns that `ups` should react fast. Supply yours with `engine.WithDebounce(ProviderName, ...)`, and if you also have an inbound trigger, see the `Proving` note above.
+- **A webhook fast path** — a receiver that triggers an immediate re-observation. It never executes actions and never bypasses the poller; it just makes the next observation happen sooner. This one turned out **not** to need the engine at all: `internal/providers/unifi/receiver.go` is an HTTP `Runnable` that authenticates a delivery, discards its body without reading it, and sends on the poller's `Nudge` channel. Because no state is derived from a payload, a dropped, duplicated, replayed or forged delivery costs at most one extra observation. If your upstream can push, copy that shape rather than parsing what it pushes.
 
 And some things are a different extension point entirely. **Action types are not providers.** A provider observes; an action acts. Adding `kubernetes.restart` or an HTTP action means extending the action side of the reconciler and the `Action` type's enum, and touches none of the above.
 
