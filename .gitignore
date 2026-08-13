@@ -35,3 +35,4 @@ go.work
 # Kubeconfig might contain secrets
 *.kubeconfig
 dist
+.DS_Store

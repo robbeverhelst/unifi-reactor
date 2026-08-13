@@ -30,7 +30,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	reactorv1alpha1 "github.com/robbeverhelst/unifi-reactor/api/v1alpha1"
 	"github.com/robbeverhelst/unifi-reactor/internal/engine"
@@ -54,6 +57,12 @@ type AutomationReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	Store  *engine.StateStore
+
+	// Wake carries Automations that a provider has observed a state change
+	// for, so they reconcile immediately rather than on their next periodic
+	// re-evaluation. Optional; without it reactions lag by up to one
+	// reevaluateInterval.
+	Wake <-chan event.GenericEvent
 }
 
 // +kubebuilder:rbac:groups=reactor.robbeverhelst.com,resources=automations,verbs=get;list;watch;create;update;patch;delete
@@ -231,8 +240,11 @@ func (r *AutomationReconciler) setReady(automation *reactorv1alpha1.Automation, 
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *AutomationReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&reactorv1alpha1.Automation{}).
-		Named("automation").
-		Complete(r)
+		Named("automation")
+	if r.Wake != nil {
+		builder = builder.WatchesRawSource(source.Channel(r.Wake, &handler.EnqueueRequestForObject{}))
+	}
+	return builder.Complete(r)
 }
