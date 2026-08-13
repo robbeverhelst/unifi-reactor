@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	reactorv1alpha1 "github.com/robbeverhelst/unifi-reactor/api/v1alpha1"
@@ -43,6 +44,26 @@ const (
 	upsOnBattery  = "on-battery"
 )
 
+// stallingClient stands in for a target that has stopped answering: reads of
+// the Automation itself still work, so the reconcile gets far enough to block
+// on the target the way a wedged API call would.
+type stallingClient struct {
+	client.Client
+}
+
+func (s stallingClient) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	obj client.Object,
+	opts ...client.GetOption,
+) error {
+	if _, isTarget := obj.(*appsv1.Deployment); !isTarget {
+		return s.Client.Get(ctx, key, obj, opts...)
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
 var _ = Describe("Automation Controller", func() {
 	ctx := context.Background()
 
@@ -59,6 +80,11 @@ var _ = Describe("Automation Controller", func() {
 			Store:  store,
 		}
 	})
+
+	withTimeout := func(action reactorv1alpha1.Action, seconds int32) reactorv1alpha1.Action {
+		action.TimeoutSeconds = &seconds
+		return action
+	}
 
 	scaleTo := func(target string, replicas int32) reactorv1alpha1.Action {
 		return reactorv1alpha1.Action{
@@ -280,6 +306,92 @@ var _ = Describe("Automation Controller", func() {
 			scaleBy(target, 5)
 			reconcileOnce(target)
 			Expect(replicasOf(target)).To(Equal(int32(5)))
+		})
+	})
+
+	Context("when a target will not answer", func() {
+		reconcileFor := func(name string) (reconcile.Result, error) {
+			return reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: name, Namespace: testNamespace},
+			})
+		}
+
+		It("times out a hanging target and surfaces it in status", func() {
+			const target = "hanging"
+			createAutomation(target, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
+				},
+				Actions: []reactorv1alpha1.Action{withTimeout(scaleTo(target, 0), 1)},
+			})
+			reconciler.Client = stallingClient{Client: k8sClient}
+
+			observe(map[string]string{keyWAN: wanBackup})
+			started := time.Now()
+			result, err := reconcileFor(target)
+
+			Expect(err).NotTo(HaveOccurred(), "a timeout is a recorded failure, not a reconcile error")
+			Expect(time.Since(started)).To(BeNumerically("<", 10*time.Second),
+				"the action must be bounded by its own timeout")
+			Expect(result.RequeueAfter).To(Equal(retryBackoff(1)))
+
+			status := statusOf(target)
+			Expect(status.LastExecution.Status).To(Equal("Failed"))
+			Expect(status.LastExecution.Attempts).To(Equal(int32(1)))
+			Expect(status.LastExecution.Reason).To(ContainSubstring("context deadline exceeded"))
+			Expect(conditionOf(status, conditionReady).Reason).To(Equal("ActionFailed"))
+		})
+
+		It("backs off exponentially and then gives up with a reason", func() {
+			const target = "missing-target"
+			createAutomation(target, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
+				},
+				Actions: []reactorv1alpha1.Action{scaleTo(target, 0)},
+			})
+
+			observe(map[string]string{keyWAN: wanBackup})
+			for attempt := int32(1); attempt < maxActionAttempts; attempt++ {
+				result, err := reconcileFor(target)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result.RequeueAfter).To(Equal(retryBackoff(attempt)),
+					"attempt %d should back off exponentially", attempt)
+				Expect(statusOf(target).LastExecution.Attempts).To(Equal(attempt))
+			}
+
+			By("giving up once the budget is spent")
+			result, err := reconcileFor(target)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(reevaluateInterval),
+				"a spent budget falls back to ordinary re-evaluation, not a growing backoff")
+
+			status := statusOf(target)
+			applied := conditionOf(status, conditionApplied)
+			Expect(applied.Status).To(Equal(metav1.ConditionFalse))
+			Expect(applied.Reason).To(Equal("RetryBudgetExhausted"))
+			Expect(status.LastExecution.Attempts).To(Equal(int32(maxActionAttempts)))
+		})
+
+		It("starts the budget again once the target recovers", func() {
+			const target = "recovering"
+			createAutomation(target, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
+				},
+				Actions: []reactorv1alpha1.Action{scaleTo(target, 0)},
+			})
+
+			observe(map[string]string{keyWAN: wanBackup})
+			_, err := reconcileFor(target)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(statusOf(target).LastExecution.Attempts).To(Equal(int32(1)))
+
+			createDeployment(target, 2)
+			reconcileOnce(target)
+			Expect(replicasOf(target)).To(Equal(int32(0)))
+			Expect(statusOf(target).LastExecution.Status).To(Equal("Success"))
+			Expect(statusOf(target).LastExecution.Attempts).To(BeZero())
 		})
 	})
 

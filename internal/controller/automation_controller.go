@@ -29,6 +29,7 @@ import (
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	crcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -58,7 +59,41 @@ const (
 	// releaseRetryInterval is the base delay between attempts to hand a
 	// deleted Automation's targets back.
 	releaseRetryInterval = 5 * time.Second
+	// defaultActionTimeout bounds one attempt at an action when the Automation
+	// does not set spec.actions[].timeoutSeconds.
+	defaultActionTimeout = 30 * time.Second
+	// maxActionAttempts is how many consecutive failures a target gets before
+	// Reactor stops retrying it and waits for the state to change instead.
+	maxActionAttempts = 5
+	// retryBackoffBase and retryBackoffCap bound the exponential delay between
+	// those attempts.
+	retryBackoffBase = 2 * time.Second
+	retryBackoffCap  = time.Minute
+	// maxConcurrentReconciles keeps one Automation stuck on an unreachable
+	// target from stalling every other Automation behind it.
+	maxConcurrentReconciles = 4
 )
+
+// attemptsAfter is the attempt number of the failure about to be recorded. A
+// run that last succeeded starts the count again, so a target that recovers
+// and fails later gets the full budget rather than the remainder of an old one.
+func attemptsAfter(last *reactorv1alpha1.ExecutionStatus) int32 {
+	if last == nil || last.Status != "Failed" {
+		return 1
+	}
+	return last.Attempts + 1
+}
+
+// retryBackoff is the delay before the next attempt: exponential from
+// retryBackoffBase, capped so a long-running failure settles into a steady
+// retry rather than drifting towards never trying again.
+func retryBackoff(attempts int32) time.Duration {
+	backoff := retryBackoffBase << (attempts - 1)
+	if backoff > retryBackoffCap || backoff <= 0 {
+		return retryBackoffCap
+	}
+	return backoff
+}
 
 // desiredStateActions are the action types that express a level — what a
 // target should be — rather than an occurrence. Only these are arbitrated
@@ -233,15 +268,34 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	automation.Status.Targets = targetStatuses(outcomes)
 
 	if applyErr != nil {
+		attempts := attemptsAfter(automation.Status.LastExecution)
 		automation.Status.LastExecution = &reactorv1alpha1.ExecutionStatus{
-			Time: metav1.Now(), OnExit: !matching, Status: "Failed", Reason: applyErr.Error(),
+			Time: metav1.Now(), OnExit: !matching, Status: "Failed",
+			Reason: applyErr.Error(), Attempts: attempts,
 		}
 		r.setCondition(&automation, conditionReady, metav1.ConditionFalse, "ActionFailed", applyErr.Error())
+
+		// Retry is bounded here rather than by returning the error and
+		// inheriting controller-runtime's requeue, so that giving up is a
+		// decision with a visible reason instead of an unbounded backoff
+		// nobody can see the end of.
+		if attempts >= maxActionAttempts {
+			r.setCondition(&automation, conditionApplied, metav1.ConditionFalse, "RetryBudgetExhausted",
+				fmt.Sprintf("giving up after %d attempts, will try again on the next state change: %v",
+					attempts, applyErr))
+			log.Error(applyErr, "giving up on target after repeated failures",
+				"automation", automation.Name, "attempts", attempts)
+			if err := r.Status().Update(ctx, &automation); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: reevaluateInterval}, nil
+		}
+
 		r.setCondition(&automation, conditionApplied, metav1.ConditionFalse, "ActionFailed", applyErr.Error())
 		if err := r.Status().Update(ctx, &automation); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, applyErr // controller-runtime backoff retries
+		return ctrl.Result{RequeueAfter: retryBackoff(attempts)}, nil
 	}
 
 	r.setCondition(&automation, conditionReady, metav1.ConditionTrue, "Reconciled",
@@ -400,6 +454,7 @@ func (r *AutomationReconciler) setCondition(
 func (r *AutomationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&reactorv1alpha1.Automation{}).
+		WithOptions(crcontroller.Options{MaxConcurrentReconciles: maxConcurrentReconciles}).
 		Named("automation")
 	if r.Wake != nil {
 		builder = builder.WatchesRawSource(source.Channel(r.Wake, &handler.EnqueueRequestForObject{}))

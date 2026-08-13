@@ -82,6 +82,15 @@ type Action struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
+
+	// TimeoutSeconds bounds a single attempt at this action, so an
+	// unreachable target cannot occupy a reconcile indefinitely. Defaults to
+	// 30. Exceeding it is recorded as a failed execution and retried with
+	// bounded backoff, not held open.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=600
+	// +optional
+	TimeoutSeconds *int32 `json:"timeoutSeconds,omitempty"`
 }
 
 // ReversalPolicy selects what an Automation wants for its targets while its
@@ -177,6 +186,11 @@ type ExecutionStatus struct {
 	Time metav1.Time `json:"time,omitempty"`
 	// OnExit is true when this execution ran the onExit actions.
 	OnExit bool `json:"onExit,omitempty"`
+	// Attempts counts consecutive failures. Retries stop once the budget is
+	// exhausted, leaving the Automation to recover on the next state change
+	// rather than retrying a hopeless action forever.
+	// +optional
+	Attempts int32 `json:"attempts,omitempty"`
 }
 
 // TargetStatus reports what this Automation wants for one target and what the

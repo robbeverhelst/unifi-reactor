@@ -100,6 +100,16 @@ spec:
                       - kind
                       - name
                       type: object
+                    timeoutSeconds:
+                      description: |-
+                        TimeoutSeconds bounds a single attempt at this action, so an
+                        unreachable target cannot occupy a reconcile indefinitely. Defaults to
+                        30. Exceeding it is recorded as a failed execution and retried with
+                        bounded backoff, not held open.
+                      format: int32
+                      maximum: 600
+                      minimum: 1
+                      type: integer
                     type:
                       description: Type of the action, e.g. "kubernetes.scale".
                       enum:
@@ -150,6 +160,16 @@ spec:
                       - kind
                       - name
                       type: object
+                    timeoutSeconds:
+                      description: |-
+                        TimeoutSeconds bounds a single attempt at this action, so an
+                        unreachable target cannot occupy a reconcile indefinitely. Defaults to
+                        30. Exceeding it is recorded as a failed execution and retried with
+                        bounded backoff, not held open.
+                      format: int32
+                      maximum: 600
+                      minimum: 1
+                      type: integer
                     type:
                       description: Type of the action, e.g. "kubernetes.scale".
                       enum:
@@ -292,6 +312,13 @@ spec:
                   LastExecution is the outcome of the most recent action run, including
                   onExit runs (recorded for auditability).
                 properties:
+                  attempts:
+                    description: |-
+                      Attempts counts consecutive failures. Retries stop once the budget is
+                      exhausted, leaving the Automation to recover on the next state change
+                      rather than retrying a hopeless action forever.
+                    format: int32
+                    type: integer
                   onExit:
                     description: OnExit is true when this execution ran the onExit
                       actions.

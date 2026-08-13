@@ -207,6 +207,12 @@ func (r *AutomationReconciler) reconcileTarget(
 	log := logf.FromContext(ctx)
 	outcome := targetOutcome{ref: key.String()}
 
+	// Bounded per action, so a target that has stopped answering fails and is
+	// retried rather than holding this reconcile — and, with concurrent
+	// reconciles, rather than starving every other Automation.
+	ctx, cancel := context.WithTimeout(ctx, timeoutFor(self, key, selfMatching))
+	defer cancel()
+
 	peers, err := r.referencingAutomations(ctx, key, self)
 	if err != nil {
 		return outcome, err
@@ -283,6 +289,24 @@ func (r *AutomationReconciler) reconcileTarget(
 		// this workload by hand.
 		return outcome, nil
 	}
+}
+
+// timeoutFor bounds one attempt at a target, taken from the action this
+// Automation reaches it through.
+func timeoutFor(self *reactorv1alpha1.Automation, key targetKey, matching bool) time.Duration {
+	actions := self.Spec.Actions
+	if !matching {
+		actions = self.Spec.OnExit
+	}
+	for _, action := range actions {
+		if !isDesiredState(action.Type) || action.TimeoutSeconds == nil {
+			continue
+		}
+		if k, ok := targetKeyFor(self, action); ok && k == key {
+			return time.Duration(*action.TimeoutSeconds) * time.Second
+		}
+	}
+	return defaultActionTimeout
 }
 
 // selfLevel is what the Automation being reconciled wants for a target, which
