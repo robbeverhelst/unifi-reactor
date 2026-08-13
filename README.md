@@ -168,6 +168,8 @@ Chart values ([full reference](charts/reactor/README.md)):
 
 Early days: the API group is `v1alpha1` and the project is pre-1.0, so expect breaking changes between minor versions. The two trigger kinds (`when` for state, `trigger` for events) are settled and won't be collapsed — that split exists precisely so state-shaped automations never have to migrate.
 
+**The name stays `unifi-reactor` through v1**, and adding providers does not change that. The user-facing surface is already provider-neutral — the API group is `reactor.robbeverhelst.com`, the kind is `Automation` with a `provider` field, the chart is `reactor`, the namespace is `reactor-system` — so a NUT, Proxmox, or Prometheus provider lands with no breaking change and nothing to migrate. Only the repository, the Go module path, and the image carry the `unifi-` prefix, and those are the surfaces you touch least. Discovery favours the specific name besides: people search for a UniFi Kubernetes operator, and `reactor` alone has a lot of prior art. If a second provider ever gains real users, renaming is a repository rename (GitHub redirects), a transition period publishing the image under both paths, and a major-version bump of the module path — a decision for when it has users, not for a version boundary on its own.
+
 Parsers are written against real captured API responses committed to [`testdata/`](testdata/unifi/), never against assumed formats. One caveat worth stating plainly: the `wan` mapping is derived from a gateway with a second uplink configured, but a genuine failover has not yet been observed end-to-end. Treat `wan` as less battle-tested than `ups`.
 
 ## Roadmap
