@@ -148,6 +148,19 @@ var _ = Describe("Automation Controller", func() {
 			reconcileOnce()
 			Expect(replicasNow()).To(Equal(int32(1)))
 
+			By("holding state, not running onExit, when the provider stops reporting the key")
+			store.Observe(events.Observation{Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup}, ObservedAt: time.Now()})
+			reconcileOnce()
+			Expect(replicasNow()).To(Equal(int32(0)))
+			store.Observe(events.Observation{Provider: providerUniFi, State: map[string]string{"ups": "online"}, ObservedAt: time.Now()})
+			reconcileOnce()
+			Expect(replicasNow()).To(Equal(int32(0)), "onExit must not fire merely because the key went missing")
+
+			By("resuming normally once the key is reported again")
+			store.Observe(events.Observation{Provider: providerUniFi, State: map[string]string{keyWAN: wanPrimary}, ObservedAt: time.Now()})
+			reconcileOnce()
+			Expect(replicasNow()).To(Equal(int32(1)))
+
 			By("recording status")
 			var reconciled reactorv1alpha1.Automation
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &reconciled)).To(Succeed())

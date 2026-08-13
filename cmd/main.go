@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"strconv"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -200,9 +201,28 @@ func main() {
 			}
 			interval = parsed
 		}
+		unifiClient := unifi.NewClient(unifiURL, apiKey, os.Getenv("UNIFI_SITE"),
+			os.Getenv("UNIFI_INSECURE_SKIP_VERIFY") == "true")
+		for _, threshold := range []struct {
+			env    string
+			target *int
+		}{
+			{"UNIFI_UPS_LOW_BATTERY_PERCENT", &unifiClient.LowBatteryPercent},
+			{"UNIFI_UPS_CRITICAL_BATTERY_PERCENT", &unifiClient.CriticalBatteryPercent},
+		} {
+			v := os.Getenv(threshold.env)
+			if v == "" {
+				continue
+			}
+			parsed, err := strconv.Atoi(v)
+			if err != nil {
+				setupLog.Error(err, "Invalid battery threshold", "var", threshold.env, "value", v)
+				os.Exit(1)
+			}
+			*threshold.target = parsed
+		}
 		poller := &controller.UniFiPoller{
-			Client: unifi.NewClient(unifiURL, apiKey, os.Getenv("UNIFI_SITE"),
-				os.Getenv("UNIFI_INSECURE_SKIP_VERIFY") == "true"),
+			Client:   unifiClient,
 			Store:    store,
 			Interval: interval,
 		}

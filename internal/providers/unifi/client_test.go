@@ -18,6 +18,7 @@ package unifi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -25,63 +26,176 @@ import (
 	"testing"
 )
 
-// capturedGateway serves the real captured stat/device response from testdata.
-func capturedGateway(t *testing.T) []byte {
+// captured loads a real captured stat/device response from testdata.
+func captured(t *testing.T, name string) []byte {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("..", "..", "..", "testdata", "unifi", "api", "stat-device-gateway.json"))
+	b, err := os.ReadFile(filepath.Join("..", "..", "..", "testdata", "unifi", "api", name))
 	if err != nil {
 		t.Fatalf("reading captured payload: %v", err)
 	}
 	return b
 }
 
-func TestObserveWANStateAgainstCapturedPayload(t *testing.T) {
-	payload := capturedGateway(t)
-	var gotKey, gotPath string
+// merged builds one device list from several captured responses, the way a
+// real controller returns every device in a single call.
+func merged(t *testing.T, names ...string) []byte {
+	t.Helper()
+	var all deviceStatResponse
+	for _, name := range names {
+		var parsed deviceStatResponse
+		if err := json.Unmarshal(captured(t, name), &parsed); err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+		all.Data = append(all.Data, parsed.Data...)
+	}
+	b, err := json.Marshal(all)
+	if err != nil {
+		t.Fatalf("marshalling merged payload: %v", err)
+	}
+	return b
+}
+
+func serve(t *testing.T, payload []byte) *Client {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotKey = r.Header.Get("X-API-KEY")
-		gotPath = r.URL.Path
+		if got := r.Header.Get("X-API-KEY"); got != "test-key" {
+			t.Errorf("expected X-API-KEY header, got %q", got)
+		}
+		if got := r.URL.Path; got != "/proxy/network/api/s/default/stat/device" {
+			t.Errorf("unexpected path %q", got)
+		}
 		_, _ = w.Write(payload)
 	}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
+	return NewClient(srv.URL, "test-key", "", false)
+}
 
-	c := NewClient(srv.URL, "test-key", "", false)
-	state, err := c.ObserveWANState(context.Background())
+func TestObserveAgainstCapturedGatewayAndUPS(t *testing.T) {
+	c := serve(t, merged(t, "stat-device-gateway.json", "stat-device-ups.json"))
+
+	state, err := c.Observe(context.Background())
 	if err != nil {
-		t.Fatalf("ObserveWANState: %v", err)
+		t.Fatalf("Observe: %v", err)
 	}
-	if state["wan"] != "primary" {
-		t.Fatalf("expected wan=primary from captured payload (WAN1 active), got %q", state["wan"])
-	}
-	if gotKey != "test-key" {
-		t.Fatalf("expected X-API-KEY header, got %q", gotKey)
-	}
-	if gotPath != "/proxy/network/api/s/default/stat/device" {
-		t.Fatalf("unexpected path %q", gotPath)
+	// The captures were taken with WAN1 active and the UPS on mains at 100%.
+	for key, want := range map[string]string{
+		stateKeyWAN:        wanPrimary,
+		stateKeyUPS:        upsOnline,
+		stateKeyUPSBattery: batteryNormal,
+	} {
+		if state[key] != want {
+			t.Errorf("state[%q] = %q, want %q", key, state[key], want)
+		}
 	}
 }
 
-func TestWANStateBackupWhenWAN2IsUplink(t *testing.T) {
-	parsed := deviceStatResponse{}
-	parsed.Data = []struct {
-		Model string   `json:"model"`
-		Type  string   `json:"type"`
-		WAN1  *wanPort `json:"wan1"`
-		WAN2  *wanPort `json:"wan2"`
+func TestObserveWithoutUPSOmitsUPSKeys(t *testing.T) {
+	c := serve(t, captured(t, "stat-device-gateway.json"))
+
+	state, err := c.Observe(context.Background())
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if state[stateKeyWAN] != wanPrimary {
+		t.Errorf("state[wan] = %q, want %q", state[stateKeyWAN], wanPrimary)
+	}
+	if _, present := state[stateKeyUPS]; present {
+		t.Error("ups key should be absent when no UPS is visible to the controller")
+	}
+}
+
+func TestWANBackupWhenWAN2IsUplink(t *testing.T) {
+	c := NewClient("", "", "", false)
+	state, err := c.stateFromDevices(deviceStatResponse{Data: []deviceRecord{{
+		Model: "UDMPRO",
+		WAN1:  &wanPort{IsUplink: false, Up: false},
+		WAN2:  &wanPort{IsUplink: true, Up: true},
+	}}})
+	if err != nil {
+		t.Fatalf("stateFromDevices: %v", err)
+	}
+	if state[stateKeyWAN] != wanBackup {
+		t.Fatalf("state[wan] = %q, want %q", state[stateKeyWAN], wanBackup)
+	}
+}
+
+func TestUPSStateTransitions(t *testing.T) {
+	tests := []struct {
+		name        string
+		batteryMode bool
+		level       int
+		wantUPS     string
+		wantBattery string
 	}{
-		{Model: "UDMPRO", WAN1: &wanPort{IsUplink: false, Up: false}, WAN2: &wanPort{IsUplink: true, Up: true}},
+		{"on mains, full", false, 100, upsOnline, batteryNormal},
+		{"on mains, recharging after outage", false, 20, upsOnline, batteryLow},
+		{"outage, battery still healthy", true, 80, upsOnBattery, batteryNormal},
+		{"outage, at the low threshold", true, 30, upsOnBattery, batteryLow},
+		{"outage, below the low threshold", true, 25, upsOnBattery, batteryLow},
+		{"outage, at the critical threshold", true, 10, upsOnBattery, batteryCritical},
+		{"outage, nearly empty", true, 3, upsOnBattery, batteryCritical},
 	}
-	state, err := wanStateFromDevices(parsed)
-	if err != nil {
-		t.Fatalf("wanStateFromDevices: %v", err)
-	}
-	if state["wan"] != "backup" {
-		t.Fatalf("expected wan=backup, got %q", state["wan"])
+	c := NewClient("", "", "", false)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var vbms vbmsTable
+			vbms.IsBatteryMode = tc.batteryMode
+			vbms.BattPool.BatteryLevel = tc.level
+
+			state, err := c.stateFromDevices(deviceStatResponse{Data: []deviceRecord{{Model: "USWDA26", VBMS: &vbms}}})
+			if err != nil {
+				t.Fatalf("stateFromDevices: %v", err)
+			}
+			if state[stateKeyUPS] != tc.wantUPS {
+				t.Errorf("state[ups] = %q, want %q", state[stateKeyUPS], tc.wantUPS)
+			}
+			if state[stateKeyUPSBattery] != tc.wantBattery {
+				t.Errorf("state[ups.battery] = %q, want %q", state[stateKeyUPSBattery], tc.wantBattery)
+			}
+		})
 	}
 }
 
-func TestWANStateErrorsWithoutGateway(t *testing.T) {
-	if _, err := wanStateFromDevices(deviceStatResponse{}); err == nil {
+// An `ups: on-battery` automation must stay matched as the battery drains,
+// so its onExit actions never fire in the middle of a power failure.
+func TestUPSStaysOnBatteryAcrossBatteryLevels(t *testing.T) {
+	c := NewClient("", "", "", false)
+	for _, level := range []int{100, 50, 30, 10, 1} {
+		var vbms vbmsTable
+		vbms.IsBatteryMode = true
+		vbms.BattPool.BatteryLevel = level
+
+		state, err := c.stateFromDevices(deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
+		if err != nil {
+			t.Fatalf("stateFromDevices: %v", err)
+		}
+		if state[stateKeyUPS] != upsOnBattery {
+			t.Fatalf("at %d%%: state[ups] = %q, want %q", level, state[stateKeyUPS], upsOnBattery)
+		}
+	}
+}
+
+func TestCustomBatteryThresholds(t *testing.T) {
+	c := NewClient("", "", "", false)
+	c.LowBatteryPercent = 60
+	c.CriticalBatteryPercent = 40
+
+	var vbms vbmsTable
+	vbms.IsBatteryMode = true
+	vbms.BattPool.BatteryLevel = 50
+
+	state, err := c.stateFromDevices(deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
+	if err != nil {
+		t.Fatalf("stateFromDevices: %v", err)
+	}
+	if state[stateKeyUPSBattery] != batteryLow {
+		t.Fatalf("state[ups.battery] = %q, want %q at 50%% with low=60", state[stateKeyUPSBattery], batteryLow)
+	}
+}
+
+func TestErrorsWhenNothingObservable(t *testing.T) {
+	c := NewClient("", "", "", false)
+	if _, err := c.stateFromDevices(deviceStatResponse{}); err == nil {
 		t.Fatal("expected error for empty device list")
 	}
 }

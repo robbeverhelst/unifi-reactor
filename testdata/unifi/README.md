@@ -12,6 +12,35 @@ Sanitization: public IPs → TEST-NET-3 (`203.0.113.x`), MAC addresses → `aa:b
 | `integration-sites.json` | `GET /proxy/network/integration/v1/sites` | official Integration API; site list (`internalReference: "default"`) |
 | `stat-health.json` | `GET /proxy/network/api/s/default/stat/health` | legacy API; `wan` subsystem: `status`, `wan_ip`, `isp_name`, per-WAN `uptime_stats` (`WAN`, `WAN2`) with monitor availability |
 | `stat-device-gateway.json` | `GET /proxy/network/api/s/default/stat/device` (UDMPRO record only) | `wan1`/`wan2` port state (`is_uplink`, `up`, `ip`), `uplink.name`, `last_wan_status`, `active_geo_info` (ISP of active WAN) |
+| `stat-device-ups.json` | `GET /proxy/network/api/s/default/stat/device` (UniFi UPS 2U record only) | `vbms_table` battery state — see below. Captured on mains power at 100% charge |
+
+## UPS state (`vbms_table`)
+
+A UniFi UPS (UPS 2U, model `USWDA26`) is reported by `stat/device` as a
+switch-type device carrying a `vbms_table` block:
+
+```json
+{
+  "is_battery_mode": false,
+  "battpool": {
+    "batteryLevel": 100,
+    "ischarging": true,
+    "timeToRemain": 1071,
+    "device_total_power_budget": 1000,
+    "device_total_power_output": 300
+  }
+}
+```
+
+`is_battery_mode` is the authoritative mains-vs-battery signal; `batteryLevel`
+is the remaining charge percentage. `timeToRemain` appears to be seconds of
+runtime at the current load (~18 minutes at 300 W of a 1000 W budget), but this
+is inferred and not yet confirmed against a real outage — the provider does not
+depend on it.
+
+The UPS record also carries `nut_client_table` / `nut_client_ips`, so the UPS
+can additionally serve Network UPS Tools clients. Reactor does not use this: the
+state is already in the device poll it performs anyway.
 
 ## WAN state candidates (to confirm during the failover capture)
 

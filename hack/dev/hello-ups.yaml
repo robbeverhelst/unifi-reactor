@@ -1,0 +1,100 @@
+# Power-outage demo. Rehearse it without touching a plug using the mock:
+#
+#   make dev-mock
+#   curl -X POST 'http://<host>:9443/ups?mode=battery&level=80'  # outage starts
+#   curl -X POST 'http://<host>:9443/ups?level=5'                # battery critical
+#   curl -X POST 'http://<host>:9443/ups?mode=mains&level=100'   # power restored
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-heavy
+  namespace: reactor-hello
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hello-heavy
+  template:
+    metadata:
+      labels:
+        app: hello-heavy
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-nonessential
+  namespace: reactor-hello
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hello-nonessential
+  template:
+    metadata:
+      labels:
+        app: hello-nonessential
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+---
+# While the UPS runs on battery, shed the heavy workload; when mains power
+# returns, bring it back.
+#
+# `ups` and `ups.battery` are independent state keys on purpose. This
+# automation stays matched for the entire outage — including as the battery
+# drains from normal to low to critical — so its onExit actions only ever run
+# when power is genuinely restored.
+apiVersion: reactor.robbeverhelst.com/v1alpha1
+kind: Automation
+metadata:
+  name: shed-load-on-battery
+  namespace: reactor-hello
+spec:
+  when:
+    provider: unifi
+    state:
+      ups: on-battery
+  actions:
+    - type: kubernetes.scale
+      target:
+        kind: Deployment
+        name: hello-heavy
+      replicas: 0
+  onExit:
+    - type: kubernetes.scale
+      target:
+        kind: Deployment
+        name: hello-heavy
+      replicas: 1
+---
+# Escalation: when the battery reaches critical *during an outage*, shut down
+# what is left. Both keys must match, so this never fires while on mains power
+# (e.g. while the battery is still recharging after an outage).
+apiVersion: reactor.robbeverhelst.com/v1alpha1
+kind: Automation
+metadata:
+  name: emergency-shutdown-on-critical-battery
+  namespace: reactor-hello
+spec:
+  when:
+    provider: unifi
+    state:
+      ups: on-battery
+      ups.battery: critical
+  actions:
+    - type: kubernetes.scale
+      target:
+        kind: Deployment
+        name: hello-nonessential
+      replicas: 0
+  onExit:
+    - type: kubernetes.scale
+      target:
+        kind: Deployment
+        name: hello-nonessential
+      replicas: 1

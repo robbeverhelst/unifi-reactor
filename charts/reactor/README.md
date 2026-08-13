@@ -39,6 +39,30 @@ spec:
       replicas: 1
 ```
 
+## State keys
+
+The UniFi provider publishes these keys; each is only present when the matching
+hardware is adopted by the controller.
+
+| Key | Values | Source |
+| --- | --- | --- |
+| `wan` | `primary`, `backup` | which uplink the gateway is using |
+| `ups` | `online`, `on-battery` | whether a UniFi UPS is on mains or battery |
+| `ups.battery` | `normal`, `low`, `critical` | remaining charge vs. the configured thresholds |
+
+`ups` and `ups.battery` are independent on purpose: an automation matching
+`ups: on-battery` stays matched for the whole outage as the battery drains,
+so its `onExit` actions cannot fire mid-outage. Match both keys to react to an
+escalation:
+
+```yaml
+  when:
+    provider: unifi
+    state:
+      ups: on-battery
+      ups.battery: critical    # all keys must match
+```
+
 ## Values
 
 | Key | Default | Description |
@@ -48,6 +72,8 @@ spec:
 | `unifi.pollInterval` | `30s` | WAN state poll interval (polling is the source of truth) |
 | `unifi.insecureSkipVerify` | `true` | Accept the console's self-signed certificate |
 | `unifi.existingSecret` | `unifi-reactor-credentials` | Secret containing `UNIFI_API_KEY` |
+| `unifi.ups.lowBatteryPercent` | `30` | charge at or below this reports `ups.battery: low` |
+| `unifi.ups.criticalBatteryPercent` | `10` | charge at or below this reports `ups.battery: critical` |
 | `rbac.clusterWide` | `true` | `false` restricts the operator to the release namespace (cross-namespace `target.namespace` stops working) |
 | `image.repository` | `ghcr.io/robbeverhelst/unifi-reactor` | Manager image |
 | `image.tag` | chart `appVersion` | Image tag |

@@ -25,6 +25,12 @@ import (
 	"time"
 )
 
+// Default battery thresholds, as percentages of remaining charge.
+const (
+	DefaultLowBatteryPercent      = 30
+	DefaultCriticalBatteryPercent = 10
+)
+
 // Client talks to the UniFi Network application on a UniFi OS console using
 // an API key (X-API-KEY works on both the Integration API and the legacy
 // /proxy/network/api endpoints as of Network 10.5).
@@ -33,6 +39,11 @@ type Client struct {
 	apiKey  string
 	site    string
 	http    *http.Client
+
+	// LowBatteryPercent and CriticalBatteryPercent bound the ups.battery
+	// state key. Charge at or below the threshold reports that level.
+	LowBatteryPercent      int
+	CriticalBatteryPercent int
 }
 
 // NewClient creates a UniFi client. UniFi OS consoles serve a self-signed
@@ -43,9 +54,11 @@ func NewClient(baseURL, apiKey, site string, insecureSkipVerify bool) *Client {
 		site = "default"
 	}
 	return &Client{
-		baseURL: baseURL,
-		apiKey:  apiKey,
-		site:    site,
+		baseURL:                baseURL,
+		apiKey:                 apiKey,
+		site:                   site,
+		LowBatteryPercent:      DefaultLowBatteryPercent,
+		CriticalBatteryPercent: DefaultCriticalBatteryPercent,
 		http: &http.Client{
 			Timeout: 10 * time.Second,
 			Transport: &http.Transport{
@@ -56,16 +69,20 @@ func NewClient(baseURL, apiKey, site string, insecureSkipVerify bool) *Client {
 }
 
 // deviceStatResponse is the subset of /proxy/network/api/s/<site>/stat/device
-// this provider reads. Field selection is based on the real captured response
-// in testdata/unifi/api/stat-device-gateway.json — do not add fields that are
-// not present there.
+// this provider reads. Field selection is based on the real captured
+// responses in testdata/unifi/api/ — do not add fields that are not present
+// there.
 type deviceStatResponse struct {
-	Data []struct {
-		Model string   `json:"model"`
-		Type  string   `json:"type"`
-		WAN1  *wanPort `json:"wan1"`
-		WAN2  *wanPort `json:"wan2"`
-	} `json:"data"`
+	Data []deviceRecord `json:"data"`
+}
+
+type deviceRecord struct {
+	Model string     `json:"model"`
+	Type  string     `json:"type"`
+	Name  string     `json:"name"`
+	WAN1  *wanPort   `json:"wan1"`
+	WAN2  *wanPort   `json:"wan2"`
+	VBMS  *vbmsTable `json:"vbms_table"`
 }
 
 type wanPort struct {
@@ -75,12 +92,30 @@ type wanPort struct {
 	IP       string `json:"ip"`
 }
 
-// ObserveWANState returns the provider state map, currently just
-// {"wan": "primary" | "backup"}, derived from which WAN port is the active
-// uplink on the gateway device. WAN1 is primary, WAN2 is backup — matching
-// the UniFi UI's labeling. Verified against the captured gateway record;
-// the failover direction must be re-verified with a real failover capture.
-func (c *Client) ObserveWANState(ctx context.Context) (map[string]string, error) {
+// vbmsTable is the UniFi UPS battery-management block. Present on UniFi UPS
+// devices (e.g. UPS 2U, reported as a switch-type device).
+type vbmsTable struct {
+	IsBatteryMode bool `json:"is_battery_mode"`
+	BattPool      struct {
+		BatteryLevel int  `json:"batteryLevel"`
+		IsCharging   bool `json:"ischarging"`
+		TimeToRemain int  `json:"timeToRemain"`
+		AvailableCnt int  `json:"batt_available_cnt"`
+	} `json:"battpool"`
+}
+
+// Observe returns the normalized UniFi state map. Keys are only present when
+// the corresponding hardware is visible to the controller:
+//
+//	wan         primary | backup      (which uplink the gateway is using)
+//	ups         online  | on-battery  (whether the UPS is running on mains)
+//	ups.battery normal  | low | critical
+//
+// ups and ups.battery are deliberately independent: a `when: {ups: on-battery}`
+// automation must stay matched for the whole outage, including as the battery
+// drains, instead of flipping out of its matching state (which would run its
+// onExit actions in the middle of a power failure).
+func (c *Client) Observe(ctx context.Context) (map[string]string, error) {
 	url := fmt.Sprintf("%s/proxy/network/api/s/%s/stat/device", c.baseURL, c.site)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -102,20 +137,53 @@ func (c *Client) ObserveWANState(ctx context.Context) (map[string]string, error)
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return nil, fmt.Errorf("decoding unifi device state: %w", err)
 	}
-	return wanStateFromDevices(parsed)
+	return c.stateFromDevices(parsed)
 }
 
-func wanStateFromDevices(parsed deviceStatResponse) (map[string]string, error) {
+// stateFromDevices derives the state map from a device list. The first
+// gateway with an active uplink and the first UPS reporting battery data win;
+// multiple gateways or UPS devices per site are out of scope for v1alpha1.
+func (c *Client) stateFromDevices(parsed deviceStatResponse) (map[string]string, error) {
+	state := map[string]string{}
+
 	for _, d := range parsed.Data {
-		if d.WAN1 == nil && d.WAN2 == nil {
-			continue
+		if _, seen := state[stateKeyWAN]; !seen {
+			switch {
+			case d.WAN2 != nil && d.WAN2.IsUplink:
+				state[stateKeyWAN] = wanBackup
+			case d.WAN1 != nil && d.WAN1.IsUplink:
+				state[stateKeyWAN] = wanPrimary
+			}
 		}
-		switch {
-		case d.WAN2 != nil && d.WAN2.IsUplink:
-			return map[string]string{"wan": "backup"}, nil
-		case d.WAN1 != nil && d.WAN1.IsUplink:
-			return map[string]string{"wan": "primary"}, nil
+		if _, seen := state[stateKeyUPS]; !seen && d.VBMS != nil {
+			state[stateKeyUPS] = upsOnline
+			if d.VBMS.IsBatteryMode {
+				state[stateKeyUPS] = upsOnBattery
+			}
+			state[stateKeyUPSBattery] = c.batteryLevel(d.VBMS.BattPool.BatteryLevel)
 		}
 	}
-	return nil, fmt.Errorf("no gateway with an active WAN uplink found in device list")
+
+	if len(state) == 0 {
+		return nil, fmt.Errorf("no gateway with an active WAN uplink and no UPS found in device list")
+	}
+	return state, nil
+}
+
+func (c *Client) batteryLevel(percent int) string {
+	low, critical := c.LowBatteryPercent, c.CriticalBatteryPercent
+	if low <= 0 {
+		low = DefaultLowBatteryPercent
+	}
+	if critical <= 0 {
+		critical = DefaultCriticalBatteryPercent
+	}
+	switch {
+	case percent <= critical:
+		return batteryCritical
+	case percent <= low:
+		return batteryLow
+	default:
+		return batteryNormal
+	}
 }

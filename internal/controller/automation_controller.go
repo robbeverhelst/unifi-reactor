@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -32,12 +34,13 @@ import (
 
 	reactorv1alpha1 "github.com/robbeverhelst/unifi-reactor/api/v1alpha1"
 	"github.com/robbeverhelst/unifi-reactor/internal/engine"
+	"github.com/robbeverhelst/unifi-reactor/internal/providers/unifi"
 )
 
 const (
 	conditionReady = "Ready"
 	// providerUniFi is the provider name UniFi observations are stored under.
-	providerUniFi = "unifi"
+	providerUniFi = unifi.ProviderName
 	// actionKubernetesScale is the only action type implemented in v0.1.
 	actionKubernetesScale = "kubernetes.scale"
 	// reevaluateInterval bounds how stale a matching decision can get relative
@@ -89,12 +92,34 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	matching := true
 	observed := map[string]string{}
+	var missing []string
 	for key, want := range automation.Spec.When.State {
-		got := observation.State[key]
+		got, present := observation.State[key]
+		if !present {
+			missing = append(missing, key)
+			continue
+		}
 		observed[key] = got
 		if got != want {
 			matching = false
 		}
+	}
+
+	// Losing sight of a state key is not evidence that the condition stopped
+	// holding: the hardware reporting it may simply have dropped off the
+	// controller. Treating it as "no longer matching" would run onExit — e.g.
+	// scaling workloads back up in the middle of a power failure. Hold the
+	// current matching state instead and say so in status.
+	if len(missing) > 0 {
+		slices.Sort(missing)
+		automation.Status.ObservedState = observed
+		r.setReady(&automation, metav1.ConditionFalse, "StateKeyUnavailable",
+			fmt.Sprintf("provider %q is not reporting %s; holding last known state",
+				automation.Spec.When.Provider, strings.Join(missing, ", ")))
+		if err := r.Status().Update(ctx, &automation); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: reevaluateInterval}, nil
 	}
 
 	wasMatching := automation.Status.Matching
