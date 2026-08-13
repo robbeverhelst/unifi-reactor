@@ -19,7 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -111,7 +111,7 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// scaling workloads back up in the middle of a power failure. Hold the
 	// current matching state instead and say so in status.
 	if len(missing) > 0 {
-		sort.Strings(missing)
+		slices.Sort(missing)
 		automation.Status.ObservedState = observed
 		r.setReady(&automation, metav1.ConditionFalse, "StateKeyUnavailable",
 			fmt.Sprintf("provider %q is not reporting %s; holding last known state",
