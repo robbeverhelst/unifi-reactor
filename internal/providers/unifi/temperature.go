@@ -122,6 +122,9 @@ func (d deviceRecord) instrumented() bool {
 // behind it are a V(1) log line — a temperature cannot be a state value at all,
 // since spec.when compares strings and one series per reading is unbounded.
 type temperatureTally struct {
+	// high is the reading at or above which the fleet reports high, taken from
+	// Client at construction so that publishing needs nothing but the tally.
+	high float64
 	// instrumented is how many adopted devices said anything about their
 	// thermals. Zero publishes no key.
 	instrumented int
@@ -138,6 +141,13 @@ type temperatureTally struct {
 	// fanless counts instrumented devices with no fan, which is why a warm one
 	// may be normal.
 	fanless int
+}
+
+func newTemperatureTally(high float64) temperatureTally {
+	if high <= 0 {
+		high = DefaultHighTemperatureCelsius
+	}
+	return temperatureTally{high: high}
 }
 
 // observe folds one adopted device into the tally.
@@ -172,16 +182,11 @@ func (t *temperatureTally) observe(ctx context.Context, d deviceRecord) {
 }
 
 // publish buckets the fleet's hottest reading against the threshold.
-func (c *Client) publishTemperature(ctx context.Context, state map[string]string, t temperatureTally) {
+func (t temperatureTally) publish(ctx context.Context, state map[string]string) {
 	log := logf.FromContext(ctx).WithName("unifi-temperature")
 	if t.instrumented == 0 {
 		log.V(1).Info("No adopted device reports its thermals; temperature will not be published")
 		return
-	}
-
-	high := c.HighTemperatureCelsius
-	if high <= 0 {
-		high = DefaultHighTemperatureCelsius
 	}
 
 	value := temperatureNormal
@@ -190,7 +195,7 @@ func (c *Client) publishTemperature(ctx context.Context, state map[string]string
 		// The console's own verdict wins over the threshold in this repository:
 		// the firmware knows this model's tolerances and a default does not.
 		value = temperatureHigh
-	case t.hottestKnown && t.hottest >= high:
+	case t.hottestKnown && t.hottest >= t.high:
 		value = temperatureHigh
 	}
 	state[stateKeyTemperature] = value
@@ -199,7 +204,7 @@ func (c *Client) publishTemperature(ctx context.Context, state map[string]string
 	// operator where to put their own threshold.
 	log.V(1).Info("temperature", "temperature", value, "hottestCelsius", t.hottest,
 		"hottestDevice", t.hottestDevice, "readingKnown", t.hottestKnown,
-		"thresholdCelsius", high, "devicesInstrumented", t.instrumented,
+		"thresholdCelsius", t.high, "devicesInstrumented", t.instrumented,
 		"devicesOverheating", strings.Join(t.overheating, ","), "devicesFanless", t.fanless,
 		"readings", strings.Join(t.readings, ","))
 }

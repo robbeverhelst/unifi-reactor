@@ -29,21 +29,35 @@ limitations under the License.
 // value set is open turns one metric into an unbounded number of time series
 // that a Prometheus instance keeps for its whole retention period.
 //
-//   - provider, key: bounded by what is compiled in. A handful of each. Note
-//     that key stops being bounded if per-device or per-client keys ever land
-//     (device.<name>, client.<name>); that is the point at which those keys
-//     have to become opt-in rather than the point at which this is revisited.
+//   - provider, key: bounded by what is compiled in, plus whatever an operator
+//     has explicitly opted into. A handful of each.
+//
+//     This is where per-entity keys landed. device.<name> is the first key
+//     whose NAME comes from the outside world rather than from this repository,
+//     and the rule this comment set before it existed was that such keys have
+//     to become opt-in rather than that this paragraph gets revisited — so they
+//     did: the UniFi provider publishes the aggregate devices key always and
+//     the per-device keys only when asked, which is what keeps a forty-device
+//     fleet from silently becoming forty series. client.<name> takes the same
+//     shape when it lands. What is bounded here is therefore still bounded at
+//     compile time by default, and bounded by a deliberate choice otherwise.
+//
 //   - value: bounded ONLY for keys whose provider declares a closed value set,
 //     via SetVocabulary. A key with an open value set — isp, whose values are
 //     carrier names derived from whatever public address the gateway holds —
 //     is never labelled by value, because one such key is enough to blow up an
 //     instance. Its transitions are still counted, and its current value is
-//     still in the Automation's status and in a Kubernetes Event.
+//     still in the Automation's status and in a Kubernetes Event. A key with an
+//     open NAME is left out of SetVocabulary for the same reason from the other
+//     direction: device.<name>'s two values are closed, and the set of keys
+//     holding them is not, so it gets no reactor_state_info series at all.
+//
 //   - namespace, name of an Automation: unbounded in principle, self-limiting
 //     in practice — a new series appears only when a human writes another
 //     policy object, never on its own. What makes that safe is ForgetAutomation:
 //     a deleted Automation's series are dropped rather than left reporting
 //     matching forever.
+//
 //   - A target reference, a claimant, a state VALUE for an open key, and any
 //     error string are NOT labels. "How often" is this package's question;
 //     "which one" is answered by status and by Events, which cost nothing to

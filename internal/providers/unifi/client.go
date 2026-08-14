@@ -357,10 +357,12 @@ func (c *Client) get(ctx context.Context, endpoint string, out any) error {
 func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse) (map[string]string, error) {
 	state := map[string]string{}
 	gatewaySeen := false
-	fleet := newDeviceTally()
+	// One tally per fleet-wide key, each holding whatever operator configuration
+	// it needs, so that publishing takes nothing but the state map.
+	fleet := newDeviceTally(c.PerDeviceKeys)
 	var firmware firmwareTally
-	var heat temperatureTally
-	var poe poeTally
+	heat := newTemperatureTally(c.HighTemperatureCelsius)
+	poe := newPoETally(c.MaxPoEUtilizationPercent)
 
 	for _, d := range parsed.Data {
 		// The fleet keys are about devices the console manages, so an unadopted
@@ -402,10 +404,10 @@ func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse
 			}
 		}
 	}
-	fleet.publish(ctx, state, c.PerDeviceKeys)
+	fleet.publish(ctx, state)
 	firmware.publish(ctx, state)
-	c.publishTemperature(ctx, state, heat)
-	c.publishPoE(ctx, state, poe)
+	heat.publish(ctx, state)
+	poe.publish(ctx, state)
 
 	if len(state) == 0 {
 		return nil, fmt.Errorf(

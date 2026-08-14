@@ -846,7 +846,7 @@ on, and `unifi.devices.perDeviceKeys` is the only setting on this page that
 changes how *much* Reactor publishes rather than what it means.
 
 Per-device keys are also never labelled by value in Prometheus, for the same
-reason `isp` is not — see [Cardinality](#what-is-measured). Which device is down
+reason `isp` is not — see [Cardinality](#cardinality-on-purpose). Which device is down
 is in the Automation's `status.observedState`, in an Event, and in a `V(1)` log
 line naming the device and the console's own disconnection reason.
 
@@ -980,6 +980,25 @@ interference — that counter rises instead of the derivation quietly being wron
 
 A site with **no** adopted access points publishes no `wifi` key: there is no WiFi
 there to be healthy, which is not the same as WiFi that is fine.
+
+The three values are alternatives, not steps of a ladder — the same shape
+[`internet`](#internet-is-the-one-wan-cannot-express) has. An automation matching
+`wifi: warning` **stops** matching when the value moves to `error`, and reverses,
+because those are two different values of one key. Match the value you mean, or
+write one automation per value:
+
+```yaml
+  when:
+    provider: unifi
+    state:
+      wifi: error         # every access point is gone, not just one
+```
+
+This is not the `ups`/`ups.battery` trap it resembles. There, one *fact* (on
+battery) escalated into a second fact (the charge), and splitting them was the
+fix. Here all three values answer a single question — how much WiFi is left — so
+one key with three values is the right shape, and choosing between them is the
+automation author's job.
 
 ### `poe` is headroom, before it becomes an outage
 
@@ -1172,7 +1191,7 @@ Everything here was built against one setup, and this table says which one. "Ver
 | | Verified | Expected to work | Known not to work |
 | --- | --- | --- | --- |
 | UniFi Network | 10.5.67 | 10.x | — |
-| Console | UDM Pro (gateway firmware 5.1.26) | UDM/UDM SE/UDR/UXG, Cloud Key with a gateway adopted | a site with no gateway and no UniFi UPS: nothing to observe |
+| Console | UDM Pro (gateway firmware 5.1.26) | UDM/UDM SE/UDR/UXG, Cloud Key with a gateway adopted. A site with no gateway and no UniFi UPS now observes the fleet keys — `devices`, `wifi` and whichever of `firmware`/`temperature`/`poe` the hardware reports — but none of `wan`, `isp` or `ups` | a site with nothing adopted at all: nothing to observe |
 | UPS | UniFi UPS 2U (`USWDA26`, firmware 1.6.1) | any UniFi UPS reporting `vbms_table` | third-party UPS over NUT — a separate provider, not this one |
 | Kubernetes | CI: envtest 1.36 API server, and the current kind default node image for e2e | 1.25+ — only long-stable APIs are used (`apps/v1` scale, `policy/v1`, `apiextensions/v1`, leases) | — |
 | Helm | 3.x | — | — |
@@ -1188,6 +1207,20 @@ kubectl -n reactor-system logs deploy/reactor | grep -E 'version detected|tested
 Outside the range above it warns and **carries on**. Refusing to start against a console that would have worked fine is a worse failure than a log line, and most of them will work fine — the warning exists so that a missing state key reads as an incompatibility rather than as a configuration mistake. If your console is not in the table and it works, [say so](https://github.com/robbeverhelst/unifi-reactor/issues/new/choose): every row here started as somebody's report.
 
 State keys degrade one at a time, so a console with no UniFi UPS still reports `wan` and `isp`, and a gateway whose fields have moved still reports `ups`. That holds across endpoints too: an observation reads `stat/device` and `stat/health`, and a console that answers one but not the other publishes the keys it can. Only observing nothing at all is an error.
+
+### Three keys are parsed against a documented shape, not a capture
+
+Every parser here is written against a real captured response — except three, and this is where that is said plainly rather than in a commit message:
+
+| Key | Fields it needs | Status |
+| --- | --- | --- |
+| `firmware` | `upgradable`, `upgrade_to_firmware`, `model_in_eol` | **no capture contains them.** The committed records carry `version` and nothing else about upgrades |
+| `temperature` | `has_temperature`, `overheating`, `temperatures[]`, `general_temperature` | **no capture contains them.** The UniFi UPS 2U reports no thermals at all |
+| `poe` | `total_max_power`, `port_table[].poe_power` | **no capture contains them.** No switch record exists in this repository |
+
+They are written to the shape UniFi's own API documents, every field is in the [capture allowlist](testdata/unifi/README.md) so the next real capture settles them, and each fails by **publishing nothing** rather than by publishing a reassuring value: no `upgradable` anywhere means no `firmware` key, not `current`; no thermals means no `temperature` key, not `normal`; an unreadable switch is left out rather than counted as having headroom.
+
+If you run a UniFi switch or an access point, `./hack/capture-unifi.sh` now writes `stat-device-switch.json` and `stat-device-ap.json`, and one of each would settle all three at once.
 
 ## Configuration
 

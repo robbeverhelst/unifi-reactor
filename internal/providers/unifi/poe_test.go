@@ -143,6 +143,18 @@ func TestAPoweredPortWithNoWattageMakesTheSwitchUnreadable(t *testing.T) {
 	}
 }
 
+// A budget with no port table beside it is a truncated record, not a switch
+// delivering nothing. Same rule as a silent port, one level up.
+func TestABudgetWithNoPortTableIsUnreadable(t *testing.T) {
+	device := adoptedDevice("Switch 8", deviceStateOnline)
+	budget := 60.0
+	device.TotalMaxPower = &budget
+
+	if got, present := poeState(t, DefaultMaxPoEUtilizationPercent, device)[stateKeyPoE]; present {
+		t.Errorf("a switch reporting no ports should publish no poe key, got %q", got)
+	}
+}
+
 // A port that is off draws nothing, and that is a reading rather than an
 // absence — so a switch with disabled ports is measurable.
 func TestDisabledPortsAreNotUnreadable(t *testing.T) {

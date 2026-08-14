@@ -384,6 +384,11 @@ signal disagreement and logged, rather than either being silently trusted.
 
 A site with no adopted access points publishes no key at all.
 
+The three values are alternatives rather than steps of a ladder, the same shape
+`internet` has: an automation matching `wifi: warning` stops matching — and reverses —
+when the value moves to `error`. Match the value you mean, or write one automation per
+value.
+
 ### `poe`
 
 `insufficient` when the worst switch is delivering at or above a share of its PoE

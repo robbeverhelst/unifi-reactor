@@ -86,10 +86,20 @@ type deviceTally struct {
 	counted, offline int
 	// offlineNames are the slugs behind that count, for the diagnostic line.
 	offlineNames []string
+	// perDeviceKeys is the opt-in from Client. With it off — the default — one
+	// key is published no matter how large the fleet is, which is the whole
+	// point: the per-device keys are the ones whose names, and therefore whose
+	// metric series count, are bounded by someone's rack rather than by this
+	// repository.
+	perDeviceKeys bool
 }
 
-func newDeviceTally() *deviceTally {
-	return &deviceTally{perDevice: map[string]string{}, shared: map[string]bool{}}
+func newDeviceTally(perDeviceKeys bool) *deviceTally {
+	return &deviceTally{
+		perDevice:     map[string]string{},
+		shared:        map[string]bool{},
+		perDeviceKeys: perDeviceKeys,
+	}
 }
 
 // observe folds one adopted device into the tally.
@@ -142,12 +152,7 @@ func (t *deviceTally) observe(ctx context.Context, d deviceRecord) {
 }
 
 // publish writes the fleet keys into the state map.
-//
-// perDeviceKeys is the opt-in from Client. With it off — the default — one key
-// is published no matter how large the fleet is, which is the whole point: the
-// per-device keys are the ones whose names, and therefore whose metric series
-// count, are bounded by someone's rack rather than by this repository.
-func (t *deviceTally) publish(ctx context.Context, state map[string]string, perDeviceKeys bool) {
+func (t *deviceTally) publish(ctx context.Context, state map[string]string) {
 	log := logf.FromContext(ctx).WithName("unifi-devices")
 	if t.counted == 0 {
 		log.V(1).Info("No adopted device reported a recognisable state; devices will not be published")
@@ -161,9 +166,9 @@ func (t *deviceTally) publish(ctx context.Context, state map[string]string, perD
 	slices.Sort(t.offlineNames)
 	log.V(1).Info("device fleet", "devices", state[stateKeyDevices], "adopted", t.counted,
 		"offline", t.offline, "offlineDevices", strings.Join(t.offlineNames, ","),
-		"perDeviceKeys", perDeviceKeys)
+		"perDeviceKeys", t.perDeviceKeys)
 
-	if !perDeviceKeys {
+	if !t.perDeviceKeys {
 		return
 	}
 	for key, value := range t.perDevice {
@@ -183,7 +188,7 @@ func (t *deviceTally) publish(ctx context.Context, state map[string]string, perD
 }
 
 // offlineDescription is one offline device as it appears in the diagnostic
-// line: what it is called, why the console lost it, and when it was last seen.
+// line: what it is called, and why the console says it lost it.
 func offlineDescription(slug string, d deviceRecord) string {
 	name := slug
 	if name == "" {

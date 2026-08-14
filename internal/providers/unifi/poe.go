@@ -161,10 +161,17 @@ type poeDraw struct {
 // exact situation #14 exists to catch.
 func (d deviceRecord) poe() poeDraw {
 	draw := poeDraw{}
-	if d.TotalMaxPower == nil || *d.TotalMaxPower <= 0 || len(d.PortTable) == 0 {
+	if d.TotalMaxPower == nil || *d.TotalMaxPower <= 0 {
 		return draw
 	}
 	draw.budget = *d.TotalMaxPower
+	if len(d.PortTable) == 0 {
+		// A budget with no port table at all is a truncated record rather than
+		// a switch delivering nothing, so it is reported as unreadable and
+		// named in the diagnostic line instead of counting as free headroom.
+		draw.silent = append(draw.silent, "no port table")
+		return draw
+	}
 	for _, port := range d.PortTable {
 		if port.PoEEnable == nil || !*port.PoEEnable {
 			// Not powering anything. A port that is off draws nothing, and that
@@ -191,6 +198,9 @@ func (p poeDraw) utilization() float64 {
 // worst switch decides: one switch out of headroom drops the cameras on that
 // switch, whatever the others have spare.
 type poeTally struct {
+	// maximum is the utilization at or above which the fleet reports
+	// insufficient, taken from Client at construction.
+	maximum float64
 	// switches is how many reported a budget and a readable port table.
 	switches int
 	// worst is the highest utilization anywhere, and worstSwitch the slug
@@ -202,6 +212,13 @@ type poeTally struct {
 	// budget and would not say what they were delivering.
 	draws      []string
 	unreadable []string
+}
+
+func newPoETally(maximum float64) poeTally {
+	if maximum <= 0 {
+		maximum = DefaultMaxPoEUtilizationPercent
+	}
+	return poeTally{maximum: maximum}
 }
 
 // observe folds one adopted device into the tally. Devices with no PoE at all —
@@ -230,8 +247,8 @@ func (t *poeTally) observe(d deviceRecord) {
 	}
 }
 
-// publishPoE buckets the worst switch's utilization against the threshold.
-func (c *Client) publishPoE(ctx context.Context, state map[string]string, t poeTally) {
+// publish buckets the worst switch's utilization against the threshold.
+func (t poeTally) publish(ctx context.Context, state map[string]string) {
 	log := logf.FromContext(ctx).WithName("unifi-poe")
 	if t.switches == 0 {
 		log.V(1).Info("No adopted switch reports a readable PoE budget; poe will not be published",
@@ -239,18 +256,13 @@ func (c *Client) publishPoE(ctx context.Context, state map[string]string, t poeT
 		return
 	}
 
-	maximum := c.MaxPoEUtilizationPercent
-	if maximum <= 0 {
-		maximum = DefaultMaxPoEUtilizationPercent
-	}
-
 	value := poeOK
-	if t.worst >= maximum {
+	if t.worst >= t.maximum {
 		value = poeInsufficient
 	}
 	state[stateKeyPoE] = value
 
 	log.V(1).Info("poe", "poe", value, "worstUtilizationPercent", t.worst,
-		"worstSwitch", t.worstSwitch, "thresholdPercent", maximum, "switchesMeasured", t.switches,
+		"worstSwitch", t.worstSwitch, "thresholdPercent", t.maximum, "switchesMeasured", t.switches,
 		"draws", strings.Join(t.draws, ","), "switchesUnreadable", strings.Join(t.unreadable, ","))
 }
