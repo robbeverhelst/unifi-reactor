@@ -133,17 +133,31 @@ spec:
               value: {{ .Values.unifi.webhook.registration.publicURL | quote }}
             - name: UNIFI_WEBHOOK_RULE_TITLE
               value: {{ .Values.unifi.webhook.registration.ruleTitle | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.unifi.actions.allowedWlans }}
+            # What Reactor may change on the console. Empty is the default and
+            # refuses every unifi.* action, so this variable is absent unless
+            # the operator listed something.
+            - name: UNIFI_ACTIONS_ALLOWED_WLANS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with (include "reactor.consoleSecret" .) }}
+            # UniFi OS local-account credentials. One pair, injected once,
+            # whichever of the two features that write to the console is on:
+            # Alarm Manager self-registration and the unifi.* actions sit at the
+            # same layer and authenticate the same way, and the API key the
+            # poller reads with does not work for either.
             - name: UNIFI_USERNAME
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.unifi.webhook.registration.existingSecret | quote }}
+                  name: {{ . | quote }}
                   key: UNIFI_USERNAME
             - name: UNIFI_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.unifi.webhook.registration.existingSecret | quote }}
+                  name: {{ . | quote }}
                   key: UNIFI_PASSWORD
-            {{- end }}
             {{- end }}
             {{- end }}
             {{- with .Values.actions.allowedDestinations }}

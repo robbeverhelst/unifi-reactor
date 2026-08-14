@@ -75,9 +75,9 @@ spec:
                     Types divide into two kinds. A desired-state action (kubernetes.scale,
                     kubernetes.cronjob.suspend) declares a level and is arbitrated continuously
                     across every Automation sharing its target. An edge action (kubernetes.restart,
-                    http.request, notification.*, homeassistant.service, qbittorrent.*) expresses
-                    an occurrence: it fires on this Automation's own transitions, owns no target
-                    and arbitrates with nothing.
+                    http.request, notification.*, homeassistant.service, qbittorrent.*,
+                    unifi.wlan.*) expresses an occurrence: it fires on this Automation's own
+                    transitions, owns no target and arbitrates with nothing.
 
                     The dividing line is not "does this express a level" — pausing a torrent
                     client plainly does. It is whether there is somewhere to record the value the
@@ -404,9 +404,10 @@ spec:
                       description: |-
                         TimeoutSeconds bounds a single attempt at this action, so an
                         unreachable target or endpoint cannot occupy a reconcile indefinitely.
-                        Defaults to 30 for the kubernetes.* actions and to 10 for the outbound ones,
-                        which may retry within the same reconcile. Exceeding it is recorded as a
-                        failed execution, not held open.
+                        Defaults to 30 for the kubernetes.* actions and for the unifi.* console
+                        ones — which are a login, a check and a write rather than a single request
+                        — and to 10 for the outbound ones, which may retry within the same
+                        reconcile. Exceeding it is recorded as a failed execution, not held open.
                       format: int32
                       maximum: 600
                       minimum: 1
@@ -425,7 +426,28 @@ spec:
                       - homeassistant.service
                       - qbittorrent.pause
                       - qbittorrent.resume
+                      - unifi.wlan.enable
+                      - unifi.wlan.disable
                       type: string
+                    wlan:
+                      description: WLAN is the wireless network a unifi.wlan.* action
+                        acts on.
+                      properties:
+                        name:
+                          description: |-
+                            Name is the SSID exactly as the console spells it, matched
+                            case-sensitively against the WLAN configuration on the site Reactor
+                            polls. It must also appear in the install's allowed WLAN list.
+
+                            A name that matches nothing is refused rather than guessed at, and the
+                            refusal does not list the WLANs that do exist: an Automation is readable
+                            by anyone in its namespace, and the network's SSIDs are not theirs.
+                          maxLength: 64
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      type: object
                   required:
                   - type
                   type: object
@@ -439,6 +461,9 @@ spec:
                   - message: 'spec.actions: qbittorrent is required by the qbittorrent.*
                       types and rejected on every other type'
                     rule: self.type.startsWith('qbittorrent.') == has(self.qbittorrent)
+                  - message: 'spec.actions: wlan is required by the unifi.wlan.* types
+                      and rejected on every other type'
+                    rule: self.type.startsWith('unifi.wlan.') == has(self.wlan)
                   - message: 'spec.actions: notification is required by the notification.*
                       types and rejected on every other type'
                     rule: self.type.startsWith('notification.') == has(self.notification)
@@ -504,9 +529,9 @@ spec:
                     Types divide into two kinds. A desired-state action (kubernetes.scale,
                     kubernetes.cronjob.suspend) declares a level and is arbitrated continuously
                     across every Automation sharing its target. An edge action (kubernetes.restart,
-                    http.request, notification.*, homeassistant.service, qbittorrent.*) expresses
-                    an occurrence: it fires on this Automation's own transitions, owns no target
-                    and arbitrates with nothing.
+                    http.request, notification.*, homeassistant.service, qbittorrent.*,
+                    unifi.wlan.*) expresses an occurrence: it fires on this Automation's own
+                    transitions, owns no target and arbitrates with nothing.
 
                     The dividing line is not "does this express a level" — pausing a torrent
                     client plainly does. It is whether there is somewhere to record the value the
@@ -833,9 +858,10 @@ spec:
                       description: |-
                         TimeoutSeconds bounds a single attempt at this action, so an
                         unreachable target or endpoint cannot occupy a reconcile indefinitely.
-                        Defaults to 30 for the kubernetes.* actions and to 10 for the outbound ones,
-                        which may retry within the same reconcile. Exceeding it is recorded as a
-                        failed execution, not held open.
+                        Defaults to 30 for the kubernetes.* actions and for the unifi.* console
+                        ones — which are a login, a check and a write rather than a single request
+                        — and to 10 for the outbound ones, which may retry within the same
+                        reconcile. Exceeding it is recorded as a failed execution, not held open.
                       format: int32
                       maximum: 600
                       minimum: 1
@@ -854,7 +880,28 @@ spec:
                       - homeassistant.service
                       - qbittorrent.pause
                       - qbittorrent.resume
+                      - unifi.wlan.enable
+                      - unifi.wlan.disable
                       type: string
+                    wlan:
+                      description: WLAN is the wireless network a unifi.wlan.* action
+                        acts on.
+                      properties:
+                        name:
+                          description: |-
+                            Name is the SSID exactly as the console spells it, matched
+                            case-sensitively against the WLAN configuration on the site Reactor
+                            polls. It must also appear in the install's allowed WLAN list.
+
+                            A name that matches nothing is refused rather than guessed at, and the
+                            refusal does not list the WLANs that do exist: an Automation is readable
+                            by anyone in its namespace, and the network's SSIDs are not theirs.
+                          maxLength: 64
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      type: object
                   required:
                   - type
                   type: object
@@ -868,6 +915,9 @@ spec:
                   - message: 'spec.actions: qbittorrent is required by the qbittorrent.*
                       types and rejected on every other type'
                     rule: self.type.startsWith('qbittorrent.') == has(self.qbittorrent)
+                  - message: 'spec.actions: wlan is required by the unifi.wlan.* types
+                      and rejected on every other type'
+                    rule: self.type.startsWith('unifi.wlan.') == has(self.wlan)
                   - message: 'spec.actions: notification is required by the notification.*
                       types and rejected on every other type'
                     rule: self.type.startsWith('notification.') == has(self.notification)
@@ -1042,6 +1092,11 @@ spec:
                       description: |-
                         Destination is the scheme, host and port the request went to, for the
                         same reason and with the same omissions.
+
+                        An action that writes to a provider's own console reports the object it
+                        acted on instead — "unifi/wlan/Guest" — because the console's address is
+                        install configuration that is the same for every Automation, while which
+                        object was touched is the part worth reading.
                       type: string
                     onExit:
                       description: OnExit is true when this action ran from spec.onExit.

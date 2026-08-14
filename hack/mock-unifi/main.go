@@ -74,6 +74,26 @@ limitations under the License.
 //	curl -X POST 'http://localhost:9443/ups?present=false'
 //	curl -X POST 'http://localhost:9443/ups?present=true'
 //
+// It also serves — and enforces — the write endpoints the unifi.* edge actions
+// use. These are the first things Reactor changes on a console rather than
+// reads from it, and no write has ever been made against real hardware, so the
+// mock is where that path is exercised at all:
+//
+//	curl http://localhost:9443/wlan                               # what the console holds
+//	curl -X POST 'http://localhost:9443/wlan?name=mock-guest&enabled=false'
+//
+// Enforcement is the point rather than a bonus. Like the alarm rule endpoint
+// rejecting a flat triggers_data, the WLAN endpoint demands the csrf header,
+// refuses a PUT that changes anything other than "enabled", and refuses one
+// that arrives without the session cookie — so a Reactor that stopped checking
+// before it wrote would fail here rather than on somebody's gateway.
+//
+// The WLAN records are NOT a capture. No wlanconf response has ever been
+// recorded (testdata/unifi/README.md says which files are), so these are built
+// from the field names in docs/unifi-write-api.md and the SSIDs are obviously
+// fake. They prove Reactor sends what those notes describe; they do not prove a
+// console answers this way.
+//
 // It also mocks enough of the undocumented Alarm Manager API
 // (docs/unifi-alarm-manager-api.md) for Reactor to register its own webhook
 // rule against, and can then fire a delivery at whatever URL that rule names:
@@ -146,6 +166,12 @@ const (
 	fieldTimeToRemain = "timeToRemain"
 	fieldPowerOutput  = "device_total_power_output"
 	fieldPowerBudget  = "device_total_power_budget"
+
+	// fieldEnabled is the one WLAN field the write path changes, and keyNote is
+	// how every dev endpoint here labels the sentence explaining what its answer
+	// is and is not evidence of.
+	fieldEnabled = "enabled"
+	keyNote      = "note"
 
 	// statusHealthOK is what the capture's www subsystem reports. The other
 	// values this mock will happily serve — "warning", "error" — are the ones
@@ -245,6 +271,10 @@ type mock struct {
 	// outage ended".
 	noUPS bool
 
+	// wlans is the wlanconf table the write actions read and change. Synthetic
+	// — see the package comment — and keyed by the id the mock made up.
+	wlans map[string]map[string]any
+
 	// delivery is the synthetic body /alarm-fire posts. It is a stand-in, not
 	// a capture: no real Alarm Manager delivery has been recorded yet.
 	delivery []byte
@@ -269,6 +299,7 @@ func main() {
 		backupISP: defaultBackupISP,
 		wwwStatus: statusHealthOK,
 		rules:     map[string]map[string]any{},
+		wlans:     mockWLANs(),
 	}
 	if raw, err := os.ReadFile(*deliveryFile); err == nil {
 		m.delivery = raw
@@ -327,8 +358,16 @@ func main() {
 	mux.HandleFunc("POST /internet", m.setInternet)
 	mux.HandleFunc("POST /quality", m.setQuality)
 
+	// The write path: the Network application under /proxy/network, but
+	// authenticated the UniFi OS way — a session cookie plus the csrf header.
+	mux.HandleFunc("GET /proxy/network/api/s/{site}/rest/wlanconf", m.serveWLANConf)
+	mux.HandleFunc("PUT /proxy/network/api/s/{site}/rest/wlanconf/{id}", m.updateWLANConf)
+	mux.HandleFunc("GET /wlan", m.describeWLANs)
+	mux.HandleFunc("POST /wlan", m.setWLAN)
+
 	// The UniFi OS layer: no /proxy/network prefix, cookie session, csrf header.
 	mux.HandleFunc("POST /api/auth/login", m.login)
+	mux.HandleFunc("POST /api/auth/logout", m.logout)
 	mux.HandleFunc("GET /api/v2/alarms/network/manifest", m.serveManifest)
 	mux.HandleFunc("GET /api/v2/alarms/network", m.serveRules)
 	mux.HandleFunc("POST /api/v2/alarms/network", m.createRule)
@@ -580,7 +619,7 @@ func (m *mock) setQuality(w http.ResponseWriter, r *http.Request) {
 		paramAvailability: m.availability,
 		paramLatency:      m.latency,
 		"present":         !m.noQuality,
-		"note":            "both are averages over the console's uptime window (time_period, 86400s in the capture)",
+		keyNote:           "both are averages over the console's uptime window (time_period, 86400s in the capture)",
 	})
 }
 
@@ -678,7 +717,7 @@ func (m *mock) describeWAN(w http.ResponseWriter, _ *http.Request) {
 		"variant":   m.variant,
 		"backupISP": m.backupISP,
 		"variants":  variants,
-		"note": "no real failover has ever been observed (issue #34); " +
+		keyNote: "no real failover has ever been observed (issue #34); " +
 			"every variant here is a hypothesis, and the capture runbook in testdata/unifi/README.md settles it",
 	})
 }
@@ -765,6 +804,179 @@ func describeInt(value *int) string {
 	return strconv.Itoa(*value)
 }
 
+// --- WLAN configuration (the write path) ------------------------------------
+
+// mockWLANs builds the wlanconf table. NOT A CAPTURE: no wlanconf response has
+// ever been recorded from a console, so these carry only the three fields the
+// write path reads plus a couple of neighbours, and the SSIDs are deliberately
+// not anybody's. The extra fields are here to prove one thing — that Reactor
+// hands the record back unchanged apart from "enabled".
+func mockWLANs() map[string]map[string]any {
+	table := map[string]map[string]any{}
+	for i, wlan := range []struct {
+		name    string
+		enabled bool
+	}{
+		{"mock-main", true},
+		{"mock-guest", true},
+		{"mock-iot", false},
+	} {
+		id := fmt.Sprintf("019ff10d-1111-0000-0000-%012d", i+1)
+		table[id] = map[string]any{
+			"_id":          id,
+			"name":         wlan.name,
+			fieldEnabled:   wlan.enabled,
+			"security":     "wpapsk",
+			"wpa_mode":     "wpa2",
+			"usergroup_id": "019ff10d-2222-0000-0000-000000000001",
+		}
+	}
+	return table
+}
+
+// sessionCookiePresent reports whether a request carries the session the login
+// handed out. The real console authenticates reads as well as writes, and a
+// Reactor that read wlanconf without logging in first would work against a mock
+// that did not check — right up until it did not work against hardware.
+func (m *mock) sessionCookiePresent(r *http.Request) bool {
+	cookie, err := r.Cookie("TOKEN")
+	return err == nil && cookie.Value != ""
+}
+
+func (m *mock) serveWLANConf(w http.ResponseWriter, r *http.Request) {
+	if !m.sessionCookiePresent(r) {
+		http.Error(w, `{"message":"api.err.LoginRequired"}`, http.StatusUnauthorized)
+		return
+	}
+	m.mu.Lock()
+	records := make([]any, 0, len(m.wlans))
+	for _, wlan := range m.wlans {
+		records = append(records, maps.Clone(wlan))
+	}
+	m.mu.Unlock()
+	slices.SortFunc(records, func(a, b any) int {
+		return strings.Compare(wlanName(a), wlanName(b))
+	})
+	writeResponse(w, records)
+}
+
+func wlanName(record any) string {
+	wlan, _ := record.(map[string]any)
+	name, _ := wlan["name"].(string)
+	return name
+}
+
+// updateWLANConf is the enforcing half. It accepts the read-modify-write the
+// endpoint only offers in that shape, and refuses anything that would be a
+// wider change than the action claims to make: a missing csrf header, a missing
+// session, an unknown id, or a body that differs from the stored record in more
+// than "enabled".
+//
+// That last check is the one worth having. It is what would catch a future
+// change to the WLAN action that started sending a record it had built rather
+// than one it had read — which on real hardware would silently rewrite somebody
+// else's wireless configuration.
+func (m *mock) updateWLANConf(w http.ResponseWriter, r *http.Request) {
+	if !m.sessionCookiePresent(r) {
+		http.Error(w, `{"message":"api.err.LoginRequired"}`, http.StatusUnauthorized)
+		return
+	}
+	if r.Header.Get("x-csrf-token") != mockCSRF {
+		http.Error(w, `{"message":"csrf token mismatch"}`, http.StatusForbidden)
+		return
+	}
+	var submitted map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&submitted); err != nil {
+		http.Error(w, `{"message":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	stored, known := m.wlans[r.PathValue("id")]
+	if !known {
+		http.Error(w, `{"message":"api.err.ObjectNotFound"}`, http.StatusNotFound)
+		return
+	}
+	if changed := changedKeys(stored, submitted); !slices.Equal(changed, []string{fieldEnabled}) {
+		http.Error(w, fmt.Sprintf(
+			`{"message":"this mock only accepts a record read back with enabled changed; changed: %v"}`, changed),
+			http.StatusBadRequest)
+		return
+	}
+
+	enabled, _ := submitted[fieldEnabled].(bool)
+	stored[fieldEnabled] = enabled
+	log.Printf("wlan %q is now enabled=%v", stored["name"], enabled)
+	writeResponse(w, []any{maps.Clone(stored)})
+}
+
+// changedKeys names every key that differs between two records, in either
+// direction, so an added or removed field counts as a change too.
+func changedKeys(stored, submitted map[string]any) []string {
+	var changed []string
+	for key := range maps.Keys(stored) {
+		if !equalJSON(stored[key], submitted[key]) {
+			changed = append(changed, key)
+		}
+	}
+	for key := range maps.Keys(submitted) {
+		if _, present := stored[key]; !present {
+			changed = append(changed, key)
+		}
+	}
+	slices.Sort(changed)
+	return slices.Compact(changed)
+}
+
+// equalJSON compares two decoded values by their encoding, which is enough for
+// the flat records here and does not need a reflect-based deep equal.
+func equalJSON(a, b any) bool {
+	left, errLeft := json.Marshal(a)
+	right, errRight := json.Marshal(b)
+	return errLeft == nil && errRight == nil && bytes.Equal(left, right)
+}
+
+// describeWLANs and setWLAN are the dev endpoints: what the console holds, and
+// a way to put a WLAN back without going through Reactor.
+func (m *mock) describeWLANs(w http.ResponseWriter, _ *http.Request) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	state := map[string]any{}
+	for _, wlan := range m.wlans {
+		name, _ := wlan["name"].(string)
+		state[name] = wlan[fieldEnabled]
+	}
+	writeJSON(w, map[string]any{
+		"wlans": state,
+		keyNote: "synthetic, not a capture: no wlanconf response has ever been recorded from a console. " +
+			"See docs/unifi-write-api.md for what is known and what is assumed.",
+	})
+}
+
+func (m *mock) setWLAN(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	enabled, err := strconv.ParseBool(r.URL.Query().Get(fieldEnabled))
+	if name == "" || err != nil {
+		http.Error(w, "name and enabled are both required, e.g. ?name=mock-guest&enabled=false",
+			http.StatusBadRequest)
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, wlan := range m.wlans {
+		if wlan["name"] != name {
+			continue
+		}
+		wlan[fieldEnabled] = enabled
+		log.Printf("wlan %q set to enabled=%v by hand", name, enabled)
+		writeJSON(w, map[string]any{"wlan": name, fieldEnabled: enabled})
+		return
+	}
+	http.Error(w, fmt.Sprintf("no wlan named %q", name), http.StatusNotFound)
+}
+
 // --- Alarm Manager (UniFi OS layer) -----------------------------------------
 
 // login issues a session cookie shaped like the console's: a JWT whose payload
@@ -775,6 +987,15 @@ func (m *mock) login(w http.ResponseWriter, _ *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: "TOKEN", Value: "header." + payload + ".signature", Path: "/"})
 	w.Header().Set("x-csrf-token", mockCSRF)
 	writeJSON(w, map[string]any{"unique_id": "00000000-0000-0000-0000-0000000000ff"})
+}
+
+// logout ends a session. The write path calls it after every action so a
+// console session is never held longer than the action that needed it; the
+// verb is INFERRED like the rest of this API, and answering it here is what
+// lets that call be exercised at all.
+func (m *mock) logout(w http.ResponseWriter, _ *http.Request) {
+	http.SetCookie(w, &http.Cookie{Name: "TOKEN", Value: "", Path: "/", MaxAge: -1})
+	writeJSON(w, map[string]any{})
 }
 
 // serveManifest offers the trigger and action IDs the notes record for Network

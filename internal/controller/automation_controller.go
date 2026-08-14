@@ -133,6 +133,17 @@ const (
 	//                       is a second outage rather than a correction — and
 	//                       the failures that matter here (a conflict, a
 	//                       Forbidden) are not the kind a retry fixes.
+	//   - unifi.wlan.*      AT-MOST-ONCE, unconditionally. Turning a WLAN on or
+	//                       off is idempotent in the world, so this is not about
+	//                       the effect: the write is a read-modify-write against
+	//                       an undocumented endpoint with no version to compare
+	//                       against, so a retry after an ambiguous failure
+	//                       re-reads a document the failed attempt may already
+	//                       have half-changed. The conservative reading of an
+	//                       ambiguous console write is that it happened. The
+	//                       action reads before it writes and does nothing when
+	//                       the WLAN is already where it should be, so the next
+	//                       transition corrects a miss rather than a retry.
 	maxActionAttempts = 5
 	// retryBackoffBase and retryBackoffCap bound the exponential delay between
 	// those attempts.
@@ -174,6 +185,12 @@ func retryBackoff(attempts int32) time.Duration {
 // http.request and notification.* are the first of those; they are executed by
 // runEdgeActions, off the matching != wasMatching branch in Reconcile, and
 // their retry policy is the one recorded on maxActionAttempts below.
+//
+// unifi.wlan.* is the case that makes the rule below worth stating precisely. A
+// WLAN being enabled is a level, and it is still an edge action, because the
+// meet is not what is missing: what is missing is anywhere to record the value
+// the WLAN held before Reactor changed it that would outlive this Automation
+// and be readable by an uninstall. See the WLAN type in api/v1alpha1.
 //
 // The rule for a new action type: if you cannot define a meet with an identity
 // element for it, it is an edge action and belongs out of this map.
@@ -234,6 +251,11 @@ type AutomationReconciler struct {
 	// writes, the HPA writes back, and the workload oscillates on the poll
 	// interval.
 	DetectHPA bool
+
+	// Console performs the edge actions that write to a provider's own console.
+	// Optional; nil means the provider is not configured on this install and
+	// every such action is refused with a reason rather than attempted.
+	Console ConsoleWriter
 
 	// SecretReader reads action credentials. It must be an uncached reader —
 	// the manager's APIReader — because a cached Get on a Secret starts an

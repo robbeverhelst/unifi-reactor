@@ -148,7 +148,41 @@ unifi:
       # Secret holding UNIFI_USERNAME and UNIFI_PASSWORD for a UniFi OS local
       # account. The Alarm Manager API sits at the UniFi OS layer and rejects
       # the API key the poller uses, so this is a second, separate credential.
+      # unifi.actions below uses the same Secret, for the same reason.
       existingSecret: unifi-reactor-console
+
+  # What Reactor may CHANGE on your console, as opposed to observe.
+  #
+  # Everything else the UniFi provider does is read-only, apart from creating
+  # its own Alarm Manager rule. These actions are different in kind: they turn
+  # things off for people who are not running the cluster. So the decision about
+  # what may be touched is yours and is taken here, at install time — not in an
+  # Automation, which anyone who can create one in their own namespace can
+  # write. There is no per-Automation override.
+  #
+  # Empty is the default and it means "nothing": every unifi.* action is refused
+  # with a reason in the Automation's status naming the value to add here.
+  actions:
+    # SSIDs that unifi.wlan.enable and unifi.wlan.disable may switch, matched
+    # exactly as the console spells them. Anything not listed is refused,
+    # including your main network — which is the point. Reactor has no way to
+    # know which SSID carries its own path to the controller.
+    #
+    #   allowedWlans:
+    #     - Guest
+    #
+    # Two things to know before you list one. These actions are NOT arbitrated:
+    # two Automations disabling the same SSID do not resolve to one claim, and
+    # whichever enables it first enables it. And nothing hands a WLAN back — if
+    # the exit transition never arrives because the Automation was deleted or
+    # Reactor was uninstalled, the network stays as Reactor last left it until
+    # a human changes it. The README explains why, and it is not an oversight.
+    allowedWlans: []
+    # Secret holding UNIFI_USERNAME and UNIFI_PASSWORD. Writing to the console
+    # needs a UniFi OS local account: the API key the poller reads state with
+    # does not write. This defaults to the same Secret the Alarm Manager
+    # registration uses, because it is the same credential.
+    existingSecret: unifi-reactor-console
 
 actions:
   # Where Reactor may send the outbound edge actions — http.request, the

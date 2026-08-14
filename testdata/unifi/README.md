@@ -245,6 +245,18 @@ Zero and negative both mean "no estimate" and publish no `ups.runtime` key: `bat
 
 UniFi also has a `network:ups_overload_detected` alarm trigger, which corroborates `ups.load` but is not read: nothing derives state from a delivery payload.
 
+## What the write path has, which is nothing
+
+`unifi.wlan.*` writes to the console, and **no capture backs any of it**. There is no
+`rest/wlanconf` response here, so the fields that action reads are inferred rather than observed.
+See [docs/unifi-write-api.md](../../docs/unifi-write-api.md), which splits the two, and note that
+`hack/mock-unifi` builds its WLAN table **in code**, clearly labelled, precisely so nothing in
+`testdata/` claims to have come off a console when it did not.
+
+If a capture is ever wanted for that endpoint it goes through `hack/capture-unifi.sh` with the
+allowlist extended one field at a time, like everything else here. A `wlanconf` record carries
+pre-shared keys and RADIUS secrets — exactly the material the allowlist policy exists for.
+
 ## Webhooks
 
 `webhooks/` will hold captured Alarm Manager deliveries. **It is still empty**: capturing one requires a real console configured to post to a real receiver, and that has not been done yet.

@@ -44,6 +44,7 @@ const (
 	// envAllowedDestinations and secretsRule are how the outbound-action
 	// allowlist and the permission it implies appear in the rendered release.
 	envAllowedDestinations = "REACTOR_ACTION_ALLOWED_DESTINATIONS"
+	envAllowedWLANs        = "UNIFI_ACTIONS_ALLOWED_WLANS"
 	secretsRule            = `resources: ["secrets"]`
 	// tokenReviews is how the metrics endpoint's authn/authz filter appears in
 	// the rendered RBAC.
@@ -432,6 +433,52 @@ func TestAllowedDestinationsGrantSecretReads(t *testing.T) {
 	}
 	if !strings.Contains(manifests, secretsRule) {
 		t.Fatal("outbound actions need get on Secrets, which was not granted")
+	}
+}
+
+// TestConsoleActionsAreOffByDefault is the same guarantee for the actions that
+// write to the console, and it matters more: an upgrade must not hand a
+// namespace tenant the ability to switch somebody's WiFi off. The allowlist is
+// empty by default, and empty means the variable is not rendered at all.
+func TestConsoleActionsAreOffByDefault(t *testing.T) {
+	manifests := render(t, unifiURL)
+	for _, absent := range []string{envAllowedWLANs, "UNIFI_USERNAME"} {
+		if strings.Contains(manifests, absent) {
+			t.Fatalf("%s was rendered on an install that allowed no console write", absent)
+		}
+	}
+}
+
+// TestAllowedWLANsCarryTheConsoleCredential pairs the two: the write path needs
+// a UniFi OS local account, which the poller's API key is not, so listing an
+// SSID is what injects it.
+func TestAllowedWLANsCarryTheConsoleCredential(t *testing.T) {
+	manifests := render(t, unifiURL, "unifi.actions.allowedWlans={Guest,Lab}")
+	if !strings.Contains(manifests, `value: "Guest,Lab"`) {
+		t.Fatal("the WLAN allowlist was not passed to the operator")
+	}
+	for _, expected := range []string{"UNIFI_USERNAME", "UNIFI_PASSWORD", `name: "unifi-reactor-console"`} {
+		if !strings.Contains(manifests, expected) {
+			t.Fatalf("%s is missing; console writes cannot authenticate without it", expected)
+		}
+	}
+	// No new RBAC: a console write goes to the gateway, not to the API server.
+	if strings.Contains(manifests, secretsRule) {
+		t.Fatal("console actions granted read access to Secrets, which they do not use")
+	}
+}
+
+// TestConsoleCredentialsAreInjectedOnce guards the one thing that could go
+// wrong by having two features want the same pair: a duplicate env entry is a
+// deployment the API server rejects.
+func TestConsoleCredentialsAreInjectedOnce(t *testing.T) {
+	manifests := render(t, unifiURL,
+		"unifi.actions.allowedWlans={Guest}",
+		"unifi.webhook.enabled=true",
+		"unifi.webhook.registration.enabled=true",
+		"unifi.webhook.registration.publicURL=http://192.0.2.5:9090/webhooks/unifi")
+	if got := strings.Count(manifests, "- name: UNIFI_USERNAME"); got != 1 {
+		t.Fatalf("UNIFI_USERNAME appears %d times as an env entry, want exactly 1", got)
 	}
 }
 

@@ -128,7 +128,7 @@ type Client struct {
 // LAN access by IP.
 func NewClient(baseURL string, apiKey APIKey, site string, insecureSkipVerify bool) *Client {
 	if site == "" {
-		site = "default"
+		site = defaultSite
 	}
 	if apiKey == nil {
 		apiKey = StaticAPIKey("")

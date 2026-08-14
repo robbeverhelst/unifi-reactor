@@ -44,6 +44,27 @@ Out of scope: `unifi.insecureSkipVerify: true`, which is the documented default 
 
 **Residual risk, stated plainly.** With a destination allowlisted, anyone who can create an `Automation` in any namespace can cause requests to that destination carrying provider state, and can use a credential Secret they can already read. If the allowlisted destination is an in-cluster Service, that reachability is real and intended — this is why the list is yours to write. Reactor's own ServiceAccount token is never attached to an outbound request.
 
+## Console actions
+
+`unifi.wlan.enable` and `unifi.wlan.disable` write to the UniFi console the provider observes. They are a different exposure from the outbound actions above and are controlled separately, so the reasoning is written down here too.
+
+**They do not go through the outbound client, and should not.** An outbound action goes to an address the `Automation` chose, which is why the destination allowlist and the address floor exist. A console action goes to the one console the operator configured at install time, over an undocumented API, with credentials that are install configuration. Routing it through the outbound allowlist would mean allowlisting the gateway's address for *everything* — including a generic `http.request` from any namespace — which is strictly more reach, not less.
+
+**The threat is the same shape as the outbound one.** `spec.actions` is writable by anyone who can create an `Automation` in their own namespace. Without a control, "create an Automation" would become "switch off the WiFi" — and unlike scaling a workload, those affect people who are not running the cluster and cannot be undone by the person who caused them.
+
+**What follows from that.**
+
+- **What may be changed is the operator's decision, not the Automation's.** `unifi.actions.allowedWlans` is a Helm value, empty by default, and empty refuses everything with a reason naming the value to add. There is no per-Automation override and no way to widen it from a namespace. There is deliberately no `*`: "any SSID" is not a choice worth offering.
+- **Every step checks before it writes.** Read the object, confirm it is the one the Automation meant, then act. A failed check abandons the action with a sentence naming what did not match. A WLAN write sends back the record it just read with exactly one key changed, so Reactor never invents a value for a field it does not understand.
+- **Credentials are install configuration, never per-Automation.** The write path needs a UniFi OS local account — the API key the poller reads with does not write — and it comes from the operator's environment, not from a Secret an `Automation` names. An `Automation` therefore cannot supply credentials to reach a console the operator did not configure.
+- **No session is held.** Each action logs in, acts, and logs out on the far end. A UniFi OS session cookie is a bearer of the same authority as the password that produced it, so caching one across reconciles would be exactly what this project refuses to do with the password. The cookie never reaches a log line, a status field, an `Event` or a template.
+- **At most once, in either direction.** No retry, in the reconcile or across reconciles. The next transition corrects a miss; nothing corrects a write that half-happened against an endpoint with no concurrency control.
+- **What is reported is the console object, not the console.** `status.edgeActions[].destination` reads `unifi/wlan/Guest`, not the gateway's address: the address is install configuration identical for every `Automation`, and which object was touched is the part worth reading. A refusal to find a WLAN deliberately does not list the ones that exist — the network's SSIDs are not a namespace tenant's to be told.
+
+**Residual risk, stated plainly.** With an SSID allowlisted, anyone who can create an `Automation` in any namespace can cause it to be switched, at whatever moment the provider state they chose transitions. That is the feature. Allowlist only networks whose loss is an inconvenience, and note that a disabled WLAN is **not handed back** by an uninstall or by deleting the `Automation` — there is no baseline for it and the pre-delete sweep has no credentials to use one with.
+
+**Unverified surface.** Every endpoint on the write path is inferred rather than observed; only the authentication has been seen working against real hardware. [`docs/unifi-write-api.md`](docs/unifi-write-api.md) splits the two. A bug in that inference degrades to a refused action rather than to a wrong one, which is the property the check-before-write discipline exists to give.
+
 ## Supported versions
 
 The project is pre-1.0. Fixes land on the latest release only; there are no maintained release branches.

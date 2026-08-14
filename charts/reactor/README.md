@@ -403,6 +403,35 @@ Worth knowing before switching it on:
   Custom Webhook action at the receiver with a bearer token, or with an `Authorization` header in
   the action's custom-headers list.
 
+## Console actions
+
+`unifi.wlan.enable` and `unifi.wlan.disable` **change** things on your console rather than reading from it. They are off until you name what may be touched:
+
+```yaml
+unifi:
+  actions:
+    allowedWlans:
+      - Guest
+```
+
+With the list empty — the default — every `unifi.*` action is refused, and the Automation says which value to add. There is no `*`: "any SSID" is not a choice this chart offers.
+
+**These need a second credential.** The API key the poller reads with does not write; the write path uses a UniFi OS local account, the same one Alarm Manager self-registration uses:
+
+```bash
+kubectl -n reactor-system create secret generic unifi-reactor-console \
+  --from-literal=UNIFI_USERNAME=reactor \
+  --from-literal=UNIFI_PASSWORD='...'
+```
+
+Setting that list injects the Secret. **No new RBAC** — a console write goes to your gateway, not to the API server — and no new outbound destination, since the console's address is `unifi.url` and not something an `Automation` chooses.
+
+One thing worth knowing before listing anything:
+
+- **A disabled WLAN is not handed back.** These are edge actions with no baseline: if the exit transition never arrives — the `Automation` is deleted, the release is uninstalled, the state key stops being observable — the network stays off until a human turns it on. The pre-delete sweep runs with no credentials and cannot reach the console. List SSIDs whose absence is an inconvenience.
+
+Every endpoint on this path is inferred rather than observed; only the authentication has been seen working on real hardware. See [`docs/unifi-write-api.md`](../../docs/unifi-write-api.md) and [SECURITY.md](../../SECURITY.md#console-actions).
+
 ## Outbound actions
 
 `http.request`, the `notification.*` types and the named integrations (`homeassistant.service`, `qbittorrent.pause` / `qbittorrent.resume`) send a request out of the cluster. All of them are **off until you say where they may go**, and all of them go through one client, so this one value covers every current and future outbound action type:
@@ -798,6 +827,8 @@ publishing — which fails as silence rather than as an error.
 | `unifi.webhook.registration.enabled` | `false` | Let Reactor create its own Alarm Manager rule on the console |
 | `unifi.webhook.registration.publicURL` | `""` | URL the console should POST to (required when registering) |
 | `unifi.webhook.registration.ruleTitle` | `unifi-reactor` | Title of the rule Reactor creates and recognizes |
+| `unifi.actions.allowedWlans` | `[]` | SSIDs `unifi.wlan.enable` / `unifi.wlan.disable` may switch. **Empty refuses every SSID** |
+| `unifi.actions.existingSecret` | `unifi-reactor-console` | Secret containing `UNIFI_USERNAME` and `UNIFI_PASSWORD`; the write path needs a UniFi OS local account |
 | `unifi.webhook.registration.existingSecret` | `unifi-reactor-console` | Secret containing `UNIFI_USERNAME` and `UNIFI_PASSWORD` |
 | `actions.allowedDestinations` | `[]` | Where outbound actions may go. Empty refuses all of them; see [Outbound actions](#outbound-actions) |
 | `uninstall.releaseClaims` | `true` | Run a pre-delete Job that hands every held workload back before the operator is removed |

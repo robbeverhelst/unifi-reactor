@@ -157,13 +157,15 @@ So the RBAC that would make it possible is not granted under any setting: `rbac.
 | | Declares | Arbitrated? | Types |
 | --- | --- | --- | --- |
 | **Desired-state** | a *level* — what a target should be | yes, continuously across every automation sharing the target | `kubernetes.scale`, `kubernetes.cronjob.suspend`, `kubernetes.cordon` |
-| **Edge** | an *occurrence* | no — fires on this automation's own transition and owns nothing | `kubernetes.restart`, `http.request`, `notification.*`, `homeassistant.service`, `qbittorrent.*` |
+| **Edge** | an *occurrence* | no — fires on this automation's own transition and owns nothing | `kubernetes.restart`, `http.request`, `notification.*`, `homeassistant.service`, `qbittorrent.*`, `unifi.wlan.*` |
 
 `kubernetes.scale` works through the [scale subresource](https://kubernetes.io/docs/reference/using-api/api-concepts/#subresources), so `kind: Deployment` and `kind: StatefulSet` take the same path and Reactor never has to know where a kind keeps its replicas. `target.kind` is still a closed list, on purpose: a kind is only reachable if the chart granted RBAC for it, and RBAC has to name resources explicitly — so an open field would turn a typo into a `Forbidden` discovered *during* the outage, instead of a rejected write at admission.
 
 A level is ordered and nothing else: **lower is more restrictive, and a shared target resolves to the lowest anyone asked for.** For `kubernetes.scale` that is the replica count, so shedding wins. For `kubernetes.cronjob.suspend` and `kubernetes.cordon` it is a switch, ordered so that *suspended* and *cordoned* are the restrictive answers — which means suspended wins over running for exactly the same reason 0 replicas wins over 3, and with no new rule to learn. `status.targets[].level` says which in words.
 
-**What decides which column an action lands in is not whether it expresses a level.** [Pausing torrents](#qbittorrent) plainly does, and is an edge action anyway. It is whether there is somewhere to record the value the target held *before* Reactor claimed it — because without that, release cannot put it back, and an automation that cannot hand a target back has no business claiming it. For a Kubernetes object that place is an annotation on the object. For anything else there is no answer yet, which is why every desired-state action so far is a `kubernetes.*` one, and why the actions that reach outside the cluster are named as verbs.
+**What decides which column an action lands in is not whether it expresses a level.** [Pausing torrents](#qbittorrent) plainly does, and so does [a WLAN being enabled](#switching-a-wireless-network-off), and both are edge actions anyway. It is whether there is somewhere to record the value the target held *before* Reactor claimed it — because without that, release cannot put it back, and an automation that cannot hand a target back has no business claiming it. For a Kubernetes object that place is an annotation on the object. For anything else there is no answer yet, which is why every desired-state action so far is a `kubernetes.*` one, and why the actions that reach outside the cluster are named as verbs.
+
+The [HPA decline path](#when-something-else-already-owns-the-workload) is the same rule seen from the other side: a scalable target another controller drives can be refused *and handed back to what it was*, and it can be handed back precisely because the baseline is on the object. Nothing outside the cluster has that, so nothing outside the cluster can be declined back to anything.
 
 ### Restarting a workload
 
@@ -196,6 +198,7 @@ unifi:
 ```
 
 The shipped default is `1` — react on the first observation — because `wan` and `ups` are switch positions that do not flap, and a failover deserves an immediate reaction. That default is chosen for `kubernetes.scale`. **If a key drives a restart, raise its debounce**, and accept the cost: each extra sample is one `pollInterval` of extra reaction time. Before adding a restart to an automation, ask what the key does when the hardware behind it is halfway broken rather than cleanly up or down — that is the state a restart loop is born in.
+
 
 ## When two automations share a workload
 
@@ -600,6 +603,65 @@ Three details that follow:
 
 **Every torrent, or none.** There is no category or tag filter. Narrowing to one would mean listing torrents and reading the response back into Reactor, and the outbound client deliberately drains and discards every response body — a response can echo a request back, credentials included. That capability is not worth adding for a filter.
 
+## Changing things on your UniFi console
+
+Everything above reaches *out* of the cluster to an address you allowlisted. The action here reaches *back at the console Reactor watches*, and they are a different kind of risk: they are the first things Reactor changes on your network rather than reads from it, and the people they affect are not running the cluster.
+
+> ⚠️ **Nothing here has ever been run against a real console.** The way Reactor authenticates a write was worked out against a live UDM Pro, but every endpoint under it is inferred from how UniFi's own web UI is understood to work. [`docs/unifi-write-api.md`](docs/unifi-write-api.md) says exactly which is which. Everything is exercised against `hack/mock-unifi`, and a mock proves the wiring, not the protocol.
+
+Three properties hold for anything in this section, and they are what make it safe enough to ship at all:
+
+- **You decide what may be touched, at install time.** `unifi.actions.allowedWlans` is a Helm value, empty by default, and empty refuses everything with a reason naming the value to add. There is no per-automation override — `spec.actions` is writable by anyone who can create an `Automation` in their own namespace, and turning the WiFi off is not a decision that belongs there.
+- **Every step checks before it writes.** Read the object, confirm it is the one the automation meant, then act. A check that fails abandons the action and says what did not match; it never writes anyway and it never writes something else.
+- **Attempted exactly once.** No retry, in either direction. See [when an action fails](#when-an-action-fails) — the next transition corrects a miss, and nothing corrects a duplicate.
+
+It needs a **UniFi OS local account**, because the API key the poller reads with does not write:
+
+```sh
+kubectl -n reactor-system create secret generic unifi-reactor-console \
+  --from-literal=UNIFI_USERNAME=reactor \
+  --from-literal=UNIFI_PASSWORD='...'
+```
+
+That is the same Secret the [Alarm Manager registration](#webhook-fast-path) uses, and it is the same credential — same layer, same session, same CSRF token. Reactor holds no session: it logs in, acts, and logs out, once per action.
+
+### Switching a wireless network off
+
+On a metered 5G uplink, guest WiFi is pure cost:
+
+```yaml
+  when:
+    provider: unifi
+    state: {wan: backup}
+  actions:
+    - type: unifi.wlan.disable
+      wlan: {name: Guest}
+  onExit:
+    - type: unifi.wlan.enable
+      wlan: {name: Guest}
+```
+
+```yaml
+# values.yaml — without this, the action above is refused
+unifi:
+  actions:
+    allowedWlans:
+      - Guest
+```
+
+Only `enabled` is ever changed. The write is a read-modify-write, because `rest/wlanconf` offers nothing narrower: Reactor reads the WLAN, changes that one key, and PUTs back **the record it just read**, so it never invents a value for a field it does not understand. It also writes nothing at all when the WLAN is already where you asked for it. What it cannot avoid is that a change you make in the UniFi UI in the two-request window between the read and the write is lost.
+
+#### It is a level, and an edge action, and this one bites
+
+A WLAN being enabled is a level in exactly the way [pausing torrents is](#it-is-a-level-in-the-world-and-an-edge-action-here), and it is an edge action for exactly the same reason: there is nowhere to record what it was before Reactor touched it. Writing that into the WLAN's own configuration is the torrent-tag mistake — it is your config, you can edit it, and the write carrying it has no concurrency control. And releasing a WLAN would mean a credentialed write to the console, which the pre-delete sweep during an uninstall is *designed* to be incapable of.
+
+So, two limitations, and the second is louder here than anywhere else in this README:
+
+- **It is not arbitrated.** Two automations disabling the same SSID do not resolve to one claim; whichever enables it first enables it.
+- **Nothing hands it back.** If the exit transition never arrives — you delete the automation, you uninstall Reactor, the state key stops being observable — **the network stays off until a human turns it back on.** There is no baseline, no release, and no pre-delete sweep that can reach it.
+
+Point it at a network whose absence is an inconvenience, not at the one carrying your phones, your cameras, or Reactor's own path to the controller. Reactor has no way to know which is which, which is why the allowlist is yours to write and is empty until you do.
+
 ## State keys
 
 Each key is published only when the matching hardware is adopted by your controller.
@@ -892,6 +954,7 @@ See the [chart reference](charts/reactor/README.md#webhook-fast-path-optional-of
 - [Chart reference](charts/reactor/README.md) — every value, both RBAC modes
 - [Captured UniFi payloads](testdata/unifi/README.md) — the real API responses every parser is written and tested against
 - [UniFi Alarm Manager API](docs/unifi-alarm-manager-api.md) — reverse-engineered notes on configuring UniFi's outbound webhooks programmatically
+- [Writing to a UniFi console](docs/unifi-write-api.md) — what the `unifi.*` actions send, split into what was observed on real hardware and what is inferred
 - [Development](docs/development.md) — building, testing, and running against a local cluster
 - [Contributing](CONTRIBUTING.md) — the dev loop, conventional commits, and the fixture capture policy
 - [Security policy](SECURITY.md) — the outbound-action threat model, how to report a vulnerability, and how to verify a signed release

@@ -113,7 +113,7 @@ func (f *fakeConsole) start(t *testing.T) *httptest.Server {
 	})
 
 	mux.HandleFunc("GET "+alarmRulesPath, func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(t, w, map[string]any{"data": f.rules})
+		writeJSON(t, w, map[string]any{envelopeData: f.rules})
 	})
 
 	mux.HandleFunc("POST "+alarmRulesPath, func(w http.ResponseWriter, r *http.Request) {
@@ -224,7 +224,7 @@ func TestRegistrarCreatesTheRuleInTheShapeTheAPIDemands(t *testing.T) {
 	if action["id"] != alarmWebhookActionID {
 		t.Errorf("expected the %q action, got %v", alarmWebhookActionID, action["id"])
 	}
-	data := action["data"].(map[string]any)
+	data := action[envelopeData].(map[string]any)
 	if data["url"] != registrar.CallbackURL || data["method"] != http.MethodPost {
 		t.Errorf("expected a POST to the callback URL, got %v %v", data["method"], data["url"])
 	}
@@ -446,7 +446,7 @@ func TestFindRuleID(t *testing.T) {
 	rule := map[string]any{"id": "rule-1", keyTitle: DefaultAlarmRuleTitle}
 	for name, doc := range map[string]any{
 		"bare array":      []any{rule},
-		"wrapped in data": map[string]any{"data": []any{rule}},
+		"wrapped in data": map[string]any{envelopeData: []any{rule}},
 		"deeply nested":   map[string]any{"result": map[string]any{"items": []any{rule}}},
 	} {
 		t.Run(name, func(t *testing.T) {

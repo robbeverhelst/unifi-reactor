@@ -779,6 +779,48 @@ desired-state action targets a Kubernetes object, and anything else is an edge
 action named as a verb. That is a rule about the whole action taxonomy, not
 about torrents.
 
+### UniFi console actions
+
+Shipped as `unifi.wlan.enable` / `unifi.wlan.disable` (#24). They are the first
+actions that **write** to the console the provider observes, rather than to the cluster or to an address an
+automation named, and three things about them are decisions rather than
+implementation.
+
+**The rule above was applied and produced the same answer.** A WLAN being
+enabled is a level in the world exactly as pausing torrents is, and it is an
+edge action for the same reason: there is nowhere to record what it was before
+Reactor changed it. Writing that into the WLAN's own configuration is the
+torrent-tag rejection again — it is the user's config, editable by them, and the
+write carrying it is a read-modify-write with no concurrency control. And the
+release half is worse here than for qBittorrent: handing a WLAN back means a
+*credentialed* write to the console, and the pre-delete sweep runs with no
+credentials by design. So the actions are named as verbs, they arbitrate with
+nothing, and the fact that a disabled network stays disabled if the exit
+transition never arrives is stated in the CRD doc, the README and the chart
+values rather than discovered.
+
+**The destination control is the console-side equivalent of
+`actions.allowedDestinations`.** `spec.actions` is writable by anyone who can
+create an `Automation` in their own namespace, so what may be changed on the
+console is decided by the operator at install time —
+`unifi.actions.allowedWlans`, empty by default, refusing everything, with no
+per-automation override.
+
+**Identity is checked before every write.** The WLAN is read and confirmed to be
+the one the automation named, and the record written back is the record just
+read with exactly one key changed — so Reactor never invents a value for a field
+it does not understand.
+
+The retry policy is at-most-once, recorded with the others on
+`maxActionAttempts`: the write is a read-modify-write against an endpoint with
+no version to compare against, so a retry after an ambiguous failure re-reads a
+document the failed attempt may already have half-changed.
+
+Every endpoint on this path is **inferred**, and
+[docs/unifi-write-api.md](unifi-write-api.md) splits what was observed on a real
+console from what was not. `hack/mock-unifi` serves and enforces the write
+endpoints so the path is exercised at all.
+
 ## State
 
 State is the primary abstraction, not a future feature.

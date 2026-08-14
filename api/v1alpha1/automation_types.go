@@ -286,6 +286,57 @@ type QBittorrent struct {
 	SecretRef SecretReference `json:"secretRef"`
 }
 
+// WLAN is the wireless network a unifi.wlan.enable or unifi.wlan.disable acts
+// on.
+//
+// This is the first action that writes to the UniFi console, and the first that
+// can take something away from people who are not running the cluster. Read the
+// two paragraphs below before using it.
+//
+// It is an edge action, and the reason is the rule the QBittorrent type states:
+// a desired-state action is arbitrated, and what makes that possible is not the
+// fold but that the target is a Kubernetes object, so the value it held before
+// Reactor claimed it can be recorded as an annotation ON that object. A UniFi
+// WLAN has no such place. Writing Reactor's bookkeeping into the WLAN's own
+// configuration is the same mistake a torrent tag would have been — it is the
+// user's config, they can edit it, and the write that carries it is a
+// read-modify-write with no concurrency control. And a baseline nobody can read
+// is not a baseline: releasing a WLAN means a credentialed write to the
+// console, which the pre-delete sweep during an uninstall is designed to be
+// incapable of.
+//
+// So two limitations follow, and they are louder here than for a torrent
+// client:
+//
+//   - It is not arbitrated. Two Automations disabling the same WLAN do not
+//     resolve to one claim; whichever enables it first enables it.
+//   - Nothing hands it back. If the exit transition never arrives — the
+//     Automation is deleted, Reactor is uninstalled, the state key stops being
+//     observable — the WLAN stays as Reactor last left it. A guest network that
+//     was turned off stays off until a human turns it back on.
+//
+// The HorizontalPodAutoscaler decline path is the clearest illustration of what
+// is missing here. A scalable target an HPA already drives can be refused and,
+// if Reactor was already holding it, put back where it was — and it can be put
+// back precisely because the baseline is an annotation on the object. A WLAN has
+// no equivalent, so there is no state it could be declined back to.
+//
+// Which SSIDs may be touched at all is the operator's decision at install time,
+// not the Automation's: unifi.actions.allowedWlans is empty by default and
+// empty refuses everything.
+type WLAN struct {
+	// Name is the SSID exactly as the console spells it, matched
+	// case-sensitively against the WLAN configuration on the site Reactor
+	// polls. It must also appear in the install's allowed WLAN list.
+	//
+	// A name that matches nothing is refused rather than guessed at, and the
+	// refusal does not list the WLANs that do exist: an Automation is readable
+	// by anyone in its namespace, and the network's SSIDs are not theirs.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	Name string `json:"name"`
+}
+
 // Notification is the message a notification.* action sends.
 //
 // The destination is not expressible here at all: it comes from the referenced
@@ -316,9 +367,9 @@ type Notification struct {
 // Types divide into two kinds. A desired-state action (kubernetes.scale,
 // kubernetes.cronjob.suspend) declares a level and is arbitrated continuously
 // across every Automation sharing its target. An edge action (kubernetes.restart,
-// http.request, notification.*, homeassistant.service, qbittorrent.*) expresses
-// an occurrence: it fires on this Automation's own transitions, owns no target
-// and arbitrates with nothing.
+// http.request, notification.*, homeassistant.service, qbittorrent.*,
+// unifi.wlan.*) expresses an occurrence: it fires on this Automation's own
+// transitions, owns no target and arbitrates with nothing.
 //
 // The dividing line is not "does this express a level" — pausing a torrent
 // client plainly does. It is whether there is somewhere to record the value the
@@ -334,6 +385,7 @@ type Notification struct {
 // +kubebuilder:validation:XValidation:rule="(self.type == 'http.request') == has(self.request)",message="spec.actions: request is required by http.request and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="(self.type == 'homeassistant.service') == has(self.homeAssistant)",message="spec.actions: homeAssistant is required by homeassistant.service and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type.startsWith('qbittorrent.') == has(self.qbittorrent)",message="spec.actions: qbittorrent is required by the qbittorrent.* types and rejected on every other type"
+// +kubebuilder:validation:XValidation:rule="self.type.startsWith('unifi.wlan.') == has(self.wlan)",message="spec.actions: wlan is required by the unifi.wlan.* types and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type.startsWith('notification.') == has(self.notification)",message="spec.actions: notification is required by the notification.* types and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type.startsWith('kubernetes.') == has(self.target)",message="spec.actions: target is required by the kubernetes.* actions and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type == 'kubernetes.scale' || !has(self.replicas)",message="spec.actions: replicas belongs to kubernetes.scale"
@@ -345,7 +397,7 @@ type Notification struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.target) || self.type != 'kubernetes.restart' || self.target.kind in ['Deployment', 'StatefulSet']",message="spec.actions: kubernetes.restart targets a kind with a pod template: Deployment or StatefulSet"
 type Action struct {
 	// Type of the action, e.g. "kubernetes.scale".
-	// +kubebuilder:validation:Enum=kubernetes.scale;kubernetes.cronjob.suspend;kubernetes.cordon;kubernetes.restart;http.request;notification.ntfy;notification.discord;notification.slack;homeassistant.service;qbittorrent.pause;qbittorrent.resume
+	// +kubebuilder:validation:Enum=kubernetes.scale;kubernetes.cronjob.suspend;kubernetes.cordon;kubernetes.restart;http.request;notification.ntfy;notification.discord;notification.slack;homeassistant.service;qbittorrent.pause;qbittorrent.resume;unifi.wlan.enable;unifi.wlan.disable
 	Type string `json:"type"`
 
 	// Target of a kubernetes.* action.
@@ -400,11 +452,16 @@ type Action struct {
 	// +optional
 	QBittorrent *QBittorrent `json:"qbittorrent,omitempty"`
 
+	// WLAN is the wireless network a unifi.wlan.* action acts on.
+	// +optional
+	WLAN *WLAN `json:"wlan,omitempty"`
+
 	// TimeoutSeconds bounds a single attempt at this action, so an
 	// unreachable target or endpoint cannot occupy a reconcile indefinitely.
-	// Defaults to 30 for the kubernetes.* actions and to 10 for the outbound ones,
-	// which may retry within the same reconcile. Exceeding it is recorded as a
-	// failed execution, not held open.
+	// Defaults to 30 for the kubernetes.* actions and for the unifi.* console
+	// ones — which are a login, a check and a write rather than a single request
+	// — and to 10 for the outbound ones, which may retry within the same
+	// reconcile. Exceeding it is recorded as a failed execution, not held open.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=600
 	// +optional
@@ -576,6 +633,11 @@ type EdgeExecutionStatus struct {
 
 	// Destination is the scheme, host and port the request went to, for the
 	// same reason and with the same omissions.
+	//
+	// An action that writes to a provider's own console reports the object it
+	// acted on instead — "unifi/wlan/Guest" — because the console's address is
+	// install configuration that is the same for every Automation, while which
+	// object was touched is the part worth reading.
 	// +optional
 	Destination string `json:"destination,omitempty"`
 

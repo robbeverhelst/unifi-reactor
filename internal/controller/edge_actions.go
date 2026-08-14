@@ -189,9 +189,14 @@ func (r *AutomationReconciler) reportEdgeAction(
 // an operator wonder what was delivered. The named integrations sit between the
 // two — they command a service at an address rather than announcing anything to
 // it, so "delivered" would read as if a message had gone out.
+//
+// A console action takes the object wording rather than the address wording:
+// it changes a named thing on the console — a wireless network — and its Result
+// names that thing, so "applied to unifi/wlan/Guest" reads the way "applied to
+// Deployment/media/sonarr" does.
 func edgeVerbs(actionType string) (done, failed string) {
 	switch {
-	case isKubernetesAction(actionType):
+	case isKubernetesAction(actionType), actions.IsConsole(actionType):
 		return verbApplied, "was not applied"
 	case actionType == actions.TypeHomeAssistant,
 		actionType == actions.TypeQBittorrentPause,
@@ -216,6 +221,9 @@ func (r *AutomationReconciler) runEdgeAction(
 ) (actions.Result, error) {
 	if isKubernetesAction(action.Type) {
 		return r.runClusterAction(ctx, automation, action)
+	}
+	if actions.IsConsole(action.Type) {
+		return r.runConsoleAction(ctx, action)
 	}
 	if r.Outbound == nil || !r.Outbound.Enabled() {
 		return actions.Result{}, errors.New(

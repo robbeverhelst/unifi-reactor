@@ -293,6 +293,8 @@ Some things genuinely belong in the core, and the test is whether the engine wou
 
 And some things are a different extension point entirely. **Action types are not providers.** A provider observes; an action acts. Adding `kubernetes.restart` or an HTTP action means extending the action side of the reconciler and the `Action` type's enum, and touches none of the above.
 
+There is one case where the two meet, and it is worth knowing the shape of before inventing your own. An action that writes to **the console your provider observes** — `unifi.wlan.*` — is still an action, and it still goes in the `Action` enum and in `internal/actions`' type list. But its *execution* lives in your provider package, behind the `controller.ConsoleWriter` interface, next to the client that already talks to that hardware. That is what keeps `internal/controller` free of any provider's field names while the credentials, the endpoint knowledge and the install-level "what may be changed here" allowlist stay with the provider that understands them. If you build one: it is an edge action unless you can say where a baseline would live that outlives both the `Automation` and Reactor, and check before you write.
+
 If you find yourself adding a provider name, a key name, or a value string to anything under `internal/engine/`, stop. That is the seam failing, and it is worth an issue rather than a workaround.
 
 ## See also
