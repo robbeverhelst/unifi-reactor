@@ -148,6 +148,15 @@ unifi:
     # your hardware, and no firmware update needs reacting to within 30
     # seconds. Extra samples are free when reaction time does not matter.
     #
+    # outlet.* is written down at 1 rather than left to the default, and it is
+    # the one entry here whose number is an argument rather than a setting. A
+    # relay is a switch position and not a measurement: it is where it is,
+    # nothing about it hovers on a threshold, and there is no reading to
+    # settle. It matches wan and ups, which are debounced at 1 for the same
+    # reason. Stating it means raising `default` cannot quietly delay an outlet
+    # by a poll, and it is a prefix because outlet keys are named outlet.<index>
+    # until somebody names the outlets, and outlet.<name> afterwards.
+    #
     # An entry may end in "*", which matches every key with that prefix. It is
     # how a group whose key names come from your hardware gets settled at all:
     # no list here could name them. Exact keys win over patterns, and the
@@ -166,6 +175,7 @@ unifi:
       temperature: 3
       wifi: 2
       poe: 3
+      outlet.*: 1
   # Name of an existing Secret containing the key UNIFI_API_KEY.
   # Create it with:
   #   kubectl -n <namespace> create secret generic unifi-reactor-credentials \

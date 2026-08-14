@@ -135,6 +135,25 @@ limitations under the License.
 //	curl -X POST 'http://localhost:9443/ups?present=false'
 //	curl -X POST 'http://localhost:9443/ups?present=true'
 //
+// The outlet table is the one place here that rehearses a question nobody has
+// answered. /outlets drives the outlet.<n> state keys, and `switching` chooses
+// which hypothesis the mock imitates — because asking for outlet 5 has to be
+// able to move outlet 5 alone OR take outlets 5-8 with it, and a parser that
+// only ever saw one of those is a parser tested against a guess:
+//
+//	curl http://localhost:9443/outlets                                  # states, and the relay grouping
+//	curl -X POST 'http://localhost:9443/outlets?switching=individual&outlet=5&state=off'
+//	curl -X POST 'http://localhost:9443/outlets?switching=group&outlet=5&state=off'   # takes 5-8
+//	curl -X POST 'http://localhost:9443/outlets?group=2&state=on'
+//	curl -X POST 'http://localhost:9443/outlets?outlet=5&label=nas'     # key becomes outlet.nas
+//	curl -X POST 'http://localhost:9443/outlets?groups=false'           # no relay_group reported
+//	curl -X POST 'http://localhost:9443/outlets?present=false'          # no outlet_table at all
+//	curl -X POST 'http://localhost:9443/outlets?reset=true'
+//
+// Reactor never writes an outlet, on the mock or anywhere else — this endpoint
+// is the mock's own dev surface, not a UniFi one. See issue #23, and hypothesis
+// H1 on #60 for the experiment that says which of the two switchings is real.
+//
 // It also serves — and enforces — the write endpoints the unifi.* edge actions
 // use. These are the first things Reactor changes on a console rather than
 // reads from it, and no write has ever been made against real hardware, so the
@@ -185,6 +204,7 @@ import (
 	"log"
 	"maps"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -452,6 +472,23 @@ type mock struct {
 	// outage ended".
 	noUPS bool
 
+	// The outlet_table rewrites, which is the only part of this mock that
+	// rehearses a question nobody has answered yet.
+	//
+	// outletOpen holds the outlets switched off, by their captured index, and
+	// outletLabels renames them — which moves their state key from outlet.<n>
+	// to outlet.<slug>, so the naming argument can be seen rather than only
+	// read about. outletGrouped is the hypothesis under test: with it set, one
+	// outlet cannot move alone and takes its whole relay group with it. See
+	// setOutlets. noOutlets drops the table entirely and noRelayGroups drops
+	// only the relay_group field, which is a readable outlet whose blast radius
+	// is unknown.
+	outletOpen    map[int]bool
+	outletLabels  map[int]string
+	outletGrouped bool
+	noOutlets     bool
+	noRelayGroups bool
+
 	// wlans is the wlanconf table the write actions read and change. Synthetic
 	// — see the package comment — and keyed by the id the mock made up.
 	wlans map[string]map[string]any
@@ -495,6 +532,8 @@ func main() {
 		wlans:           mockWLANs(),
 		switchDevice:    mockSwitch(),
 		deviceOverrides: map[string]*deviceOverride{},
+		outletOpen:      map[int]bool{},
+		outletLabels:    map[int]string{},
 	}
 	if raw, err := os.ReadFile(*deliveryFile); err == nil {
 		m.delivery = raw
@@ -557,6 +596,8 @@ func main() {
 	mux.HandleFunc("POST /firmware", m.setFirmware)
 	mux.HandleFunc("POST /temperature", m.setTemperature)
 	mux.HandleFunc("POST /wifi", m.setWiFi)
+	mux.HandleFunc("GET /outlets", m.describeOutlets)
+	mux.HandleFunc("POST /outlets", m.setOutlets)
 
 	// The write path: the Network application under /proxy/network, but
 	// authenticated the UniFi OS way — a session cookie plus the csrf header.
@@ -655,9 +696,10 @@ func (m *mock) rewriteFleet(device map[string]any) bool {
 	if override != nil && override.absent {
 		return false
 	}
-	// PoE is set for the whole mock rather than per device, so it applies
-	// whether or not this device has overrides of its own.
+	// PoE and the outlet table are set for the whole mock rather than per
+	// device, so they apply whether or not this device has overrides of its own.
 	m.rewritePoE(device)
+	m.rewriteOutlets(device)
 	if override == nil {
 		return true
 	}
@@ -829,8 +871,8 @@ func (m *mock) rewriteThermals(device map[string]any, override *deviceOverride) 
 	// The per-sensor form, with a null-valued sensor beside the real one: a
 	// sensor that reports nothing is a case the parser must not read as 0 °C.
 	device["temperatures"] = []any{
-		map[string]any{"name": "CPU", "type": "cpu", "value": *override.celsius},
-		map[string]any{"name": "System", "type": "board", "value": nil},
+		map[string]any{fieldName: "CPU", fieldType: "cpu", "value": *override.celsius},
+		map[string]any{fieldName: "System", fieldType: "board", "value": nil},
 	}
 }
 
@@ -1312,6 +1354,378 @@ func (m *mock) setUPS(w http.ResponseWriter, r *http.Request) {
 		"ups": state, "battery": m.battLvl,
 		"runtime": m.runtime, "output": m.output, paramBudget: m.budget,
 	})
+}
+
+// The outlet_table fields, named once so the mock and the parser agree on them
+// exactly. Unlike the PoE and thermal fields, every one of these IS in the
+// committed capture — this endpoint rewrites ground truth rather than inventing
+// a shape.
+const (
+	fieldOutletTable = "outlet_table"
+	fieldIndex       = "index"
+	fieldRelayState  = "relay_state"
+	fieldRelayGroup  = "relay_group"
+
+	paramOutlet = "outlet"
+	paramGroup  = "group"
+	paramState  = "state"
+)
+
+// capturedOutlets is the outlet table exactly as captured, for a handler that
+// needs to know which outlets exist and which relay group each is in. Callers
+// hold the lock.
+func (m *mock) capturedOutlets() []map[string]any {
+	var devices []any
+	if err := json.Unmarshal(m.pristine, &devices); err != nil {
+		return nil
+	}
+	for _, d := range devices {
+		device, ok := d.(map[string]any)
+		if !ok {
+			continue
+		}
+		table, ok := device[fieldOutletTable].([]any)
+		if !ok || len(table) == 0 {
+			// The captured gateway carries "outlet_table": [], so having the
+			// field is not the same as having outlets. Taking the first device
+			// with the field would hand back the gateway's empty one and hide
+			// the UPS behind it.
+			continue
+		}
+		outlets := make([]map[string]any, 0, len(table))
+		for _, entry := range table {
+			if outlet, ok := entry.(map[string]any); ok {
+				outlets = append(outlets, outlet)
+			}
+		}
+		return outlets
+	}
+	return nil
+}
+
+// outletIndex reads one captured outlet's index.
+func outletIndex(outlet map[string]any) (int, bool) {
+	index, ok := toFloat(outlet[fieldIndex])
+	return int(index), ok
+}
+
+// outletGroup reads one captured outlet's relay group.
+func outletGroup(outlet map[string]any) (int, bool) {
+	group, ok := toFloat(outlet[fieldRelayGroup])
+	return int(group), ok
+}
+
+// rewriteOutlets applies the outlet overrides to a device carrying an outlet
+// table. Callers hold the lock.
+func (m *mock) rewriteOutlets(device map[string]any) {
+	table, present := device[fieldOutletTable].([]any)
+	if !present {
+		return
+	}
+	if m.noOutlets {
+		delete(device, fieldOutletTable)
+		return
+	}
+	for _, entry := range table {
+		outlet, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		index, known := outletIndex(outlet)
+		if !known {
+			continue
+		}
+		if m.outletOpen[index] {
+			outlet[fieldRelayState] = false
+		}
+		if label := m.outletLabels[index]; label != "" {
+			outlet[fieldName] = label
+		}
+		if m.noRelayGroups {
+			delete(outlet, fieldRelayGroup)
+		}
+	}
+}
+
+// setOutlets drives the outlet table, and it is the only endpoint here that
+// rehearses a question the hardware has not answered.
+//
+//	?outlet=5&state=off     switch one outlet
+//	?group=2&state=off      switch a whole relay group
+//	?switching=group        make one outlet unable to move alone
+//	?outlet=5&label=nas     name an outlet, moving its key to outlet.nas
+//	?groups=false           an outlet reporting no relay_group at all
+//	?present=false          no outlet_table at all
+//	?reset=true             back to the capture
+//
+// switching is what makes both hypotheses reachable from the same request.
+// Nobody has confirmed whether a UniFi UPS switches an outlet or a bank, so
+// asking for outlet 5 has to be able to produce either reading: on its own with
+// switching=individual, and taking outlets 5-8 with it under switching=group.
+// A parser that only ever saw one of those would be a parser tested against a
+// guess. See issue #23, and hypothesis H1 on #60 for the experiment that
+// settles which of these two the mock is imitating.
+func (m *mock) setOutlets(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if query.Get("reset") != "" {
+		m.outletOpen = map[int]bool{}
+		m.outletLabels = map[int]string{}
+		m.outletGrouped, m.noOutlets, m.noRelayGroups = false, false, false
+		log.Print("outlets are back to the capture: all eight closed, unnamed, in two relay groups")
+		m.writeOutlets(w)
+		return
+	}
+	if raw := query.Get(fieldPresent); raw != "" {
+		present, err := strconv.ParseBool(raw)
+		if err != nil {
+			http.Error(w, "present must be a boolean", http.StatusBadRequest)
+			return
+		}
+		m.noOutlets = !present
+	}
+	if raw := query.Get("groups"); raw != "" {
+		grouped, err := strconv.ParseBool(raw)
+		if err != nil {
+			http.Error(w, "groups must be a boolean", http.StatusBadRequest)
+			return
+		}
+		m.noRelayGroups = !grouped
+	}
+	switch query.Get("switching") {
+	case "group":
+		m.outletGrouped = true
+	case "individual":
+		m.outletGrouped = false
+	case "":
+	default:
+		http.Error(w, `switching must be "individual" or "group"`, http.StatusBadRequest)
+		return
+	}
+
+	outlets := m.capturedOutlets()
+	if !m.applyOutletMove(w, query, outlets) {
+		return
+	}
+	if !m.applyOutletLabel(w, query, outlets) {
+		return
+	}
+
+	log.Printf("outlets: switching=%s open=%s labels=%s groups=%v present=%v",
+		m.switchingMode(), describeOpenOutlets(m.outletOpen), describeLabels(m.outletLabels),
+		!m.noRelayGroups, !m.noOutlets)
+	m.writeOutlets(w)
+}
+
+// applyOutletMove opens or closes whatever the request addressed, and reports
+// whether the request was valid.
+func (m *mock) applyOutletMove(w http.ResponseWriter, query url.Values, outlets []map[string]any) bool {
+	outlet, group := query.Get(paramOutlet), query.Get(paramGroup)
+	if outlet == "" && group == "" {
+		return true
+	}
+	if query.Get(paramState) == "" {
+		// An outlet can be addressed to be named rather than switched, so a
+		// missing state is only a mistake when there is nothing else to do to
+		// it. Saying which is better than silently doing nothing.
+		if _, naming := query["label"]; naming && group == "" {
+			return true
+		}
+		http.Error(w, "an addressed outlet or group needs a state: ?outlet=5&state=off", http.StatusBadRequest)
+		return false
+	}
+	open, ok := parseOutletState(w, query.Get(paramState))
+	if !ok {
+		return false
+	}
+
+	moved := map[int]bool{}
+	if group != "" {
+		wanted, err := strconv.Atoi(group)
+		if err != nil {
+			http.Error(w, "group must be a relay group number", http.StatusBadRequest)
+			return false
+		}
+		for _, o := range outlets {
+			index, known := outletIndex(o)
+			if got, grouped := outletGroup(o); known && grouped && got == wanted {
+				moved[index] = true
+			}
+		}
+		if len(moved) == 0 {
+			http.Error(w, "no captured outlet is in relay group "+group, http.StatusBadRequest)
+			return false
+		}
+	}
+	if outlet != "" {
+		wanted, err := strconv.Atoi(outlet)
+		if err != nil {
+			http.Error(w, "outlet must be an outlet index", http.StatusBadRequest)
+			return false
+		}
+		if !m.addressOutlet(w, wanted, outlets, moved) {
+			return false
+		}
+	}
+	for index := range moved {
+		m.outletOpen[index] = open
+	}
+	return true
+}
+
+// addressOutlet works out which outlets a request for ONE outlet actually
+// moves, which is the whole question #23 is blocked on: under switching=group
+// it is every outlet in that outlet's relay group.
+func (m *mock) addressOutlet(w http.ResponseWriter, wanted int, outlets []map[string]any, moved map[int]bool) bool {
+	var group int
+	grouped := false
+	for _, o := range outlets {
+		index, known := outletIndex(o)
+		if !known || index != wanted {
+			continue
+		}
+		group, grouped = outletGroup(o)
+		moved[wanted] = true
+	}
+	if !moved[wanted] {
+		http.Error(w, "no captured outlet has index "+strconv.Itoa(wanted), http.StatusBadRequest)
+		return false
+	}
+	if !m.outletGrouped || !grouped {
+		return true
+	}
+	for _, o := range outlets {
+		index, known := outletIndex(o)
+		if got, inGroup := outletGroup(o); known && inGroup && got == group {
+			moved[index] = true
+		}
+	}
+	return true
+}
+
+// applyOutletLabel names an outlet, which is what moves its key off the index.
+func (m *mock) applyOutletLabel(w http.ResponseWriter, query url.Values, outlets []map[string]any) bool {
+	label, given := query["label"]
+	if !given {
+		return true
+	}
+	raw := query.Get(paramOutlet)
+	if raw == "" {
+		http.Error(w, "label needs an outlet to name: ?outlet=5&label=nas", http.StatusBadRequest)
+		return false
+	}
+	wanted, err := strconv.Atoi(raw)
+	if err != nil {
+		http.Error(w, "outlet must be an outlet index", http.StatusBadRequest)
+		return false
+	}
+	for _, o := range outlets {
+		if index, known := outletIndex(o); known && index == wanted {
+			m.outletLabels[wanted] = label[0]
+			return true
+		}
+	}
+	http.Error(w, "no captured outlet has index "+raw, http.StatusBadRequest)
+	return false
+}
+
+// parseOutletState reads on/off, which is the vocabulary the state key uses
+// rather than the true/false the API carries.
+func parseOutletState(w http.ResponseWriter, state string) (open bool, ok bool) {
+	switch state {
+	case "off":
+		return true, true
+	case "on":
+		return false, true
+	default:
+		http.Error(w, `state must be "on" or "off"`, http.StatusBadRequest)
+		return false, false
+	}
+}
+
+func (m *mock) switchingMode() string {
+	if m.outletGrouped {
+		return "group"
+	}
+	return "individual"
+}
+
+// describeOutlets answers what the outlets are doing and, more importantly,
+// which of them share a relay group.
+func (m *mock) describeOutlets(w http.ResponseWriter, _ *http.Request) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.writeOutlets(w)
+}
+
+// writeOutlets renders the outlet picture. Callers hold the lock.
+func (m *mock) writeOutlets(w http.ResponseWriter) {
+	outlets := make([]any, 0, 8)
+	groups := map[string][]string{}
+	for _, o := range m.capturedOutlets() {
+		index, known := outletIndex(o)
+		if !known {
+			continue
+		}
+		name, _ := o[fieldName].(string)
+		if label := m.outletLabels[index]; label != "" {
+			name = label
+		}
+		state := "on"
+		if m.outletOpen[index] {
+			state = "off"
+		}
+		entry := map[string]any{fieldIndex: index, fieldName: name, paramState: state}
+		if group, grouped := outletGroup(o); grouped && !m.noRelayGroups {
+			entry[fieldRelayGroup] = group
+			key := strconv.Itoa(group)
+			groups[key] = append(groups[key], "outlet."+strconv.Itoa(index))
+		}
+		outlets = append(outlets, entry)
+	}
+	if m.noOutlets {
+		outlets, groups = nil, nil
+	}
+	writeJSON(w, map[string]any{
+		"outlets":     outlets,
+		"relayGroups": groups,
+		"switching":   m.switchingMode(),
+		keyNote: "the outlet table IS captured, unlike the PoE and thermal fields — but " +
+			"whether this UPS switches an outlet or a whole relay group is NOT known, and " +
+			"switching=group vs switching=individual is this mock imitating each guess. " +
+			"Reactor never writes an outlet; see issue #23 and hypothesis H1 on #60",
+	})
+}
+
+func describeOpenOutlets(open map[int]bool) string {
+	var indexes []int
+	for index, isOpen := range open {
+		if isOpen {
+			indexes = append(indexes, index)
+		}
+	}
+	if len(indexes) == 0 {
+		return "none"
+	}
+	slices.Sort(indexes)
+	parts := make([]string, 0, len(indexes))
+	for _, index := range indexes {
+		parts = append(parts, strconv.Itoa(index))
+	}
+	return strings.Join(parts, "/")
+}
+
+func describeLabels(labels map[int]string) string {
+	if len(labels) == 0 {
+		return "none"
+	}
+	parts := make([]string, 0, len(labels))
+	for _, index := range slices.Sorted(maps.Keys(labels)) {
+		parts = append(parts, strconv.Itoa(index)+"="+labels[index])
+	}
+	return strings.Join(parts, ",")
 }
 
 // overrideFor is the rewrite record for one captured device, created on first
@@ -2106,13 +2520,13 @@ func (m *mock) fireAlarm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, rule := range rules {
-		url, token := ruleURL(rule), ruleToken(rule)
-		if url == "" {
+		endpoint, token := ruleURL(rule), ruleToken(rule)
+		if endpoint == "" {
 			continue
 		}
-		req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, bytes.NewReader(m.delivery))
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, bytes.NewReader(m.delivery))
 		if err != nil {
-			log.Printf("delivery to %s could not be built: %v", url, err)
+			log.Printf("delivery to %s could not be built: %v", endpoint, err)
 			continue
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -2121,14 +2535,14 @@ func (m *mock) fireAlarm(w http.ResponseWriter, r *http.Request) {
 		}
 		resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 		if err != nil {
-			log.Printf("delivery to %s failed: %v", url, err)
-			_, _ = fmt.Fprintf(w, "delivery to %s failed: %v\n", url, err)
+			log.Printf("delivery to %s failed: %v", endpoint, err)
+			_, _ = fmt.Fprintf(w, "delivery to %s failed: %v\n", endpoint, err)
 			continue
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
-		log.Printf("delivered to %s -> %s", url, resp.Status)
-		_, _ = fmt.Fprintf(w, "delivered to %s -> %s\n", url, resp.Status)
+		log.Printf("delivered to %s -> %s", endpoint, resp.Status)
+		_, _ = fmt.Fprintf(w, "delivered to %s -> %s\n", endpoint, resp.Status)
 	}
 }
 
@@ -2139,8 +2553,8 @@ func ruleURL(rule map[string]any) string {
 	if !ok {
 		return ""
 	}
-	url, _ := data["url"].(string)
-	return url
+	endpoint, _ := data["url"].(string)
+	return endpoint
 }
 
 func ruleToken(rule map[string]any) string {

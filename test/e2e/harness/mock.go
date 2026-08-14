@@ -206,6 +206,16 @@ func (m *Mock) WiFi(query string) error { return m.post("/wifi?" + query) }
 // powered port that reports no wattage, present=false for no PoE fields at all.
 func (m *Mock) PoE(query string) error { return m.post("/poe?" + query) }
 
+// Outlets drives the UPS outlet table: outlet=<n>&state=on|off for one outlet,
+// group=<n>&state=... for a whole relay group, outlet=<n>&label=<name> to name
+// one, present=false for a UPS reporting no outlets.
+//
+// switching=individual|group is the one that matters: it decides whether asking
+// for one outlet moves that outlet or its entire relay group, which is the
+// question #23 is deferred on and the two readings hypothesis H1 on #60 tells
+// apart. Reactor only ever reads these.
+func (m *Mock) Outlets(query string) error { return m.post("/outlets?" + query) }
+
 // Reachable reports whether the mock is answering yet.
 func (m *Mock) Reachable() error {
 	return m.request(http.MethodGet, "/proxy/network/api/s/default/stat/device")

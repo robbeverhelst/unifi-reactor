@@ -42,6 +42,13 @@ const (
 	// opt-in — see the note on StateVocabulary below.
 	stateKeyDevicePrefix = "device."
 
+	// stateKeyOutletPrefix is what one switchable UPS outlet is published
+	// under: outlet.<index> while the console's own "Outlet N" placeholder is
+	// still on it, outlet.<slugified name> once somebody has named it. Its name
+	// is open for the same reason device.<name>'s is, and its cardinality is
+	// not — see the note on StateVocabulary below.
+	stateKeyOutletPrefix = "outlet."
+
 	wanPrimary = "primary"
 	wanBackup  = "backup"
 
@@ -165,6 +172,13 @@ const (
 	// refuses a port, the camera is already off.
 	poeOK           = "ok"
 	poeInsufficient = "insufficient"
+
+	// outlet.<n> is the switch position of one UPS outlet: on is the relay
+	// closed and delivering mains. Two values, and a relay has no third — this
+	// is the least ambiguous key in this file, and the whole difficulty with it
+	// is on the write side, which is #23 and is not implemented anywhere.
+	outletOn  = "on"
+	outletOff = "off"
 )
 
 // The comparisons this provider makes between two independent signals for the
@@ -180,6 +194,7 @@ const (
 	signalWANHealthDisagrees  = "wan-health-disagrees"
 	signalDeviceNameShared    = "device-name-shared"
 	signalWiFiStatusDisagrees = "wifi-status-disagrees"
+	signalOutletNameShared    = "outlet-name-shared"
 )
 
 // StateVocabulary is the closed value set of every key this provider publishes
@@ -216,6 +231,39 @@ const (
 // devices key — one series, whatever the fleet size — is what ships on by
 // default. What any single device currently is stays in the Automation's status
 // and in a Kubernetes Event, exactly as isp's value does.
+//
+// outlet.<n> is absent too, and the reasoning is worth separating from
+// device.<name>'s, because only half of it carries over.
+//
+// The cardinality half does NOT. A UPS has eight outlets, a PDU six or so, and
+// nobody adds outlets to a chassis: the key count is bounded by hardware in a
+// way a rack full of adopted devices is not. So outlet keys are published
+// whenever a device reports an outlet table, with no opt-in — gating them
+// behind a setting would make them the one UPS key you have to ask for, next to
+// ups, ups.battery, ups.runtime and ups.load, which all appear the moment a UPS
+// does.
+//
+// The enumerability half does, and it is what decides this map. The key NAME is
+// the outlet's index until somebody names the outlet, and then it is the name —
+// which is the point, because outlet.3 means something different after the rack
+// is re-plugged and outlet.nas does not. This map is returned once at startup,
+// before any console has been polled, so it cannot contain a key it will not
+// learn until later; and hardcoding outlet.1 through outlet.8 would be writing
+// one UPS's chassis into this repository, silently leaving a larger PDU's ninth
+// outlet outside the metric.
+//
+// Declaring a prefix instead — outlet.* with two values — was considered and
+// rejected. reactor_state_info reports 0 for the values a key does not hold,
+// which is what stops a stale series sitting at 1 forever, and that requires
+// enumerating the values of a key that is NOT in the current observation.
+// A wildcard can only match keys that are present, so an outlet key that
+// vanished with its UPS would keep reporting 1 — the exact failure declaring a
+// vocabulary exists to prevent.
+//
+// So outlets are counted in reactor_state_transitions_total (one series each,
+// eight of them, which is what the H1 experiment on #60 reads), they are in
+// every referencing Automation's status and Events, and the provider logs the
+// grouping and every change in words. See outlets.go.
 func StateVocabulary() map[string][]string {
 	return map[string][]string{
 		stateKeyWAN:         {wanPrimary, wanBackup},

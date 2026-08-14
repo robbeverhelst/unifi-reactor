@@ -132,11 +132,20 @@ type Client struct {
 
 	// mu guards previous only.
 	mu sync.Mutex
-	// previous remembers the last WAN signals so that a change in one can be
-	// checked against a change in the other. Nothing is ever derived from it:
-	// it exists so a disagreement between two independent signals is reported
-	// instead of one of them being silently trusted. See crossCheckOverTime.
-	previous struct{ wan, isp string }
+	// previous remembers what the last poll saw, so that a change can be
+	// described rather than merely reported. Nothing is ever derived from it —
+	// no state key's value depends on it — and it exists twice over:
+	//
+	//   - wan and isp, so a disagreement between two independent signals for
+	//     one fact is reported instead of one of them being silently trusted.
+	//     See crossCheckOverTime.
+	//   - outlets, so an outlet that moves can be reported together with how
+	//     much of its relay group moved with it, which is the readout of the
+	//     experiment #23 is waiting on. See reportOutlets.
+	previous struct {
+		wan, isp string
+		outlets  outletSnapshot
+	}
 }
 
 // NewClient creates a UniFi client. UniFi OS consoles serve a self-signed
@@ -203,6 +212,7 @@ type deviceRecord struct {
 	firmwareFields
 	temperatureFields
 	poeFields
+	outletFields
 }
 
 type wanPort struct {
@@ -272,6 +282,7 @@ type vbmsTable struct {
 //	temperature  normal  | high              (the hottest adopted device)
 //	wifi         ok | warning | error        (the WLAN subsystem as a whole)
 //	poe          ok | insufficient           (headroom on the worst switch)
+//	outlet.<n>   on | off                    (one switchable UPS outlet; read-only)
 //
 // ups and ups.battery are deliberately independent: a `when: {ups: on-battery}`
 // automation must stay matched for the whole outage, including as the battery
@@ -363,6 +374,7 @@ func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse
 	var firmware firmwareTally
 	heat := newTemperatureTally(c.HighTemperatureCelsius)
 	poe := newPoETally(c.MaxPoEUtilizationPercent)
+	outlets := newOutletTally()
 
 	for _, d := range parsed.Data {
 		// The fleet keys are about devices the console manages, so an unadopted
@@ -374,6 +386,7 @@ func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse
 			firmware.observe(d)
 			heat.observe(ctx, d)
 			poe.observe(d)
+			outlets.observe(d)
 		} else {
 			logf.FromContext(ctx).WithName("unifi-devices").V(1).Info(
 				"Skipping a device that is not adopted", "model", d.Model, "type", d.Type)
@@ -408,6 +421,7 @@ func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse
 	firmware.publish(ctx, state)
 	heat.publish(ctx, state)
 	poe.publish(ctx, state)
+	c.reportOutlets(ctx, outlets.publish(ctx, state))
 
 	if len(state) == 0 {
 		return nil, fmt.Errorf(

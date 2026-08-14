@@ -267,6 +267,25 @@ provider reuses `isp`'s) so the key is always writable in YAML, and decide what 
 count a disagreement, because picking one is arbitrary and the arbitrary pick can
 be the one that hides the failure.
 
+**Separate the two halves of that argument before you copy it.** "Open key name"
+and "unbounded cardinality" travel together for `device.<name>` and come apart
+elsewhere, so decide each on its own. `outlet.<n>` is the case that shows the
+difference: its key name is open in exactly the same way — the index until
+somebody names the outlet, the name afterwards — so it is left out of
+`StateVocabulary()` for the same reason. But eight outlets are bounded by a
+chassis rather than by a rack, nobody adds outlets to a UPS, and most installs
+have no outlet-bearing device at all, so it needs **no opt-in**: it ships on
+beside the other keys its hardware publishes. Making it the one UPS key you have
+to ask for would have been consistency with the wrong half.
+
+If you are tempted to declare a prefix — `outlet.*` with two values — instead of
+leaving the key out, work through what `reactor_state_info` promises first. It
+reports `0` for the values a key does **not** currently hold, which is what stops
+a stale series sitting at `1`, and that requires enumerating the values of a key
+that is missing from the observation. A prefix can only match keys that are
+present, so the key would go stale at `1` the moment its hardware dropped off —
+the exact failure declaring a vocabulary exists to prevent.
+
 The other detail is debounce, and it needs the engine rather than the provider:
 a `PerKey` entry may end in `*`, so `device.*: 2` settles a group whose members
 are not known when the chart is written. The engine still learns nothing — it
