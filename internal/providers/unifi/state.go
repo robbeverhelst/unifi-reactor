@@ -57,3 +57,38 @@ const (
 	batteryLow      = "low"
 	batteryCritical = "critical"
 )
+
+// The comparisons this provider makes between two independent signals for the
+// same fact, named so a disagreement can be counted without the values that
+// disagreed — which come from the outside world — becoming a metric label.
+const (
+	signalWANUplinkDisagrees = "wan-uplink-disagrees"
+	signalWANUplinkUnclaimed = "wan-uplink-unclaimed"
+	signalWANUplinkAmbiguous = "wan-uplink-ambiguous"
+	signalWANNotOnline       = "wan-not-online"
+	signalWANMovedWithoutISP = "wan-moved-without-isp"
+	signalISPMovedWithoutWAN = "isp-moved-without-wan"
+)
+
+// StateVocabulary is the closed value set of every key this provider publishes
+// one for.
+//
+// It exists so that an exported gauge can report 0 for the values a key does
+// not currently hold rather than leaving a stale series sitting at 1 — which
+// needs the full list of values, and this file is already exactly that list.
+// Nothing outside this package may spell a key or a value, so the list is
+// handed out as opaque data.
+//
+// isp is deliberately absent. Its values are carrier names derived from
+// whatever public address the gateway currently holds, so the set is open by
+// construction — the one exception to the closed-vocabulary rule argued in
+// docs/adding-a-provider.md — and an open set is the one thing that must never
+// become a metric label. Its transitions are still counted, and its current
+// value is still in every referencing Automation's status.
+func StateVocabulary() map[string][]string {
+	return map[string][]string{
+		stateKeyWAN:        {wanPrimary, wanBackup},
+		stateKeyUPS:        {upsOnline, upsOnBattery},
+		stateKeyUPSBattery: {batteryNormal, batteryLow, batteryCritical},
+	}
+}

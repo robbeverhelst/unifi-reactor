@@ -24,9 +24,11 @@ limitations under the License.
 package chart
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -43,6 +45,9 @@ const (
 	// allowlist and the permission it implies appear in the rendered release.
 	envAllowedDestinations = "REACTOR_ACTION_ALLOWED_DESTINATIONS"
 	secretsRule            = `resources: ["secrets"]`
+	// tokenReviews is how the metrics endpoint's authn/authz filter appears in
+	// the rendered RBAC.
+	tokenReviews = "tokenreviews"
 )
 
 func chartDir() string { return filepath.Join("..", "..", "charts", "reactor") }
@@ -371,5 +376,180 @@ func TestOutboundActionsWorkWithoutAConsole(t *testing.T) {
 	manifests := render(t, "actions.allowedDestinations={https://ntfy.example.com}")
 	if !strings.Contains(manifests, envAllowedDestinations) {
 		t.Fatal("the allowlist is only rendered when a UniFi console is configured")
+	}
+}
+
+// TestMetricsAreOptIn is the upgrade guarantee for the metrics endpoint: an
+// existing install that does not ask for it gains no listening port, no
+// Service, and no new permission. The manifest bundle turns it on; the chart
+// makes it a choice, because opening a port on a running operator is not
+// something an upgrade should do on its own.
+func TestMetricsAreOptIn(t *testing.T) {
+	defaults := render(t, unifiURL)
+	for _, absent := range []string{
+		"--metrics-bind-address",
+		"containerPort: 8443",
+		"-metrics",
+		tokenReviews,
+		"kind: ServiceMonitor",
+		"kind: PrometheusRule",
+		"kind: GrafanaDashboard",
+	} {
+		if strings.Contains(defaults, absent) {
+			t.Errorf("a default install renders %q; metrics must be opt-in", absent)
+		}
+	}
+
+	enabled := render(t, unifiURL, "metrics.enabled=true")
+	for _, present := range []string{
+		"--metrics-bind-address=:8443",
+		"containerPort: 8443",
+		"kind: Service",
+		tokenReviews,
+		"subjectaccessreviews",
+	} {
+		if !strings.Contains(enabled, present) {
+			t.Errorf("metrics.enabled did not render %q", present)
+		}
+	}
+	// HTTPS behind the API server's authn/authz filter is the default posture,
+	// matching what install.yaml has always done.
+	if strings.Contains(enabled, "--metrics-secure=false") {
+		t.Error("the metrics endpoint is served insecurely by default")
+	}
+	// Reading /metrics is granted by a ClusterRole with no binding: the chart
+	// cannot know which ServiceAccount Prometheus scrapes with, and guessing
+	// would produce a permission that looks granted and is not.
+	if !strings.Contains(enabled, "nonResourceURLs: [\"/metrics\"]") {
+		t.Error("no metrics-reader ClusterRole was rendered")
+	}
+	// One mention is the ClusterRole's own metadata.name; a second would be a
+	// roleRef, meaning the chart guessed who scrapes.
+	if got := strings.Count(enabled, "name: reactor-metrics-reader"); got != 1 {
+		t.Errorf("metrics-reader is named %d times; binding it is the operator's choice, not the chart's", got)
+	}
+}
+
+// TestMonitoringExtrasNeedTheEndpoint stops a release rendering a
+// ServiceMonitor, alert rules or a dashboard that all query series nothing is
+// publishing — which fails as silence rather than as an error.
+func TestMonitoringExtrasNeedTheEndpoint(t *testing.T) {
+	for name, value := range map[string]string{
+		"service monitor": "metrics.serviceMonitor.enabled=true",
+		"alert rules":     "metrics.rules.enabled=true",
+		"dashboard":       "metrics.dashboard.enabled=true",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if renderFails(t, unifiURL, value) == "" {
+				t.Error("expected the chart to refuse this without metrics.enabled")
+			}
+		})
+	}
+}
+
+// TestAlertRulesCoverTheSilentFailure checks the one rule the whole feature
+// exists for. Reactor fails open: when it stops observing, every Automation
+// quietly stops reacting and nothing else in the cluster notices.
+func TestAlertRulesCoverTheSilentFailure(t *testing.T) {
+	manifests := render(t, unifiURL, "metrics.enabled=true", "metrics.rules.enabled=true")
+	for _, alert := range []string{
+		"ReactorObservationStale",
+		"ReactorObservationAbsent",
+		"ReactorObservationFailing",
+		"ReactorActionFailing",
+		"ReactorEdgeActionFailing",
+		"ReactorAutomationNotReady",
+		"ReactorReactionSlow",
+		"ReactorUPSOnBattery",
+		"ReactorWANOnBackup",
+	} {
+		if !strings.Contains(manifests, alert) {
+			t.Errorf("alert %s is missing", alert)
+		}
+	}
+	if !strings.Contains(manifests, "time() - reactor_last_observation_timestamp_seconds > 90") {
+		t.Error("the staleness threshold did not reach the rule")
+	}
+	// Prometheus templating must survive Helm rendering rather than being
+	// evaluated by it — an annotation reading "$labels.provider" as an empty
+	// string is the classic way this ships broken.
+	if !strings.Contains(manifests, "{{ $labels.provider }}") {
+		t.Error("Prometheus label templating was rendered away by Helm")
+	}
+	// A failed notification is not a failed Automation, and no alert may imply
+	// it is: the two are separated by the kind label.
+	if !strings.Contains(manifests, `kind="edge"`) || !strings.Contains(manifests, `kind="desired_state"`) {
+		t.Error("the action alerts do not distinguish edge actions from desired-state ones")
+	}
+}
+
+// TestDashboardCarriesNothingSiteSpecific is the leak guard. A dashboard JSON
+// is exactly where a datasource UID, an org-specific folder, or somebody's
+// Grafana address ends up without anyone noticing.
+func TestDashboardCarriesNothingSiteSpecific(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(chartDir(), "dashboards", "reactor.json"))
+	if err != nil {
+		t.Fatalf("reading the dashboard: %v", err)
+	}
+
+	var dashboard map[string]any
+	if err := json.Unmarshal(raw, &dashboard); err != nil {
+		t.Fatalf("the dashboard is not valid JSON: %v", err)
+	}
+	// Every datasource reference must go through the dashboard's own variable,
+	// so importing it into any Grafana works without editing it first.
+	for _, uid := range regexp.MustCompile(`"uid"\s*:\s*"([^"]*)"`).FindAllStringSubmatch(string(raw), -1) {
+		if uid[1] != "${datasource}" && uid[1] != "unifi-reactor-overview" {
+			t.Errorf("the dashboard pins a datasource uid %q", uid[1])
+		}
+	}
+	for _, leak := range []string{"192.168.", "10.0.", "grafana.com/orgs", "http://localhost", ".local"} {
+		if strings.Contains(string(raw), leak) {
+			t.Errorf("the dashboard contains %q, which is somebody's infrastructure", leak)
+		}
+	}
+
+	// And it has to survive being carried through a Helm template into a CR.
+	manifests := render(t, unifiURL, "metrics.enabled=true", "metrics.dashboard.enabled=true")
+	if !strings.Contains(manifests, "kind: GrafanaDashboard") {
+		t.Fatal("metrics.dashboard.enabled did not render a GrafanaDashboard")
+	}
+	// Grafana legend formats are {{key}}, which Helm would happily evaluate to
+	// nothing if the JSON were ever passed through tpl.
+	if !strings.Contains(manifests, "{{provider}}") {
+		t.Error("the dashboard's legend templating was rendered away by Helm")
+	}
+}
+
+// TestNamespacedInstallsStayNamespacedWithoutSecureMetrics states the one place
+// rbac.clusterWide=false still produces cluster-scoped RBAC, and the escape
+// hatch from it.
+//
+// The authn/authz filter reviews tokens and access through TokenReview and
+// SubjectAccessReview, which are cluster-scoped with no namespaced form. That is
+// a real consequence of asking for a protected endpoint, and it should be a
+// stated behaviour rather than something an operator discovers in an audit.
+func TestNamespacedInstallsStayNamespacedWithoutSecureMetrics(t *testing.T) {
+	namespaced := []string{unifiURL, "rbac.clusterWide=false"}
+
+	if got := strings.Count(render(t, namespaced...), "\nkind: Cluster"); got != 0 {
+		t.Errorf("a namespace-scoped install created %d cluster-scoped RBAC objects", got)
+	}
+	insecure := append(append([]string{}, namespaced...), "metrics.enabled=true", "metrics.secure=false")
+	if got := strings.Count(render(t, insecure...), "\nkind: Cluster"); got != 0 {
+		t.Errorf("an unprotected endpoint still created %d cluster-scoped RBAC objects", got)
+	}
+
+	secure := append(append([]string{}, namespaced...), "metrics.enabled=true")
+	manifests := render(t, secure...)
+	for _, expected := range []string{tokenReviews, "subjectaccessreviews"} {
+		if !strings.Contains(manifests, expected) {
+			t.Errorf("the authn/authz filter is not granted %s, so every scrape would be refused", expected)
+		}
+	}
+	// The manager's own rules stay a Role: only the review delegation is
+	// cluster-scoped, and it grants nothing about the objects Reactor acts on.
+	if strings.Contains(manifests, "kind: ClusterRole\nmetadata:\n  name: reactor-manager") {
+		t.Error("enabling metrics widened the manager's own RBAC back to cluster scope")
 	}
 }

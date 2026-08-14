@@ -146,6 +146,78 @@ log:
   # "console" for human-readable logs, "json" for a log collector.
   format: console
 
+# What Reactor observed, what matched, what it did, and how fast — on the
+# metrics endpoint controller-runtime already serves. Reactor deliberately does
+# not re-export UniFi telemetry; a UniFi exporter covers that better.
+#
+# Off by default, because enabling it opens a port on the pod and creates a
+# Service, and an upgrade must never do either on its own. The manifest bundle
+# (install.yaml) turns it on; everything below renders the same shape in both
+# paths, so the only difference between them is this default.
+metrics:
+  enabled: false
+  # Serve over HTTPS behind the API server's authn/authz filter, so a scraper
+  # must present a bearer token whose ServiceAccount is allowed to GET /metrics.
+  # Set false to serve plain HTTP on the same port instead — only sensible when
+  # something else already restricts who can reach the pod.
+  secure: true
+  port: 8443
+
+  service:
+    enabled: true
+    port: 8443
+    annotations: {}
+
+  # A ClusterRole granting GET on /metrics, created with no binding: nothing
+  # gains access until you bind it to your Prometheus ServiceAccount.
+  reader:
+    create: true
+
+  # Requires the Prometheus Operator's ServiceMonitor CRD.
+  serviceMonitor:
+    enabled: false
+    # Leave empty to inherit the Prometheus instance's defaults.
+    interval: ""
+    scrapeTimeout: ""
+    # Extra labels, for a Prometheus whose serviceMonitorSelector is not empty.
+    # Optional on purpose: a selector of {} scrapes every ServiceMonitor and
+    # needs none of these.
+    labels: {}
+    annotations: {}
+    # The controller generates a self-signed certificate for the metrics server
+    # unless --metrics-cert-path points at a real one, so verification is off by
+    # default. Issue a certificate and set serverName to turn it on.
+    insecureSkipVerify: true
+    serverName: ""
+
+  # Alert rules, as a PrometheusRule. Requires the Prometheus Operator CRD.
+  rules:
+    enabled: false
+    labels: {}
+    # How long without a successful observation counts as blind. Three times
+    # unifi.pollInterval, in seconds — raise this if you raise that.
+    observationStaleSeconds: 90
+    # p95 observation-to-action latency, in seconds, above which reacting is
+    # taking longer than it should. Comfortably above one poll interval.
+    reactionLatencySeconds: 60
+    # Informational rules that fire on observed state rather than on a fault —
+    # the UPS running on battery, the WAN on its backup uplink. They name UniFi
+    # state keys, so they are only rendered when unifi.url is set.
+    informational: true
+
+  # The overview dashboard, as a grafana-operator GrafanaDashboard. The same
+  # JSON is in the chart at dashboards/reactor.json if you import by hand.
+  dashboard:
+    enabled: false
+    # Which Grafana instances grafana-operator should install it into.
+    instanceSelector:
+      matchLabels:
+        dashboards: grafana
+    # Grafana folder to file it under. Empty means the instance's default.
+    folder: ""
+    allowCrossNamespaceImport: false
+    resyncPeriod: 10m
+
 uninstall:
   # Before the operator is removed, hand every workload it is holding back to
   # what your Automations want once nothing claims them. Helm does not delete

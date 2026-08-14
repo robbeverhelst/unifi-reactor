@@ -196,6 +196,35 @@ This is allowlist rather than denylist for a reason: `stat/device` returns whole
 
 `hack/webhook-logger.mjs` dumps incoming webhook deliveries verbatim to `testdata/unifi/webhooks/raw/` (gitignored) when capturing from a real Alarm Manager. Apply the same allowlist discipline before committing any of it.
 
+## Metrics
+
+`make dev-deploy` leaves the metrics endpoint off, the same as a chart install.
+Turn it on and read it without a Prometheus:
+
+```sh
+make dev-deploy DEV_CONTEXT=kind-reactor \
+  UNIFI_URL=http://<your-host>:9443 UNIFI_API_KEY=mock \
+  HELM_EXTRA_ARGS="--set metrics.enabled=true --set metrics.secure=false"
+
+kubectl -n reactor-system port-forward deploy/reactor 8443:8443
+curl -s localhost:8443/metrics | grep '^reactor_'
+```
+
+`metrics.secure=false` is a development convenience: the real posture is HTTPS
+behind the API server's authn/authz filter, and a scrape needs a bearer token.
+
+Driving `make dev-mock` is the fastest way to see the decision-layer series
+move. `POST /flip` produces a `reactor_state_transitions_total` increment, a
+`reactor_state_info` flip, an action, and a `reactor_reaction_latency_seconds`
+observation, in that order.
+
+New metrics go in `internal/metrics/`, never in a controller or a provider —
+the definitions live in one file so the label decisions are reviewable in one
+place. Read the package comment before adding a label: the rule is that a label
+whose value set comes from the outside world does not go in. `reactor_state_info`
+enforces that structurally, by publishing only the keys whose provider declared
+a closed value set via `StateVocabulary`.
+
 ## Releasing
 
 Releases are cut entirely by CI from a tag; nothing is published from a developer machine.

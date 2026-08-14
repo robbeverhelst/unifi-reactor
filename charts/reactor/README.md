@@ -399,6 +399,155 @@ networkPolicy:
         - { protocol: TCP, port: 9090 }
 ```
 
+The same applies to `metrics.enabled`: Prometheus has to reach the metrics port,
+and the chart does not widen `networkPolicy.ingress` for that either.
+
+```yaml
+networkPolicy:
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: monitoring }
+      ports:
+        - { protocol: TCP, port: 8443 }
+```
+
+## Metrics, alerts and a dashboard (optional, off by default)
+
+Reactor's worst failure mode is silent: if it stops observing, every Automation
+quietly stops reacting and nothing in the cluster notices. `metrics.enabled`
+is what makes that visible.
+
+```sh
+helm upgrade reactor ... \
+  --set metrics.enabled=true \
+  --set metrics.serviceMonitor.enabled=true \
+  --set metrics.rules.enabled=true
+```
+
+It is off by default because enabling it opens a port on a running pod and
+creates a Service, and an upgrade should never do either on its own. The
+manifest bundle (`install.yaml`) turns it on; the chart renders exactly the
+same shape, so the only difference between the two paths is the default.
+
+### The auth posture
+
+The endpoint serves **HTTPS on `:8443` behind the API server's authn/authz
+filter**, which is what the kubebuilder scaffold has always done and what
+`install.yaml` ships. A scraper must present a bearer token belonging to a
+ServiceAccount that is allowed to `get` the `/metrics` non-resource URL.
+
+Enabling metrics therefore grants the operator `create` on `tokenreviews` and
+`subjectaccessreviews` — that is how it asks the API server to authenticate and
+authorize each scrape. Both are cluster-scoped, so those rules are a ClusterRole
+in both `rbac.clusterWide` modes.
+
+Both reviews are cluster-scoped resources with no namespaced form, so those
+rules are a **ClusterRole even under `rbac.clusterWide: false`** — the one place
+a namespace-scoped install still creates cluster-scoped RBAC. With metrics off,
+or with `metrics.secure: false`, a namespace-scoped install creates nothing
+cluster-scoped at all. What is granted is delegation — the right to ask the API
+server whether a caller is allowed in — not access to anything that caller
+holds.
+
+The chart creates a `<release>-metrics-reader` ClusterRole and **deliberately
+does not bind it**. It cannot know which ServiceAccount your Prometheus scrapes
+with, and a binding to the wrong one looks granted and is not:
+
+```sh
+kubectl create clusterrolebinding reactor-metrics-reader \
+  --clusterrole=reactor-metrics-reader \
+  --serviceaccount=monitoring:prometheus-k8s
+```
+
+The controller generates a self-signed certificate for the endpoint unless
+`--metrics-cert-path` points at a real one, so the ServiceMonitor ships with
+`insecureSkipVerify: true`. Issue a certificate and set
+`metrics.serviceMonitor.serverName` to turn verification on. Setting
+`metrics.secure: false` serves plain HTTP instead, which only makes sense when
+something else already controls who can reach the pod.
+
+`metrics.serviceMonitor.labels` is optional on purpose: a Prometheus whose
+`serviceMonitorSelector` is `{}` scrapes every ServiceMonitor and needs none of
+them.
+
+### What is measured
+
+The decision layer — what Reactor observed, what matched, what it did, and how
+fast. Raw UniFi telemetry is deliberately **not** re-exported; a UniFi exporter
+covers that better, and duplicating it would only produce two numbers to
+disagree about. Reconcile counts, workqueue depth and reconcile latency come
+from controller-runtime's own `controller_runtime_*` series on the same
+endpoint.
+
+The metric worth alerting on above all others:
+
+```promql
+time() - reactor_last_observation_timestamp_seconds > 90
+```
+
+`reactor_actions_total` carries a `kind` label of `desired_state` or `edge`, and
+no alert should be written without it. A failed `kubernetes.scale` means the
+cluster is not in the state you asked for; a failed notification means nobody
+was told, while the workload was still scaled and the Automation is still
+`Ready`.
+
+### Cardinality
+
+`reactor_state_info{provider,key,value}` is published **only for state keys
+whose value set the provider declares closed** — `wan`, `ups`, `ups.battery`.
+`isp` is not one of them: its values are carrier slugs derived from whatever
+public address your gateway holds, so labelling by them would add one permanent
+time series per carrier ever seen. `reactor_state_transitions_total` is not
+labelled by `from`/`to` for the same reason.
+
+Nothing is lost: what a key currently holds is in the Automation's
+`status.observedState` and in an Event on the resource. Prometheus keeps the
+counts; Kubernetes keeps the detail.
+
+The `namespace`/`name` labels on `reactor_automation_*` are safe for a different
+reason — a series appears only when someone writes another Automation, and a
+deleted one's series are dropped rather than left reporting forever.
+
+### Alert rules
+
+`metrics.rules.enabled` ships a `PrometheusRule` (needs the Prometheus Operator
+CRD). `metrics.rules.observationStaleSeconds` defaults to `90`, three times the
+default `unifi.pollInterval` — **raise it if you raise that**, or a slower poll
+will page you.
+
+| Alert | Severity | Means |
+| --- | --- | --- |
+| `ReactorObservationStale` | critical | Reactor has gone blind; every Automation has silently stopped reacting |
+| `ReactorObservationAbsent` | critical | it is publishing no observations at all, or is not running |
+| `ReactorObservationFailing` | warning | sustained poll errors — the warning before the two above |
+| `ReactorActionFailing` | warning | an Automation matched but could not act on its target |
+| `ReactorEdgeActionFailing` | warning | a notification or HTTP call did not go out; the Automation is unaffected |
+| `ReactorAutomationNotReady` | warning | invalid config, a missing state key, or a failed action |
+| `ReactorReactionSlow` | warning | p95 observation-to-action above `metrics.rules.reactionLatencySeconds` |
+| `ReactorUPSOnBattery` | info | the UPS is running on battery |
+| `ReactorWANOnBackup` | info | the gateway is on its backup uplink |
+
+The last two fire on observed state rather than on a fault: they are how your
+existing alerting learns what your network already knows. Set
+`metrics.rules.informational: false` to leave them out.
+
+### Dashboard
+
+`metrics.dashboard.enabled` ships a grafana-operator `GrafanaDashboard`. It pins
+no datasource — the dashboard carries a `datasource` variable you pick when you
+open it — and no folder or tag specific to any organisation, so the same JSON
+imports into any Grafana unedited. It is a plain file in the chart at
+`dashboards/reactor.json` if you would rather import it by hand.
+
+`metrics.dashboard.instanceSelector` decides which Grafana instances
+grafana-operator installs it into; it defaults to
+`matchLabels: {dashboards: grafana}`, the operator's own convention.
+
+All three of `serviceMonitor`, `rules` and `dashboard` refuse to render without
+`metrics.enabled`, rather than shipping something that queries series nothing is
+publishing — which fails as silence rather than as an error.
+
 ## Values
 
 | Key | Default | Description |
@@ -411,6 +560,25 @@ networkPolicy:
 | `unifi.existingSecret` | `unifi-reactor-credentials` | Secret containing `UNIFI_API_KEY`, mounted and re-read per poll |
 | `log.level` | `info` | `debug`, `info`, `error`, or a V-level number |
 | `log.format` | `console` | `console` or `json` |
+| `metrics.enabled` | `false` | Serve `/metrics`; see [Metrics, alerts and a dashboard](#metrics-alerts-and-a-dashboard-optional-off-by-default) |
+| `metrics.secure` | `true` | HTTPS behind the API server's authn/authz filter; `false` serves plain HTTP |
+| `metrics.port` | `8443` | Port the endpoint listens on inside the pod |
+| `metrics.service.enabled` | `true` | Create a ClusterIP Service for it |
+| `metrics.service.port` | `8443` | Service port |
+| `metrics.reader.create` | `true` | Create an unbound ClusterRole granting `get` on `/metrics` |
+| `metrics.serviceMonitor.enabled` | `false` | Scrape it with the Prometheus Operator |
+| `metrics.serviceMonitor.interval` | `""` | Empty inherits the Prometheus instance's default |
+| `metrics.serviceMonitor.labels` | `{}` | Optional — a `serviceMonitorSelector` of `{}` needs none |
+| `metrics.serviceMonitor.insecureSkipVerify` | `true` | The endpoint's certificate is self-signed unless you issue one |
+| `metrics.serviceMonitor.serverName` | `""` | Set alongside a real certificate to verify it |
+| `metrics.rules.enabled` | `false` | Ship the alert rules as a `PrometheusRule` |
+| `metrics.rules.observationStaleSeconds` | `90` | 3 × `unifi.pollInterval`; raise it if you raise that |
+| `metrics.rules.reactionLatencySeconds` | `60` | p95 observation-to-action above which reacting is too slow |
+| `metrics.rules.informational` | `true` | Include `ReactorUPSOnBattery` and `ReactorWANOnBackup` |
+| `metrics.rules.labels` | `{}` | Extra labels, for a Prometheus that selects on them |
+| `metrics.dashboard.enabled` | `false` | Ship the dashboard as a grafana-operator `GrafanaDashboard` |
+| `metrics.dashboard.instanceSelector` | `{matchLabels: {dashboards: grafana}}` | Which Grafana instances to install it into |
+| `metrics.dashboard.folder` | `""` | Grafana folder; empty means the instance's default |
 | `podDisruptionBudget.enabled` | `false` | see [PodDisruptionBudget](#poddisruptionbudget) before enabling with one replica |
 | `podDisruptionBudget.minAvailable` | `1` | set this or `maxUnavailable`, not both |
 | `networkPolicy.enabled` | `false` | deny all ingress and apply `networkPolicy.egress` |

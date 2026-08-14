@@ -27,6 +27,8 @@ import (
 
 	"github.com/go-logr/logr"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/robbeverhelst/unifi-reactor/internal/metrics"
 )
 
 // Defaults for the webhook fast path.
@@ -139,6 +141,7 @@ func (r *Receiver) handleDelivery(w http.ResponseWriter, req *http.Request) {
 	if !r.authorized(req) {
 		// The response says nothing about which part was wrong, and nothing
 		// about the console or the cluster behind it.
+		metrics.WebhookDelivery(metrics.DeliveryRejected)
 		r.log.V(1).Info("Rejected a webhook delivery presenting no valid token")
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -149,8 +152,10 @@ func (r *Receiver) handleDelivery(w http.ResponseWriter, req *http.Request) {
 	read, _ := io.Copy(io.Discard, http.MaxBytesReader(w, req.Body, maxDeliveryBytes))
 
 	if r.request() {
+		metrics.WebhookDelivery(metrics.DeliveryAccepted)
 		r.log.V(1).Info("Accepted a webhook delivery; re-observing early", "bytes", read)
 	} else {
+		metrics.WebhookDelivery(metrics.DeliveryCoalesced)
 		r.log.V(1).Info("Accepted a webhook delivery; a re-observation is already pending", "bytes", read)
 	}
 

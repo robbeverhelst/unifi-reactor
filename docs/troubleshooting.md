@@ -6,9 +6,12 @@ Reactor observes state and reconciles against it, so almost every problem is one
 
 ## Start here
 
-Three commands answer most questions:
+Four questions answer most problems, and the first one is the one nothing else can tell you:
 
 ```sh
+# 0. Is it still observing at all? (needs metrics.enabled — see §13)
+#    time() - reactor_last_observation_timestamp_seconds
+
 # 1. What does Reactor think is true?
 kubectl -n reactor-system logs deploy/reactor | grep -E 'state (observed|transition)'
 # INFO state transition provider=unifi key=wan from=primary to=backup
@@ -545,7 +548,79 @@ A destination is only ever reported as `scheme://host:port`. That is not a trunc
 
 ---
 
-## 13. Still stuck
+## 13. Reactor is running but nothing is reacting
+
+The failure this whole page cannot help with: Reactor is up, healthy, logging
+nothing unusual, and has silently stopped observing. Every Automation holds its
+last known state, no error is raised, and the next real outage is simply not
+handled. There is nothing to grep for, because nothing went wrong loudly.
+
+One number answers it, and it is why `metrics.enabled` exists:
+
+```promql
+time() - reactor_last_observation_timestamp_seconds
+```
+
+Above three poll intervals, Reactor is blind. `ReactorObservationStale` is that
+query with a threshold on it, and it is the alert to wire up before any other.
+
+Without metrics enabled, the same question by hand — the last line is the
+answer, and its timestamp is what matters:
+
+```sh
+kubectl -n reactor-system logs deploy/reactor --timestamps   | grep -E 'state (observed|transition)' | tail -1
+```
+
+`state observed` needs `log.level=debug`; `state transition` only appears when
+something changed, so on a quiet network it can be hours old and still healthy.
+That ambiguity is exactly what the metric removes.
+
+### Turning the endpoint on
+
+```sh
+helm upgrade reactor ... --set metrics.enabled=true
+```
+
+It serves HTTPS on `:8443` behind the API server's authn/authz filter, so a
+scrape needs a token. Check it by hand from inside the cluster:
+
+```sh
+kubectl -n reactor-system exec deploy/reactor --   wget -qO- --no-check-certificate https://127.0.0.1:8443/metrics
+# 401 — expected: the endpoint authenticates every scrape, including this one
+```
+
+| What you see | Cause |
+| --- | --- |
+| `connection refused` | `metrics.enabled` is not set, so the binary is not listening at all |
+| Prometheus reports the target as `down` with a 401 or 403 | its ServiceAccount is not bound to the `<release>-metrics-reader` ClusterRole. The chart creates that role and deliberately does not bind it |
+| target `down` with a TLS error | the endpoint's certificate is self-signed unless you issue one; the shipped ServiceMonitor sets `insecureSkipVerify` |
+| the target is not discovered at all | `metrics.serviceMonitor.enabled` is off, or your Prometheus selects on labels the ServiceMonitor does not carry — see `metrics.serviceMonitor.labels` |
+| the target scrapes but there are no series | a `networkPolicy` with the default `ingress: []` denies the scrape; the chart does not widen it for you |
+
+### A state key you expected has no series
+
+`reactor_state_info` is published **only for keys whose value set is closed**.
+`isp` is deliberately absent: its values are carrier names, an open set, and one
+series per carrier ever seen is how a Prometheus instance gets hurt. Read `isp`
+off the Automation's `status.observedState` or its Events instead.
+
+A key that *is* declared but shows `0` for every value has not been observed —
+no UPS adopted, or the hardware dropped off. That is the metric side of
+[`StateKeyUnavailable`](#2-statekeyunavailable-and-held-state), and it is a
+different statement from "observed, and it is not that value".
+
+### `reactor_provider_signal_disagreements_total` is climbing
+
+Two independent signals for the same fact stopped agreeing. Nothing stops and
+no state is withheld — see
+[§10](#10-wan-and-isp-disagree-about-a-failover) for what each `signal` label
+means and why these are reported rather than resolved. The counter exists so a
+wrong `wan` derivation announces itself on a graph instead of waiting for
+somebody to read the logs during an outage.
+
+---
+
+## 14. Still stuck
 
 Collect these and open an issue — the [bug report template](https://github.com/robbeverhelst/unifi-reactor/issues/new/choose) asks for exactly this, and without it nothing is reproducible:
 

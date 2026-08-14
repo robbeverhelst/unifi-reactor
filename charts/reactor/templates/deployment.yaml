@@ -52,6 +52,13 @@ spec:
             - --health-probe-bind-address=:8081
             - --zap-log-level={{ .Values.log.level }}
             - --zap-encoder={{ .Values.log.format }}
+            {{- if .Values.metrics.enabled }}
+            # Left unset, the binary defaults to 0 — no listener at all.
+            - --metrics-bind-address=:{{ .Values.metrics.port }}
+            {{- if not .Values.metrics.secure }}
+            - --metrics-secure=false
+            {{- end }}
+            {{- end }}
           env:
             {{- include "reactor.watchNamespaceEnv" . | nindent 12 }}
             {{- if .Values.unifi.url }}
@@ -134,6 +141,10 @@ spec:
           ports:
             - name: healthz
               containerPort: 8081
+            {{- if .Values.metrics.enabled }}
+            - name: {{ if .Values.metrics.secure }}https{{ else }}http{{ end }}
+              containerPort: {{ .Values.metrics.port }}
+            {{- end }}
             {{- if .Values.unifi.webhook.enabled }}
             - name: webhook
               containerPort: {{ .Values.unifi.webhook.port }}

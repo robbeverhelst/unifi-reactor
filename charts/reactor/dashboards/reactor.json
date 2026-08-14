@@ -1,0 +1,398 @@
+{
+  "uid": "unifi-reactor-overview",
+  "title": "UniFi Reactor",
+  "description": "What Reactor observed, what matched, what it did, and how fast. Pick your Prometheus in the datasource variable; nothing here is pinned to a particular instance.",
+  "tags": ["unifi-reactor"],
+  "timezone": "browser",
+  "editable": true,
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "refresh": 1
+      }
+    ]
+  },
+  "annotations": {
+    "list": [
+      {
+        "name": "State transitions",
+        "enable": true,
+        "iconColor": "purple",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "expr": "sum by (key) (increase(reactor_state_transitions_total[1m])) > 0",
+        "titleFormat": "{{key}} changed",
+        "textFormat": "A state key moved, so what every Automation matching on it wants may have changed",
+        "step": "60s"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "WAN",
+      "description": "The uplink the gateway is currently using. No data means the key is not observable — see StateKeyUnavailable.",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "reactor_state_info{key=\"wan\"} == 1",
+          "legendFormat": "{{value}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "textMode": "name",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "primary": { "text": "primary", "color": "green", "index": 0 } } },
+            { "type": "value", "options": { "backup": { "text": "backup", "color": "orange", "index": 1 } } }
+          ],
+          "color": { "mode": "fixed", "fixedColor": "text" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "UPS",
+      "description": "Whether a UniFi UPS is on mains or running on battery. No data means no UPS is adopted, or it dropped off the console.",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "reactor_state_info{key=\"ups\"} == 1",
+          "legendFormat": "{{value}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "textMode": "name",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "online": { "text": "online", "color": "green", "index": 0 } } },
+            { "type": "value", "options": { "on-battery": { "text": "on battery", "color": "red", "index": 1 } } }
+          ],
+          "color": { "mode": "fixed", "fixedColor": "text" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Battery",
+      "description": "Remaining charge against the configured low and critical thresholds.",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "reactor_state_info{key=\"ups.battery\"} == 1",
+          "legendFormat": "{{value}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "textMode": "name",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "normal": { "text": "normal", "color": "green", "index": 0 } } },
+            { "type": "value", "options": { "low": { "text": "low", "color": "orange", "index": 1 } } },
+            { "type": "value", "options": { "critical": { "text": "critical", "color": "red", "index": 2 } } }
+          ],
+          "color": { "mode": "fixed", "fixedColor": "text" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Observation age",
+      "description": "How long since Reactor last saw anything. This is the number that tells you it has gone blind — every Automation silently stops reacting, and nothing else in the cluster notices.",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "time() - max by (provider) (reactor_last_observation_timestamp_seconds)",
+          "legendFormat": "{{provider}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 60 },
+              { "color": "red", "value": 90 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Reaction latency",
+      "description": "Observation to action completion. The end-to-end number: polling cadence, wake queue, reconcile and the write to the target, all in one.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.5, sum by (le, provider) (rate(reactor_reaction_latency_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p50 {{provider}}"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.95, sum by (le, provider) (rate(reactor_reaction_latency_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p95 {{provider}}"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.99, sum by (le, provider) (rate(reactor_reaction_latency_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p99 {{provider}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "fillOpacity": 0, "lineWidth": 2, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Observations",
+      "description": "Poll success and failure rate. Sustained failures are the early warning for the observation going stale.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (provider, result) (rate(reactor_observations_total[$__rate_interval]))",
+          "legendFormat": "{{provider}} {{result}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": ".*error.*" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }]
+          }
+        ]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Actions",
+      "description": "Executions by type and outcome, split by whether the Automation was claiming or reversing.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (type, result, on_exit) (rate(reactor_actions_total[$__rate_interval]))",
+          "legendFormat": "{{type}} {{result}} on_exit={{on_exit}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": ".*error.*" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }]
+          }
+        ]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Arbitration outcomes",
+      "description": "How a target resolved each pass: claimed at what this Automation asked for, deferred to a peer's more restrictive claim, or released because nothing claims it any more. A steady rate of deferrals is two Automations sharing a workload working as designed.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (outcome) (rate(reactor_arbitrations_total[$__rate_interval]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "State transitions",
+      "description": "How often each key actually moves. Not labelled by value on purpose: one key with an open value set would make this unbounded.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (provider, key) (increase(reactor_state_transitions_total[$__rate_interval]))",
+          "legendFormat": "{{key}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "bars", "fillOpacity": 60, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Automations matching",
+      "description": "Which policies are in force right now. Read alongside the transition annotations: a shed and its recovery are the same line going down and back up.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "reactor_automation_matching",
+          "legendFormat": "{{namespace}}/{{name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "max": 1,
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 20, "lineWidth": 2, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Automations not ready",
+      "description": "Invalid configuration, a provider not reporting a key, or an action that failed. Being outvoted on a shared target is not here — that is Applied, and it is healthy.",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "reactor_automation_ready == 0",
+          "legendFormat": "{{namespace}}/{{name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 20, "lineWidth": 2, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Webhook deliveries",
+      "description": "Fast-path deliveries from the console's Alarm Manager. Empty unless unifi.webhook.enabled; losing these costs reaction latency and nothing else.",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (result) (rate(reactor_webhook_deliveries_total[$__rate_interval]))",
+          "legendFormat": "{{result}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+    }
+  ]
+}

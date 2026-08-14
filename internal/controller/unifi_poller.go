@@ -27,6 +27,7 @@ import (
 	reactorv1alpha1 "github.com/robbeverhelst/unifi-reactor/api/v1alpha1"
 	"github.com/robbeverhelst/unifi-reactor/internal/engine"
 	"github.com/robbeverhelst/unifi-reactor/internal/events"
+	"github.com/robbeverhelst/unifi-reactor/internal/metrics"
 	"github.com/robbeverhelst/unifi-reactor/internal/providers/unifi"
 )
 
@@ -124,13 +125,21 @@ func (p *UniFiPoller) observe(ctx context.Context) {
 	log := logf.FromContext(ctx)
 	state, err := p.Client.Observe(ctx)
 	if err != nil {
+		metrics.ObservationFailed(unifi.ProviderName)
 		log.Error(err, "state observation failed")
 		return
 	}
-	observation := events.Observation{Provider: unifi.ProviderName, State: state, ObservedAt: time.Now()}
+	observedAt := time.Now()
+	observation := events.Observation{Provider: unifi.ProviderName, State: state, ObservedAt: observedAt}
 	transitions := p.Store.Observe(observation)
+	// Exported from the store rather than from the reading above, so what is
+	// graphed is what Automations act on: a value still proving itself against
+	// its debounce threshold has been reported to nobody.
+	reported, _ := p.Store.Get(unifi.ProviderName)
+	metrics.ObservationSucceeded(unifi.ProviderName, reported.State, observedAt)
 	log.V(1).Info("state observed", "state", state)
 	for _, t := range transitions {
+		metrics.TransitionObserved(t.Provider, t.Key)
 		log.Info("state transition", "provider", t.Provider, "key", t.Key, "from", t.From, "to", t.To)
 	}
 	if len(transitions) > 0 {

@@ -1,0 +1,145 @@
+{{- if .Values.metrics.rules.enabled }}
+{{- if not .Values.metrics.enabled }}
+{{- fail "metrics.rules.enabled needs metrics.enabled: the rules below alert on series nothing would be publishing" }}
+{{- end }}
+# Needs the Prometheus Operator's PrometheusRule CRD.
+#
+# The first rule is the one that matters. Reactor's failure mode is silent and
+# fail-open: if it stops observing — an expired API key, a rebooted console, a
+# network partition — every Automation quietly stops reacting, and nothing in
+# the cluster notices until the next real outage is not handled.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "reactor.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reactor.labels" . | nindent 4 }}
+    {{- with .Values.metrics.rules.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: {{ include "reactor.fullname" . }}.health
+      rules:
+        - alert: ReactorObservationStale
+          expr: time() - reactor_last_observation_timestamp_seconds > {{ .Values.metrics.rules.observationStaleSeconds }}
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: Reactor has gone blind to {{`{{ $labels.provider }}`}} state
+            description: >-
+              No successful observation for {{`{{ $value | humanizeDuration }}`}}.
+              Every Automation driven by {{`{{ $labels.provider }}`}} has silently stopped
+              reacting and is holding its last known state.
+
+        {{- if .Values.unifi.url }}
+        - alert: ReactorObservationAbsent
+          expr: absent(reactor_last_observation_timestamp_seconds)
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: Reactor is publishing no observations at all
+            description: >-
+              The provider is configured but has never reported an observation, or the
+              controller is not running. Nothing is reacting to network or power state.
+        {{- end }}
+
+        - alert: ReactorObservationFailing
+          expr: sum by (provider) (rate(reactor_observations_total{result="error"}[10m])) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Reactor keeps failing to observe {{`{{ $labels.provider }}`}}
+            description: >-
+              Observations have been failing for 15 minutes. State is still converging
+              on whichever polls succeed, so this is the warning before
+              ReactorObservationStale rather than an outage on its own.
+
+        # Split by kind rather than by type, because the two fail differently
+        # and an alert that conflated them would be wrong about what broke. A
+        # desired-state action is the thing the Automation is for; an edge
+        # action is the report of it, and a report that did not go out did not
+        # stop the workload being scaled.
+        - alert: ReactorActionFailing
+          expr: increase(reactor_actions_total{kind="desired_state",result="error"}[15m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: A Reactor {{`{{ $labels.type }}`}} action keeps failing
+            description: >-
+              An Automation matched but could not act on its target, so the cluster is
+              not in the state the policy asks for. Retries stop after five consecutive
+              failures; the Automation's Applied condition and its Events carry the error.
+
+        - alert: ReactorEdgeActionFailing
+          expr: increase(reactor_actions_total{kind="edge",result="error"}[15m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: A Reactor {{`{{ $labels.type }}`}} notification is not being delivered
+            description: >-
+              An outbound action did not reach its destination. The Automation itself is
+              unaffected and stays healthy — the workload was still acted on, nobody was
+              told. Usual causes are a destination missing from actions.allowedDestinations,
+              a wrong credential in the referenced Secret, or an endpoint that is down.
+
+        - alert: ReactorAutomationNotReady
+          expr: reactor_automation_ready == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Automation {{`{{ $labels.namespace }}/{{ $labels.name }}`}} is not ready
+            description: >-
+              Invalid configuration, a provider not reporting a key it needs, or an
+              action that failed. kubectl describe automation
+              {{`{{ $labels.name }}`}} -n {{`{{ $labels.namespace }}`}} tells the whole story.
+
+        - alert: ReactorReactionSlow
+          expr: >-
+            histogram_quantile(0.95, sum by (le, provider) (rate(reactor_reaction_latency_seconds_bucket[30m])))
+            > {{ .Values.metrics.rules.reactionLatencySeconds }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Reactor is taking {{`{{ $value | humanizeDuration }}`}} to act on what it observes
+            description: >-
+              95th-percentile time from an observation to the action it caused. Well
+              above one poll interval means the reconciler is not keeping up, not that
+              polling is slow.
+
+{{- if and .Values.metrics.rules.informational .Values.unifi.url }}
+    # These fire on observed state rather than on a fault: they are how the
+    # cluster's alerting learns what the network already knows.
+    - name: {{ include "reactor.fullname" . }}.state
+      rules:
+        - alert: ReactorUPSOnBattery
+          expr: reactor_state_info{key="ups",value="on-battery"} == 1
+          for: 1m
+          labels:
+            severity: info
+          annotations:
+            summary: The UPS is running on battery
+            description: >-
+              Mains power is out. Automations matching ups: on-battery are in force;
+              ups.battery reports how much runtime is left.
+
+        - alert: ReactorWANOnBackup
+          expr: reactor_state_info{key="wan",value="backup"} == 1
+          for: 1m
+          labels:
+            severity: info
+          annotations:
+            summary: The WAN is on its backup uplink
+            description: >-
+              The gateway is carrying traffic over the backup uplink, which is usually
+              metered. Automations matching wan: backup are in force.
+{{- end }}
+{{- end }}

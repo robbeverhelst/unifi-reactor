@@ -33,6 +33,7 @@ import (
 
 	reactorv1alpha1 "github.com/robbeverhelst/unifi-reactor/api/v1alpha1"
 	"github.com/robbeverhelst/unifi-reactor/internal/engine"
+	"github.com/robbeverhelst/unifi-reactor/internal/metrics"
 )
 
 const (
@@ -279,6 +280,7 @@ func (r *AutomationReconciler) reconcileTarget(
 		if outcome.desired != nil && *outcome.desired != value {
 			outcome.deferredBy = withoutClaimant(resolution.Winners, claimantOf(self))
 		}
+		metrics.ArbitrationResolved(outcomeOf(outcome))
 		changed, err := claimTarget(ctx, r.Client, &deployment, resolution, claims)
 		outcome.changed = changed
 		return outcome, err
@@ -291,6 +293,7 @@ func (r *AutomationReconciler) reconcileTarget(
 			value := int32(release.Level)
 			level = &value
 		}
+		metrics.ArbitrationResolved(metrics.OutcomeReleased)
 		changed, err := releaseTarget(ctx, r.Client, &deployment, level)
 		outcome.changed = changed
 		if changed {
@@ -308,11 +311,7 @@ func (r *AutomationReconciler) reconcileTarget(
 // timeoutFor bounds one attempt at a target, taken from the action this
 // Automation reaches it through.
 func timeoutFor(self *reactorv1alpha1.Automation, key targetKey, matching bool) time.Duration {
-	actions := self.Spec.Actions
-	if !matching {
-		actions = self.Spec.OnExit
-	}
-	for _, action := range actions {
+	for _, action := range actionsFor(self, matching) {
 		if !isDesiredState(action.Type) || action.TimeoutSeconds == nil {
 			continue
 		}
@@ -321,6 +320,41 @@ func timeoutFor(self *reactorv1alpha1.Automation, key targetKey, matching bool) 
 		}
 	}
 	return defaultActionTimeout
+}
+
+// actionTypeFor names the desired-state action this Automation reaches a target
+// through, so an execution is counted under the type that performed it rather
+// than under whichever type happens to be the only one implemented.
+func actionTypeFor(self *reactorv1alpha1.Automation, key targetKey, matching bool) string {
+	for _, action := range actionsFor(self, matching) {
+		if !isDesiredState(action.Type) {
+			continue
+		}
+		if k, ok := targetKeyFor(self, action); ok && k == key {
+			return action.Type
+		}
+	}
+	// Reached only through a target this Automation names on the other side of
+	// the transition, e.g. a reversal to baseline with no onExit entry.
+	return actionKubernetesScale
+}
+
+// actionsFor is the side of an Automation currently in play: what it asks for
+// while its condition holds, and what it wants back once it does not.
+func actionsFor(self *reactorv1alpha1.Automation, matching bool) []reactorv1alpha1.Action {
+	if matching {
+		return self.Spec.Actions
+	}
+	return self.Spec.OnExit
+}
+
+// outcomeOf reports how a claimed target resolved from this Automation's point
+// of view: it got what it wanted, or a more restrictive peer is holding it.
+func outcomeOf(outcome targetOutcome) string {
+	if len(outcome.deferredBy) > 0 {
+		return metrics.OutcomeDeferred
+	}
+	return metrics.OutcomeClaimed
 }
 
 // selfLevel is what the Automation being reconciled wants for a target, which

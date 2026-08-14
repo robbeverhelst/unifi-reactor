@@ -32,6 +32,7 @@ import (
 
 	reactorv1alpha1 "github.com/robbeverhelst/unifi-reactor/api/v1alpha1"
 	"github.com/robbeverhelst/unifi-reactor/internal/actions"
+	"github.com/robbeverhelst/unifi-reactor/internal/metrics"
 )
 
 const (
@@ -116,8 +117,14 @@ func (r *AutomationReconciler) runEdgeActions(
 		if ctx.Err() != nil {
 			entry.Status = executionSkipped
 			entry.Reason = "ran out of time for the remaining actions on this transition"
+			metrics.ActionSkipped(action.Type, metrics.KindEdge, !matching)
 		} else {
+			started := time.Now()
 			result, err := r.runEdgeAction(ctx, automation, action, data)
+			// Counted as an edge action, which is what keeps a failure here from
+			// reading as an Automation that could not do its job: this did not
+			// happen, and the desired-state action beside it still did.
+			metrics.ActionExecuted(action.Type, metrics.KindEdge, !matching, err, time.Since(started))
 			entry.Destination = result.Origin
 			entry.Attempts = result.Attempts
 			entry.Status = executionSuccess
