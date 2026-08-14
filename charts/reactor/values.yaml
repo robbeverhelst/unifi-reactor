@@ -104,6 +104,11 @@ unifi:
     # anyone. 60s at the default poll is nothing against the failure the key
     # exists for — a device that has been dead for days.
     #
+    # firmware takes 3, and nothing is lost by it: the key comes from the
+    # console's lookup against Ubiquiti's release catalogue rather than from
+    # your hardware, and no firmware update needs reacting to within 30
+    # seconds. Extra samples are free when reaction time does not matter.
+    #
     # An entry may end in "*", which matches every key with that prefix. It is
     # how a group whose key names come from your hardware gets settled at all:
     # no list here could name them. Exact keys win over patterns, and the
@@ -118,6 +123,7 @@ unifi:
       wan.quality: 3
       devices: 2
       device.*: 2
+      firmware: 3
   # Name of an existing Secret containing the key UNIFI_API_KEY.
   # Create it with:
   #   kubectl -n <namespace> create secret generic unifi-reactor-credentials \

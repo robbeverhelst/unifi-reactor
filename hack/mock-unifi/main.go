@@ -79,6 +79,16 @@ limitations under the License.
 //	curl -X POST 'http://localhost:9443/device?name=ups-2u&present=false'  # gone from the list
 //	curl -X POST 'http://localhost:9443/device?reset=true'
 //
+// Rehearse a firmware update becoming available. The captures carry no upgrade
+// fields at all, so what this serves is the shape UniFi documents — enough to
+// drive the parser, not evidence that a console reports it this way:
+//
+//	curl -X POST 'http://localhost:9443/firmware?upgradable=true'
+//	curl -X POST 'http://localhost:9443/firmware?upgradable=true&name=ups-2u'  # one device only
+//	curl -X POST 'http://localhost:9443/firmware?eol=true'
+//	curl -X POST 'http://localhost:9443/firmware?present=false'   # the field is not reported at all
+//	curl -X POST 'http://localhost:9443/firmware?reset=true'
+//
 // Rehearse the UPS dropping off the console entirely — the ups keys vanish
 // from the state rather than reporting a value, which is what an Automation
 // holding its last known state has to cope with:
@@ -215,6 +225,7 @@ const (
 	// carries is keyNote above.
 	valueCaptured = "captured"
 	fieldDevices  = "devices"
+	fieldPresent  = "present"
 
 	// What a variant says wan1/wan2 is_uplink do when the backup takes over.
 	uplinkMoves   = "moves"
@@ -281,7 +292,16 @@ type deviceOverride struct {
 	rename string
 	// absent removes the device from the list entirely.
 	absent bool
+	// upgradable and eol inject the upgrade fields the firmware key reads. Nil
+	// means the field is not served at all, which is what every capture shows.
+	upgradable *bool
+	eol        *bool
 }
+
+// mockUpgradeVersion is what this mock claims a device would upgrade TO. It is
+// invented — no capture has ever carried upgrade_to_firmware — and deliberately
+// implausible so it cannot be mistaken for an observation.
+const mockUpgradeVersion = "9.9.9.99999"
 
 // slugifyName is the mock's copy of the provider's slug rule, so /device can be
 // addressed by the same name a state key is spelled with. It is duplicated
@@ -448,6 +468,7 @@ func main() {
 	mux.HandleFunc("POST /quality", m.setQuality)
 	mux.HandleFunc("GET /device", m.describeFleet)
 	mux.HandleFunc("POST /device", m.setDevice)
+	mux.HandleFunc("POST /firmware", m.setFirmware)
 
 	// The write path: the Network application under /proxy/network, but
 	// authenticated the UniFi OS way — a session cookie plus the csrf header.
@@ -548,6 +569,15 @@ func (m *mock) rewriteFleet(device map[string]any) bool {
 	}
 	if override.rename != "" {
 		device["name"] = override.rename
+	}
+	if override.upgradable != nil {
+		device["upgradable"] = *override.upgradable
+		if *override.upgradable {
+			device["upgrade_to_firmware"] = mockUpgradeVersion
+		}
+	}
+	if override.eol != nil {
+		device["model_in_eol"] = *override.eol
 	}
 	return true
 }
@@ -712,7 +742,7 @@ func (m *mock) setInternet(w http.ResponseWriter, r *http.Request) {
 		m.noWWW = !present
 	}
 	log.Printf("www subsystem is now %s (present=%v)", m.wwwStatus, !m.noWWW)
-	writeJSON(w, map[string]any{"status": m.wwwStatus, "present": !m.noWWW})
+	writeJSON(w, map[string]any{"status": m.wwwStatus, fieldPresent: !m.noWWW})
 }
 
 // setQuality drives the live uplink's uptime_stats, which is what wan.quality
@@ -757,7 +787,7 @@ func (m *mock) setQuality(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
 		paramAvailability: m.availability,
 		paramLatency:      m.latency,
-		"present":         !m.noQuality,
+		fieldPresent:      !m.noQuality,
 		keyNote:           "both are averages over the console's uptime window (time_period, 86400s in the capture)",
 	})
 }
@@ -936,6 +966,97 @@ func (m *mock) setUPS(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// overrideFor is the rewrite record for one captured device, created on first
+// use. Callers hold the lock.
+func (m *mock) overrideFor(slug string) *deviceOverride {
+	override := m.deviceOverrides[slug]
+	if override == nil {
+		override = &deviceOverride{}
+		m.deviceOverrides[slug] = override
+	}
+	return override
+}
+
+// setFirmware drives the upgrade fields, which the firmware key is derived from.
+//
+// Nothing is injected until this is called, because the captures carry no
+// upgrade fields at all — so the mock's default is the honest one: no firmware
+// key. Without a name the change applies to every captured device.
+func (m *mock) setFirmware(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	targets := m.capturedSlugs()
+	if name := slugifyName(query.Get("name")); name != "" {
+		if !slices.Contains(targets, name) {
+			http.Error(w, fmt.Sprintf("no captured device named %q; try one of: %s\n",
+				name, strings.Join(targets, ", ")), http.StatusBadRequest)
+			return
+		}
+		targets = []string{name}
+	}
+
+	if raw := query.Get("reset"); raw != "" {
+		for _, slug := range targets {
+			override := m.overrideFor(slug)
+			override.upgradable, override.eol = nil, nil
+		}
+		log.Print("firmware overrides cleared")
+		writeJSON(w, map[string]any{fieldDevices: m.describeDevices()})
+		return
+	}
+
+	for _, field := range []struct {
+		name   string
+		assign func(*deviceOverride, *bool)
+	}{
+		{"upgradable", func(o *deviceOverride, v *bool) { o.upgradable = v }},
+		{"eol", func(o *deviceOverride, v *bool) { o.eol = v }},
+		// present=false removes the upgrade field entirely, which is the state
+		// every committed capture is in.
+		{"present", func(o *deviceOverride, v *bool) {
+			if v != nil && !*v {
+				o.upgradable = nil
+			}
+		}},
+	} {
+		raw := query.Get(field.name)
+		if raw == "" {
+			continue
+		}
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			http.Error(w, field.name+" must be a boolean", http.StatusBadRequest)
+			return
+		}
+		for _, slug := range targets {
+			field.assign(m.overrideFor(slug), &value)
+		}
+	}
+
+	log.Printf("firmware fields on %s: %s", strings.Join(targets, ","), m.describeFirmware(targets))
+	writeJSON(w, map[string]any{
+		fieldDevices: m.describeDevices(),
+		keyNote: "the upgrade fields are NOT in any capture; this serves the shape UniFi documents, " +
+			"which is enough to drive the parser and not evidence that a console reports it",
+	})
+}
+
+// describeFirmware summarises what is being injected, for the log line.
+func (m *mock) describeFirmware(slugs []string) string {
+	var described []string
+	for _, slug := range slugs {
+		override := m.deviceOverrides[slug]
+		if override == nil {
+			continue
+		}
+		described = append(described, slug+": upgradable="+describeBool(override.upgradable)+
+			" eol="+describeBool(override.eol))
+	}
+	return strings.Join(described, "; ")
+}
+
 // setDevice drives one device's fleet fields, which is what the devices and
 // device.<name> keys are derived from.
 //
@@ -964,11 +1085,7 @@ func (m *mock) setDevice(w http.ResponseWriter, r *http.Request) {
 			slug, strings.Join(m.capturedSlugs(), ", ")), http.StatusBadRequest)
 		return
 	}
-	override := m.deviceOverrides[slug]
-	if override == nil {
-		override = &deviceOverride{}
-		m.deviceOverrides[slug] = override
-	}
+	override := m.overrideFor(slug)
 
 	// state accepts the two values the provider recognises by name, and any
 	// integer besides, so a state nobody has captured can be rehearsed too.

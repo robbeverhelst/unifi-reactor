@@ -252,6 +252,7 @@ hardware is adopted by the controller.
 | `ups.load` | `normal`, `high` | output as a share of the UPS's power budget |
 | `devices` | `all-online`, `degraded` | whether every adopted device is in contact with the console |
 | `device.<name>` | `online`, `offline` | one adopted device's `state`, by slugified name. **Opt-in** |
+| `firmware` | `current`, `updates-available` | whether the console has an update waiting for any adopted device |
 
 `isp` is the only key with an open value set — it is your carrier's name, lowercased with
 non-alphanumerics turned into hyphens. Read it off a state transition line before matching on it.
@@ -324,6 +325,26 @@ Names are slugified — `US 48` publishes `device.us-48`. Renaming a device make
 old key vanish rather than report `offline`, so `Ready=False`/`StateKeyUnavailable`
 holds the last known state instead of firing `onExit`. Two devices whose names
 slugify to one key publish neither, and the disagreement counter records it.
+
+### `firmware`
+
+`updates-available` while the console has an update waiting for **any** adopted
+device, `current` when it does not. There is nothing to configure. Which devices,
+and which version would move where, is a debug log line rather than a state value —
+a version string is not something `spec.when` can match, and one series per version
+is a cardinality problem.
+
+**Reactor never applies an upgrade.** Observing is in scope; rebooting your hardware
+is your decision.
+
+A device that does not report `upgradable` is not a device that is up to date, so a
+console where nothing answers publishes no `firmware` key at all. `model_in_eol` is
+read and counted in that same log line, and deliberately not a key: it is an
+inventory fact that never transitions.
+
+> ⚠️ The upgrade fields are **not in any committed capture**, so this parser is
+> written to the shape UniFi documents and is unverified. It fails by publishing
+> nothing rather than by publishing `current`.
 
 ### `internet` and `wan.quality`
 
@@ -740,7 +761,7 @@ was told, while the workload was still scaled and the Automation is still
 
 `reactor_state_info{provider,key,value}` is published **only for state keys
 whose value set the provider declares closed** — `wan`, `wan.quality`,
-`internet`, `ups`, `ups.battery`, `ups.runtime`, `ups.load`, `devices`. `isp` is not one of them: its values are
+`internet`, `ups`, `ups.battery`, `ups.runtime`, `ups.load`, `devices`, `firmware`. `isp` is not one of them: its values are
 carrier slugs derived from whatever public address your gateway holds, so
 labelling by them would add one permanent time series per carrier ever seen.
 `reactor_state_transitions_total` is not labelled by `from`/`to` for the same
@@ -852,7 +873,7 @@ publishing — which fails as silence rather than as an error.
 | `unifi.wan.quality.maxLatencyMs` | `150` | average latency above this reports `wan.quality: degraded` |
 | `unifi.devices.perDeviceKeys` | `false` | also publish a `device.<name>` key per adopted device; one more series per device |
 | `unifi.debounce.default` | `1` | consecutive observations a changed value needs before Reactor acts; each extra sample costs one `pollInterval` of reaction time |
-| `unifi.debounce.keys` | `{ups.battery: 2, ups.runtime: 2, ups.load: 3, isp: 2, internet: 3, wan.quality: 3, devices: 2, device.*: 2}` | per-key overrides for signals that settle rather than switch; an entry may end in `*` to cover keys named after your hardware |
+| `unifi.debounce.keys` | `{ups.battery: 2, ups.runtime: 2, ups.load: 3, isp: 2, internet: 3, wan.quality: 3, devices: 2, device.*: 2, firmware: 3}` | per-key overrides for signals that settle rather than switch; an entry may end in `*` to cover keys named after your hardware |
 | `unifi.webhook.enabled` | `false` | Run the webhook receiver; a delivery triggers a poll, never a state change |
 | `unifi.webhook.port` | `9090` | Port the receiver listens on inside the pod |
 | `unifi.webhook.path` | `/webhooks/unifi` | URL path deliveries are accepted on |

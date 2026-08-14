@@ -249,6 +249,32 @@ The two captured names are the console's defaults for that hardware, which is
 what makes them safe to use as documentation examples. Anything derived from a
 device name in a fixture or a doc example must be a placeholder of that kind.
 
+## Firmware (`upgradable`) — parsed, not captured
+
+The `firmware` key is derived from `upgradable`, and **no capture contains that
+field**. `version` and `displayable_version` are here; nothing about upgrades is.
+
+| Field | In the captures | What the provider does with it |
+| --- | --- | --- |
+| `version` | `5.1.26.33914`, `1.6.1.413` | diagnostics: the "from" in the log line |
+| `upgradable` | **absent** | the only field the key is derived from; a pointer, so absent publishes no key |
+| `upgrade_to_firmware` | **absent** | diagnostics: the "to" |
+| `required_version`, `safe_for_autoupgrade` | **absent** | diagnostics |
+| `model_in_eol`, `model_in_lts` | **absent** | counted in the log line; deliberately not keys — an inventory fact does not transition |
+
+All six are now in the allowlist in `hack/capture-unifi.sh`, so the next real
+capture settles them. Until then the parser is written to the shape UniFi's own
+API documents and to the field names issue [#12](https://github.com/robbeverhelst/unifi-reactor/issues/12)
+lists, and `internal/providers/unifi/firmware_test.go` asserts the decode of
+that documented shape **in code**. It is a hypothesis, and it lives in a test
+rather than in this directory for the reason the failover hypotheses do: a file
+here claims to have come off a console.
+
+> ⚠️ **Unverified.** If the field is named something else on your firmware, the
+> failure mode is that `firmware` never appears — not that it wrongly reports
+> `current`. That is the direction a pointer buys you, and it is why absent is
+> never read as "up to date".
+
 ## UPS state (`vbms_table`)
 
 A UniFi UPS is reported as a switch-type device (`USWDA26`) carrying:

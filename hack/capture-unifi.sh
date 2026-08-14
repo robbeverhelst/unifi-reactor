@@ -38,6 +38,8 @@ WAN='{is_uplink, up, ifname, name, speed, ip: (if .ip then "'"$PUB_IP"'" else nu
 DEVICE='{
   model, type, name, state, adopted, version, displayable_version,
   disconnection_reason,
+  upgradable, upgrade_to_firmware, required_version, safe_for_autoupgrade,
+  model_in_eol, model_in_lts,
   wan1: (if .wan1 then (.wan1 | '"$WAN"') else null end),
   wan2: (if .wan2 then (.wan2 | '"$WAN"') else null end),
   uplink: (if .uplink then {name: .uplink.name, type: .uplink.type} else null end),

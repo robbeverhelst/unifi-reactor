@@ -649,6 +649,31 @@ A `device.<name>` key has no `reactor_state_info` series and never will — its 
 name comes from your network, so it is not a metric label. Use
 `status.observedState` on the Automation, or the debug line above.
 
+## 10c. `firmware` never appears
+
+The field it is derived from — `upgradable` — is **not in any capture this project
+has**, so the parser is written to the shape UniFi documents and is unverified. It
+is built to fail by publishing nothing rather than by publishing `current`:
+
+```sh
+kubectl -n reactor-system logs deploy/reactor | grep 'unifi-firmware'   # needs log.level=debug
+# No adopted device reports whether it is upgradable; firmware will not be published devicesSilent=udmpro,ups-2u
+```
+
+If you see that line, your console names the field something else — or does not
+report it — and [#12](https://github.com/robbeverhelst/unifi-reactor/issues/12) is
+where the finding belongs. Dump one device record and look for it:
+
+```sh
+curl -sk -H "X-API-KEY: $UNIFI_API_KEY" \
+  "$UNIFI_URL/proxy/network/api/s/default/stat/device" \
+  | jq '[.data[] | {name, version, upgradable, upgrade_to_firmware, model_in_eol}]'
+```
+
+`devicesSilent` in the healthy version of that line is not a problem: the field is
+per device type, and the devices that *do* answer are enough to publish the key.
+Nothing silent is ever assumed to be current.
+
 ---
 
 ## 11. Reactor warns about your UniFi Network version

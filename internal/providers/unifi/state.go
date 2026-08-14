@@ -31,6 +31,7 @@ const (
 	stateKeyUPSRuntime = "ups.runtime"
 	stateKeyUPSLoad    = "ups.load"
 	stateKeyDevices    = "devices"
+	stateKeyFirmware   = "firmware"
 
 	// stateKeyDevicePrefix is what a per-device key is published under:
 	// device.<slugified name>. It is the first key on this list whose NAME is
@@ -129,6 +130,13 @@ const (
 	// series regardless of how many devices are adopted.
 	devicesAllOnline = "all-online"
 	devicesDegraded  = "degraded"
+
+	// firmware is whether the console has an update waiting for anything in the
+	// fleet. Observing is in scope and applying is not: Reactor never triggers
+	// an upgrade, so this key turns "I should check for UniFi updates sometime"
+	// into something that can page, notify or open a ticket, and stops there.
+	firmwareCurrent          = "current"
+	firmwareUpdatesAvailable = "updates-available"
 )
 
 // The comparisons this provider makes between two independent signals for the
@@ -189,5 +197,6 @@ func StateVocabulary() map[string][]string {
 		stateKeyUPSRuntime: {upsRuntimeAmple, upsRuntimeShort, upsRuntimeCritical},
 		stateKeyUPSLoad:    {upsLoadNormal, upsLoadHigh},
 		stateKeyDevices:    {devicesAllOnline, devicesDegraded},
+		stateKeyFirmware:   {firmwareCurrent, firmwareUpdatesAvailable},
 	}
 }

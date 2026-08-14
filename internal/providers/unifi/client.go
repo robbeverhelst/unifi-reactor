@@ -190,6 +190,7 @@ type deviceRecord struct {
 	// the parser that reads it. Embedded struct fields decode from the same
 	// flat object, so this is a grouping for readers and nothing more.
 	deviceHealthFields
+	firmwareFields
 }
 
 type wanPort struct {
@@ -255,6 +256,7 @@ type vbmsTable struct {
 //	ups.load     normal  | high
 //	devices      all-online | degraded   (the adopted fleet in one value)
 //	device.<name>  online | offline      (opt-in; see Client.PerDeviceKeys)
+//	firmware     current | updates-available
 //
 // ups and ups.battery are deliberately independent: a `when: {ups: on-battery}`
 // automation must stay matched for the whole outage, including as the battery
@@ -341,6 +343,7 @@ func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse
 	state := map[string]string{}
 	gatewaySeen := false
 	fleet := newDeviceTally()
+	var firmware firmwareTally
 
 	for _, d := range parsed.Data {
 		// The fleet keys are about devices the console manages, so an unadopted
@@ -349,6 +352,7 @@ func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse
 		// is a different question from whether it has been adopted.
 		if d.adopted() {
 			fleet.observe(ctx, d)
+			firmware.observe(d)
 		} else {
 			logf.FromContext(ctx).WithName("unifi-devices").V(1).Info(
 				"Skipping a device that is not adopted", "model", d.Model, "type", d.Type)
@@ -380,6 +384,7 @@ func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse
 		}
 	}
 	fleet.publish(ctx, state, c.PerDeviceKeys)
+	firmware.publish(ctx, state)
 
 	if len(state) == 0 {
 		return nil, fmt.Errorf(

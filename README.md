@@ -731,6 +731,7 @@ Each key is published only when the matching hardware is adopted by your control
 | `ups.load` | `normal`, `high` | draw as a fraction of the UPS's power budget |
 | `devices` | `all-online`, `degraded` | whether every adopted device is reachable, or at least one is not |
 | `device.<name>` | `online`, `offline` | one adopted device, by slugified name. **Opt-in** — see below |
+| `firmware` | `current`, `updates-available` | whether the console has an update waiting for anything adopted |
 
 `isp` is the one key whose values are not a closed set: it is the carrier name your console geolocated your public address to, lowercased with everything non-alphanumeric turned into a hyphen. Look it up before matching on it —
 
@@ -862,6 +863,44 @@ devices whose names slugify to the same key — `AP 1` and `ap-1` — publish
 *neither*, because picking one would be arbitrary and the arbitrary pick could be
 the one hiding the dead device. `devices` still counts both.
 
+### `firmware` turns "I should check for updates sometime" into something that pages
+
+```yaml
+  when:
+    provider: unifi
+    state:
+      firmware: updates-available
+  then:
+    - type: notification.ntfy      # or http.request, to open a ticket
+```
+
+One key for the whole fleet: `updates-available` while the console has an update
+waiting for **any** adopted device, `current` when it does not. Which devices, and
+what would move from which version to which, is a `V(1)` log line — a version
+string is not something `spec.when` could match, and one metric series per version
+is the cardinality failure [`isp` would have been](#cardinality-on-purpose).
+
+```sh
+kubectl -n reactor-system logs deploy/reactor | grep 'unifi-firmware'   # needs log.level=debug
+# firmware firmware=updates-available devicesReporting=6 devicesUpgradable=ap-attic=6.6.65->7.0.50 modelsPastEOL=1
+```
+
+**Reactor will not upgrade anything.** Observing is in scope and applying is not:
+a firmware upgrade reboots hardware, and an operator choosing when that happens is
+the whole point of being told it is available.
+
+A device that does not report the field is not a device that is up to date, so a
+console where *nothing* answers publishes no `firmware` key at all rather than
+`current` — and the committed captures are exactly that case, which is why this
+parser is [not yet verified](#compatibility). Devices that stay silent while
+others answer are named in the same log line rather than assumed current.
+
+`model_in_eol` is read and deliberately **not** published as a key, though it is
+arguably the more valuable fact. It is an inventory property rather than a state:
+it does not transition, so an Automation matching it would sit permanently
+matched, which is a report rather than a reaction. It is counted in the log line
+above, and a key for it is a decision to argue for separately.
+
 If a provider stops reporting a key at all — the hardware dropped off the controller — Reactor holds the last known state and reports `Ready=False` with `StateKeyUnavailable` rather than treating lost visibility as a condition that ended ([what to do about it](docs/troubleshooting.md#2-statekeyunavailable-and-held-state)).
 
 ### Settling a noisy signal
@@ -881,6 +920,7 @@ unifi:
       wan.quality: 3
       devices: 2        # ...and don't believe one missed heartbeat
       device.*: 2       # a trailing * covers keys named after your hardware
+      firmware: 3       # ...and nothing about an update is urgent
 ```
 
 Each extra sample costs one `pollInterval` of reaction time, so the default is `1`: a WAN failover and a power cut both deserve an immediate reaction, and neither flaps. `ups.battery` ships at `2` because it is a threshold crossing — a charge hovering at 30% would otherwise report `low`, `normal`, `low` — and because a battery drains over minutes, so spending one more poll to be sure costs nothing. At the default 30s poll that makes a battery-level escalation react in 60s worst case instead of 30s.
@@ -896,6 +936,8 @@ Each extra sample costs one `pollInterval` of reaction time, so the default is `
 Debounce is also the whole of the flap control for `wan.quality`, and that is worth being explicit about, because bucketing a measurement is where a threshold usually needs hysteresis. It does not need it here: debounce promotes a value only after N *consecutive* identical observations, so a measurement hovering on a threshold produces `good`, `degraded`, `good` and is never promoted at all — the key simply holds what it had. A second, differently-shaped flap control in the provider would be a second thing to reason about for a problem the engine already solves for every key.
 
 `devices` and `device.*` ship at `2`. A device's state is a switch position like `wan`, but it is the *console's* judgement about a heartbeat rather than a wire it can see, and a busy console that misses one beat must not be a reason to page anyone. One extra sample is 60 seconds at the default poll, which is nothing against the failure this key exists for — an AP that has been dead for days.
+
+`firmware` ships at `3`, and here the reason is that nothing is lost by it. The key is not derived from your hardware at all but from the console's lookup against Ubiquiti's release catalogue, which can refresh, blip or briefly disagree with itself — and *no* firmware update needs reacting to within 30 seconds. Extra samples are free when reaction time does not matter, so it takes the most of any key.
 
 `device.*` is the one entry here that is a pattern rather than a key. Per-device key names come from your hardware, so no list written here could name them; a trailing `*` matches every key with that prefix. An exact key always wins over a pattern, and the longest matching prefix wins between patterns, so `device.ap-attic: 5` pulls one device out of the group it belongs to.
 
