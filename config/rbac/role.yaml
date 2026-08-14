@@ -27,6 +27,12 @@ rules:
   - get
   - update
 - apiGroups:
+  - autoscaling
+  resources:
+  - horizontalpodautoscalers
+  verbs:
+  - list
+- apiGroups:
   - batch
   resources:
   - cronjobs

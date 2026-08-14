@@ -97,6 +97,17 @@ const (
 	OutcomeClaimed  = "claimed"
 	OutcomeDeferred = "deferred"
 	OutcomeReleased = "released"
+	// OutcomeDeclined is a target Reactor refused to arbitrate at all, because
+	// a controller it cannot fold into the arbitration already drives the same
+	// field. A rising count is a configuration to fix rather than an incident:
+	// somebody has pointed an Automation at a workload something else owns.
+	OutcomeDeclined = "declined"
+	// OutcomeWithheld is a target that was arbitrated and then not written,
+	// because the install is running as a dry run. It is the one series that
+	// answers "is this install actually doing anything?" without reading a
+	// single Automation: a dry run publishes only these, and a live one
+	// publishes none.
+	OutcomeWithheld = "withheld"
 
 	// DeliveryAccepted is a delivery that caused a re-observation,
 	// DeliveryCoalesced one that arrived while another was already pending, and
@@ -167,7 +178,9 @@ var (
 
 	arbitrations = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "reactor_arbitrations_total",
-		Help: "Arbitrated target outcomes: claimed, deferred to a more restrictive peer, or released.",
+		Help: "Arbitrated target outcomes: claimed, deferred to a more restrictive peer, released, " +
+			"declined because another controller already drives the target, or withheld because the " +
+			"install runs as a dry run.",
 	}, []string{labelOutcome})
 
 	actions = prometheus.NewCounterVec(prometheus.CounterOpts{

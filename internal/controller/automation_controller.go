@@ -209,6 +209,32 @@ type AutomationReconciler struct {
 	// means every such action is refused with a reason rather than attempted.
 	Outbound actions.Doer
 
+	// DryRun makes this whole install evaluate and report without writing.
+	//
+	// Every Automation is arbitrated exactly as it otherwise would be, and the
+	// resolved value is then not applied: status.targets[] reports what each
+	// target would be held at, Applied is False with reason DryRun, and no edge
+	// action is sent. That is deliberately not the same thing as
+	// spec.dryRun on one Automation, which takes that Automation out of force
+	// so it cannot perturb the live ones around it. Here nothing is live, so
+	// there is nothing to perturb and the honest report is the real fold.
+	//
+	// It is a promise made in code. The chart pairs it with withholding the
+	// verbs that could write to a target, so that on an install meant never to
+	// touch a workload the API server is the one keeping the promise.
+	DryRun bool
+
+	// DetectHPA makes Reactor check, before claiming a scalable target, whether
+	// a HorizontalPodAutoscaler already drives it — and decline the target
+	// rather than fight over it.
+	//
+	// Off by default, because it costs a permission the operator does not
+	// otherwise need and because turning it on changes what an install already
+	// in that fight does. With it off the behaviour is what it was: Reactor
+	// writes, the HPA writes back, and the workload oscillates on the poll
+	// interval.
+	DetectHPA bool
+
 	// SecretReader reads action credentials. It must be an uncached reader —
 	// the manager's APIReader — because a cached Get on a Secret starts an
 	// informer that holds every Secret in the cluster in memory. Falls back to
@@ -228,6 +254,19 @@ type AutomationReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments/scale;statefulsets/scale,verbs=get;update
 // +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;patch
+//
+// A HorizontalPodAutoscaler writes the same scale subresource Reactor does, and
+// is a claimant arbitration cannot reach, so a target one drives is declined
+// rather than fought over. list and nothing else: the HPAs of one namespace are
+// read uncached as unstructured objects, the way targets are, so no informer
+// holds every HPA in the cluster in memory and no get or watch is needed. This
+// is a read of an autoscaling policy and never a write to one — Reactor
+// declines to act, and deliberately does not suspend the HPA on your behalf.
+//
+// Unlike nodes this IS marked, so the manifest bundle carries it: it is
+// read-only and reaches no workload. The chart still renders it only under
+// safety.detectHPA, because there the value gating the behaviour exists.
+// +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=list
 //
 // Nodes are deliberately NOT marked here, even though kubernetes.cordon targets
 // them. These markers generate config/rbac/role.yaml, which is granted
@@ -338,10 +377,15 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// Registered before the first claim is ever made, so there is no window in
 	// which Reactor holds a target it would not hand back on deletion.
-	if len(targetsOf(&automation)) > 0 && controllerutil.AddFinalizer(&automation, finalizerReleaseClaims) {
-		if err := r.Update(ctx, &automation); err != nil {
-			return ctrl.Result{}, err
-		}
+	//
+	// A dry-run install is the one case that must not carry one, and taking it
+	// back off is not tidiness. The finalizer exists to release a claim; a dry
+	// run makes none, so it would have nothing to do and no way to do it —
+	// releasing is a write. Left in place it becomes the trap #39 documents:
+	// an Automation nothing will ever finalize, and a `kubectl delete` that
+	// hangs forever once the operator is gone.
+	if err := r.reconcileFinalizer(ctx, &automation); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// A suspended Automation is out of force, so its condition no longer
@@ -395,10 +439,13 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		log.Info("state transition", "automation", automation.Name, "matching", matching, "inForce", inForce)
 	}
 
-	// claiming, not matching: a suspended Automation's condition can hold
-	// without it asking for anything.
+	// claiming, not matching: an Automation held out of force — suspended, or
+	// previewing — can have its condition hold without asking for anything.
+	// Out of force is also where a preview belongs: it is the counterfactual an
+	// Automation that is not acting owes an explanation of.
 	claiming := matching && inForce
-	outcomes, applyErr := r.reconcileTargets(ctx, &automation, claiming)
+	outcomes, applyErr := r.reconcileTargets(ctx, &automation,
+		stance{matching: matching, claiming: claiming, preview: !inForce})
 
 	if applyErr == nil {
 		if matching != wasMatching {
@@ -435,14 +482,7 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			"automation evaluated against observed state")
 		r.setAppliedCondition(&automation, outcomes)
 	} else {
-		// Ready, because a suspended Automation is healthy and still being
-		// reconciled; not Applied, because what it wants is deliberately not
-		// what its targets are being held at. Reporting it any other way would
-		// make an operator's own pause look like a fault.
-		r.setCondition(&automation, conditionReady, metav1.ConditionTrue, reasonSuspended,
-			"spec.suspend is true: state is still observed, and no target is claimed")
-		r.setCondition(&automation, conditionApplied, metav1.ConditionFalse, reasonSuspended,
-			"suspended, so this automation's targets are arbitrated as if it did not exist")
+		r.setOutOfForceConditions(&automation)
 	}
 	if err := r.updateStatus(ctx, &automation); err != nil {
 		return ctrl.Result{}, err
@@ -456,7 +496,14 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// A suspended Automation reaches here with inForce false and sends nothing.
 	// Suspension is a reversible delete, and a deleted Automation does not
 	// announce transitions it is no longer acting on.
-	if matching != wasMatching && inForce {
+	if matching != wasMatching {
+		if !inForce {
+			// The moment a dry run almost acted, which is the half of "what
+			// would this do?" that status cannot answer: status is a poll, and
+			// nobody polls a resource at the moment it becomes interesting.
+			r.reportPreview(&automation, outcomes)
+			return ctrl.Result{RequeueAfter: reevaluateInterval}, nil
+		}
 		if results := r.runEdgeActions(ctx, &automation, matching); len(results) > 0 {
 			automation.Status.EdgeActions = results
 			if err := r.updateStatus(ctx, &automation); err != nil {
@@ -526,6 +573,27 @@ func (r *AutomationReconciler) recordApplyFailure(
 	return ctrl.Result{RequeueAfter: retryBackoff(attempts)}, nil
 }
 
+// reconcileFinalizer keeps the release finalizer present exactly while there is
+// something for it to release: a target this Automation could be holding, on an
+// install that writes at all.
+func (r *AutomationReconciler) reconcileFinalizer(
+	ctx context.Context,
+	automation *reactorv1alpha1.Automation,
+) error {
+	wanted := len(targetsOf(automation)) > 0 && !r.DryRun
+
+	changed := false
+	if wanted {
+		changed = controllerutil.AddFinalizer(automation, finalizerReleaseClaims)
+	} else {
+		changed = controllerutil.RemoveFinalizer(automation, finalizerReleaseClaims)
+	}
+	if !changed {
+		return nil
+	}
+	return r.Update(ctx, automation)
+}
+
 // finalize hands a deleted Automation's targets back before letting it go.
 //
 // Deletion needs no special arbitration case: an Automation being deleted is
@@ -543,7 +611,9 @@ func (r *AutomationReconciler) finalize(
 		return ctrl.Result{}, nil
 	}
 
-	_, err := r.reconcileTargets(ctx, automation, false)
+	// No preview: an Automation being deleted has no future to describe, and
+	// the status it would be written into is about to stop existing.
+	_, err := r.reconcileTargets(ctx, automation, stance{})
 	if err != nil {
 		attempts := automation.Status.ReleaseAttempts + 1
 		if attempts < maxReleaseAttempts {
@@ -573,14 +643,14 @@ func (r *AutomationReconciler) finalize(
 func (r *AutomationReconciler) reconcileTargets(
 	ctx context.Context,
 	automation *reactorv1alpha1.Automation,
-	matching bool,
+	s stance,
 ) ([]targetOutcome, error) {
 	var outcomes []targetOutcome
 	for _, key := range targetsOf(automation) {
 		started := time.Now()
-		outcome, err := r.reconcileTarget(ctx, key, automation, matching)
-		metrics.ActionExecuted(actionTypeFor(automation, key, matching), metrics.KindDesiredState,
-			!matching, err, time.Since(started))
+		outcome, err := r.reconcileTarget(ctx, key, automation, s)
+		metrics.ActionExecuted(actionTypeFor(automation, key, s.claiming), metrics.KindDesiredState,
+			!s.claiming, err, time.Since(started))
 		outcomes = append(outcomes, outcome)
 		if err != nil {
 			return outcomes, err
@@ -601,6 +671,8 @@ func targetStatuses(outcomes []targetOutcome) []reactorv1alpha1.TargetStatus {
 			Effective:  outcome.effective,
 			Level:      outcome.level,
 			DeferredBy: outcome.deferredBy,
+			Preview:    outcome.preview,
+			ManagedBy:  outcome.managedBy,
 		})
 	}
 	return statuses
@@ -623,6 +695,33 @@ func (r *AutomationReconciler) setAppliedCondition(
 		return
 	}
 
+	if r.DryRun {
+		// The arbitration was resolved and the write was not made, so what this
+		// Automation wants is emphatically not what its targets have — and
+		// saying Applied=True because the fold agreed with it would be the one
+		// report a dry run must never produce.
+		r.eventOnNewReason(automation, conditionApplied, corev1.EventTypeNormal,
+			reasonDryRun, actionExecute,
+			"this install runs as a dry run: every target was arbitrated and nothing was written")
+		r.setCondition(automation, conditionApplied, metav1.ConditionFalse, reasonDryRun,
+			"this install runs as a dry run: status.targets[].effective is what each target would be "+
+				"held at, and nothing was written")
+		return
+	}
+
+	if managed := describeManaged(outcomes); managed != "" {
+		// Warning, unlike being outvoted by a peer. A deferred claim is the
+		// arbitration working; this is an automation that cannot do its job at
+		// all, and somebody has to decide which controller should own the
+		// workload — Reactor is not going to decide it for them.
+		r.eventOnNewReason(automation, conditionApplied, corev1.EventTypeWarning,
+			reasonTargetManagedByHPA, actionExecute,
+			"not claiming %s: arbitration cannot resolve a claimant it cannot see, and writing anyway "+
+				"would oscillate rather than win", managed)
+		r.setCondition(automation, conditionApplied, metav1.ConditionFalse, reasonTargetManagedByHPA, managed)
+		return
+	}
+
 	var deferred []string
 	for _, outcome := range outcomes {
 		if len(outcome.deferredBy) > 0 {
@@ -640,6 +739,32 @@ func (r *AutomationReconciler) setAppliedCondition(
 	}
 	r.setCondition(automation, conditionApplied, metav1.ConditionTrue, "InEffect",
 		"target state matches what this automation wants")
+}
+
+// setOutOfForceConditions reports an Automation that is healthy and
+// deliberately not acting.
+//
+// Ready, because being out of force is a state an operator chose and not a
+// fault; not Applied, because what it wants is deliberately not what its
+// targets are being held at. Reporting either the other way round would make
+// somebody's own pause look like something to fix.
+//
+// Suspending and previewing are the same answer to arbitration — neither claims
+// anything — so they differ only in what they say about it. The reason is what
+// tells `kubectl describe` which of the two is the case, and it is the only
+// place that distinction is visible on the object.
+func (r *AutomationReconciler) setOutOfForceConditions(automation *reactorv1alpha1.Automation) {
+	if automation.Spec.DryRun {
+		r.setCondition(automation, conditionReady, metav1.ConditionTrue, reasonDryRun,
+			"spec.dryRun is true: state is observed and evaluated, and nothing is written")
+		r.setCondition(automation, conditionApplied, metav1.ConditionFalse, reasonDryRun,
+			"a dry run claims no target; status.targets[].preview reports what this would do in force")
+		return
+	}
+	r.setCondition(automation, conditionReady, metav1.ConditionTrue, reasonSuspended,
+		"spec.suspend is true: state is still observed, and no target is claimed")
+	r.setCondition(automation, conditionApplied, metav1.ConditionFalse, reasonSuspended,
+		"suspended, so this automation's targets are arbitrated as if it did not exist")
 }
 
 // transitionFor records the first state key whose value differs from the

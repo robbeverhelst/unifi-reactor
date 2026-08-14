@@ -466,6 +466,28 @@ type AutomationSpec struct {
 	// +optional
 	Reversal ReversalPolicy `json:"reversal,omitempty"`
 
+	// DryRun evaluates this Automation fully and reports what it would do,
+	// without touching anything.
+	//
+	// It is out of force exactly as Suspend is: it claims no target, writes
+	// nothing, and cannot change what any other Automation's targets resolve
+	// to — which is what makes it safe to apply one next to policies that are
+	// live. What it adds is status.targets[].preview: the arbitration
+	// recomputed as if this Automation's condition held and it were in force,
+	// naming what each target would be held at, who would outvote it, who it
+	// would outvote, and what it would hand back afterwards.
+	//
+	// Turning it on for an Automation that is currently holding a target is a
+	// release, exactly as suspending it is. It stops being in force, so the
+	// target goes back to whatever the remaining claims want.
+	//
+	// A preview is a fact about the moment it was computed and not a promise
+	// about the next one: the peers, the observed state and the target can all
+	// change before the condition it describes actually holds. See the README.
+	// +optional
+	// +kubebuilder:default=false
+	DryRun bool `json:"dryRun,omitempty"`
+
 	// Suspend takes this Automation out of force without deleting it: it goes
 	// on observing state and reporting it, and stops claiming its targets
 	// entirely.
@@ -607,6 +629,90 @@ type TargetStatus struct {
 	// Automation's intent is the one in effect.
 	// +optional
 	DeferredBy []string `json:"deferredBy,omitempty"`
+
+	// Preview is what would happen here if this Automation were in force,
+	// reported while it deliberately is not.
+	// +optional
+	Preview *TargetPreview `json:"preview,omitempty"`
+
+	// ManagedBy names a controller other than Reactor that already drives this
+	// target's level, as "Kind/namespace/name".
+	//
+	// Arbitration reaches only the Automations, so a claimant that is not one
+	// cannot be folded in and cannot be resolved against — it can only be
+	// fought, which neither side wins. Reactor therefore declines to claim a
+	// target named here and writes nothing to it, and Applied is False with
+	// reason TargetManagedByHPA. The Automation stays Ready: it is correctly
+	// configured, it simply cannot act on this target.
+	//
+	// Currently only a HorizontalPodAutoscaler, and only on an install that
+	// turned detection on. Nothing here promises the field is uncontested when
+	// it is empty: KEDA, a GitOps controller correcting drift and a cron job
+	// running kubectl own spec.replicas just as hard, and none of them is
+	// discoverable.
+	// +optional
+	ManagedBy string `json:"managedBy,omitempty"`
+}
+
+// TargetPreview is what would happen to one target if this Automation's
+// condition held and it were in force, arbitrated against the claims that exist
+// right now.
+//
+// It is answerable without writing anything because arbitration is a pure
+// function of the claims that hold: the same fold that decides a target's value
+// answers the counterfactual with one more claim in it. It is reported while an
+// Automation is deliberately out of force — spec.dryRun, or spec.suspend, where
+// it answers "what would resuming this do" — and is absent otherwise, because
+// an Automation that is in force is already described by the fields above.
+//
+// It is also absent on a target ManagedBy names, and that is an answer rather
+// than a gap: such a target would be declined rather than claimed, so there is
+// no level to preview.
+//
+// Three things it cannot promise, all the same thing said three ways: it is
+// computed from the peers, the observed state and the target as they are at
+// this moment, and any of them can differ by the time the condition actually
+// holds. It also says nothing about whether the write would succeed — RBAC, an
+// admission webhook and a target that has since been deleted are all outside
+// what a fold can know.
+type TargetPreview struct {
+	// Desired is the level this Automation would ask for. Absent when it would
+	// ask for nothing on this target.
+	// +optional
+	Desired *int32 `json:"desired,omitempty"`
+
+	// Effective is what arbitration would resolve to across every claim,
+	// including this one.
+	// +optional
+	Effective *int32 `json:"effective,omitempty"`
+
+	// Level renders Effective in the units of the action that would set it, for
+	// the same reason TargetStatus.Level does.
+	// +optional
+	Level string `json:"level,omitempty"`
+
+	// DeferredBy names the Automations whose more restrictive claim would
+	// outvote this one, leaving the target exactly where it already is.
+	// +optional
+	DeferredBy []string `json:"deferredBy,omitempty"`
+
+	// WouldDefer names the Automations this claim would outvote: the ones
+	// getting what they want now that would stop getting it. A peer already
+	// outvoted by a third automation is not listed, because it is deferred
+	// either way and this claim is not what did it.
+	// +optional
+	WouldDefer []string `json:"wouldDefer,omitempty"`
+
+	// OnExit says what this Automation would want for the target once its
+	// condition stopped holding, in words — "3 replicas", "running", or "left
+	// as found" under reversal None.
+	//
+	// Rendered rather than numeric because it is read rather than computed
+	// against, and because under reversal Baseline it may describe a value
+	// Reactor has not recorded yet: on a target nothing has ever claimed, the
+	// baseline a claim would capture is simply what the target is at now.
+	// +optional
+	OnExit string `json:"onExit,omitempty"`
 }
 
 // AutomationStatus is the observed state of an Automation.
@@ -678,12 +784,14 @@ type Automation struct {
 
 // InForce reports whether this Automation currently claims its targets.
 //
-// Suspension and deletion are the same answer to arbitration: both mean the
-// policy is not in force, so targets resolve as if the Automation were not
-// there. Keeping them identical is what stops "pause this" and "remove this"
-// from having different effects on the workloads being held down.
+// Suspension, a dry run and deletion are the same answer to arbitration: all
+// three mean the policy is not in force, so targets resolve as if the
+// Automation were not there. Keeping them identical is what stops "pause this",
+// "show me what this would do" and "remove this" from having different effects
+// on the workloads being held down — and it is what makes a dry run safe to
+// apply beside automations that are live.
 func (a *Automation) InForce() bool {
-	return a.DeletionTimestamp.IsZero() && !a.Spec.Suspend
+	return a.DeletionTimestamp.IsZero() && !a.Spec.Suspend && !a.Spec.DryRun
 }
 
 // +kubebuilder:object:root=true

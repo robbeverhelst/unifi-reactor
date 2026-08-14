@@ -280,6 +280,59 @@ uninstall:
   # the hook entirely.
   timeoutSeconds: 120
 
+safety:
+  # Run the whole install as a dry run: every automation is evaluated and
+  # arbitrated exactly as it otherwise would be, and nothing is written. Each
+  # automation reports what its targets would be held at in
+  # status.targets[].effective, says Applied=False with reason DryRun, and sends
+  # no notification, no http.request and no restart.
+  #
+  # This is the mode to roll a new cluster out in. Turning it on ALSO withholds
+  # every permission that could write to a target — patch on the workload kinds
+  # and update on their scale subresources — so that "it will not touch your
+  # workloads" is enforced by the API server rather than promised by a flag.
+  #
+  # Two things worth knowing before turning it on:
+  #   - It is install-wide and is NOT the same thing as an automation's own
+  #     spec.dryRun. That one takes a single automation out of force so it
+  #     cannot perturb the live ones beside it; this one stops the whole
+  #     operator writing. Use spec.dryRun to try one policy on a working
+  #     install, and this to bring up an install that has never acted.
+  #   - Turning it on for an install that is already holding workloads down
+  #     freezes them there: releasing a claim is a write too. Suspend or delete
+  #     those automations first, or uninstall with the pre-delete hook, which
+  #     hands every target back.
+  dryRun: false
+
+  # Notice a HorizontalPodAutoscaler driving a target and decline to fight it.
+  #
+  # Reactor writes spec.replicas; an HPA computes one from metrics and writes it
+  # back. Neither is wrong and neither wins — the workload just oscillates,
+  # every reconcile against every HPA sync, until one of them is removed.
+  # Arbitration cannot help, because it resolves claims between Automations and
+  # an HPA is a claimant Reactor cannot see.
+  #
+  # With this on, Reactor lists the HPAs in a target's namespace before claiming
+  # it. If one points at the target it writes nothing, reports Applied=False
+  # with reason TargetManagedByHPA naming the HPA, raises a Warning Event and
+  # counts reactor_arbitrations_total{outcome="declined"}. The Automation stays
+  # Ready: it is correctly configured, it just cannot act there. A target
+  # Reactor was ALREADY holding when an HPA appeared is handed back to its
+  # recorded baseline first — an HPA will not scale a workload up from zero, so
+  # simply going quiet would strand it.
+  #
+  # It grants list on autoscaling/horizontalpodautoscalers, and nothing else.
+  # That is a read of an autoscaling policy: no write to one, and no permission
+  # over anything the HPA manages. Reactor declines to act and deliberately does
+  # not suspend the HPA on your behalf.
+  #
+  # Off by default because it changes what an install already in that fight
+  # does, and because it costs a permission nothing else here needs. Turn it on:
+  # losing a fight silently is worse than plainly declining to start one, and
+  # there is no automation this makes worse. If the permission is missing while
+  # this is on, a claim FAILS rather than proceeding blind, and says so.
+  detectHPA: false
+
 rbac:
   # cluster-wide: the operator may act on any namespace, enabling the optional
   #   Automation spec.actions[].target.namespace field.

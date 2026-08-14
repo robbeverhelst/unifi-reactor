@@ -3,6 +3,17 @@
 #                      any namespace via spec.actions[].target.namespace.
 #   namespace-scoped:  Role/RoleBinding in the release namespace — Automations
 #                      only work in and target that namespace.
+#
+# A dry-run install is granted no verb that could change a target. --dry-run is
+# the operator promising not to write; this is the API server holding it to that,
+# which is the difference between "it should not touch your workloads" and "it
+# cannot". Reads stay, because a dry run that could not read could not report.
+{{- $objectVerbs := `["get", "patch"]` }}
+{{- $scaleVerbs := `["get", "update"]` }}
+{{- if .Values.safety.dryRun }}
+{{- $objectVerbs = `["get"]` }}
+{{- $scaleVerbs = `["get"]` }}
+{{- end }}
 apiVersion: rbac.authorization.k8s.io/v1
 {{- if .Values.rbac.clusterWide }}
 kind: ClusterRole
@@ -45,16 +56,16 @@ rules:
   # without knowing where any of them keeps its replicas.
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets"]
-    verbs: ["get", "patch"]
+    verbs: {{ $objectVerbs }}
   - apiGroups: ["apps"]
     resources: ["deployments/scale", "statefulsets/scale"]
-    verbs: ["get", "update"]
+    verbs: {{ $scaleVerbs }}
   # kubernetes.cronjob.suspend. Suspending sets spec.suspend and nothing else:
   # this grants no permission over Jobs, so a Job already running is untouched
   # and untouchable, which is deliberate.
   - apiGroups: ["batch"]
     resources: ["cronjobs"]
-    verbs: ["get", "patch"]
+    verbs: {{ $objectVerbs }}
   # Events on the Automations themselves: every transition, every write to a
   # target, every action that failed. Automations live in the namespaces they
   # act on, so this follows the same scope as the rest of the manager's rules
@@ -69,6 +80,25 @@ rules:
   - apiGroups: ["events.k8s.io"]
     resources: ["events"]
     verbs: ["create", "patch"]
+{{- if .Values.safety.detectHPA }}
+  # Noticing a HorizontalPodAutoscaler that drives a target Reactor was asked to
+  # hold, so it can decline rather than fight one it cannot arbitrate with.
+  #
+  # "list" is the entire grant, and the exposure is worth stating plainly: it
+  # lets the operator read every HorizontalPodAutoscaler in whatever scope it
+  # already has — their metric thresholds and replica bounds, which are policy
+  # rather than payload. It grants NO write to an HPA, so Reactor cannot suspend
+  # one to win, and nothing over the workloads an HPA manages beyond what the
+  # rules above already allow.
+  #
+  # No "get", because a target's namespace is listed rather than a name looked
+  # up, and no "watch": HPAs are read uncached as unstructured objects the way
+  # targets are, so nothing here starts an informer or holds an HPA in memory
+  # past the request that read it.
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["list"]
+{{- end }}
 {{- if .Values.actions.allowedDestinations }}
   # Credentials for outbound actions live in Secrets in the namespace of the
   # Automation that references them, which is why this follows the manager's
@@ -140,7 +170,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get", "patch"]
+    verbs: {{ $objectVerbs }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

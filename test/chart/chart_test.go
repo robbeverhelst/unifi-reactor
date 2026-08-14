@@ -638,6 +638,89 @@ func TestTargetKindsAreGrantedInBothRBACModes(t *testing.T) {
 	}
 }
 
+// TestHPADetectionIsOptInAndReadOnly pins both halves of the one permission
+// added for noticing a controller Reactor cannot arbitrate with.
+//
+// Absent by default in both modes, because it is a permission nothing else here
+// needs and an install that does not use the feature should not carry it. And
+// when it is on it must be a read: Reactor declines to act on an HPA-managed
+// target and deliberately does not suspend the HPA to win, so any write verb
+// here would be a capability nothing in the code asks for.
+func TestHPADetectionIsOptInAndReadOnly(t *testing.T) {
+	const hpaRule = `resources: \["horizontalpodautoscalers"\]`
+
+	for _, mode := range rbacModes {
+		t.Run(mode, func(t *testing.T) {
+			off := render(t, unifiURL, mode)
+			if regexp.MustCompile(hpaRule).MatchString(off) {
+				t.Error("autoscaling read is granted by default; it must be opt-in")
+			}
+			if strings.Contains(off, "--detect-hpa") {
+				t.Error("detection is enabled by default, which changes what an existing install does")
+			}
+
+			on := render(t, unifiURL, mode, "safety.detectHPA=true")
+			granted := regexp.MustCompile(hpaRule + `\n\s+(verbs: \[[^]]*\])`).FindStringSubmatch(on)
+			if granted == nil {
+				t.Fatal("safety.detectHPA does not grant autoscaling read, so every claim would fail")
+			}
+			if granted[1] != `verbs: ["list"]` {
+				t.Errorf("HPA detection is granted %s; it lists one namespace and needs nothing else", granted[1])
+			}
+			if !strings.Contains(on, "- --detect-hpa") {
+				t.Error("safety.detectHPA grants the permission without turning the behaviour on")
+			}
+		})
+	}
+}
+
+// TestDryRunCannotWriteToATarget is what turns "it will not touch your
+// workloads" into something the API server enforces.
+//
+// --dry-run is the operator promising not to write. This is the second lock:
+// with safety.dryRun on, the manager's rules must carry no verb that could
+// change a target — no patch on the workload kinds, no update on their scale
+// subresources, and none on nodes if node actions were also turned on. Reads
+// stay, because a dry run that could not read could not report.
+//
+// Written as an assertion about verbs rather than about rules, because the
+// failure it guards against is a rule quietly widening back, not disappearing.
+func TestDryRunCannotWriteToATarget(t *testing.T) {
+	const dryRun = "safety.dryRun=true"
+	writeVerbs := regexp.MustCompile(`verbs: \[[^]]*"(patch|update|create|delete)"`)
+
+	for _, mode := range rbacModes {
+		t.Run(mode, func(t *testing.T) {
+			manifests := render(t, unifiURL, mode, dryRun, "rbac.allowNodeActions=true")
+			for _, rule := range []string{
+				`resources: \["deployments", "statefulsets"\]`,
+				`resources: \["deployments/scale", "statefulsets/scale"\]`,
+				`resources: \["cronjobs"\]`,
+				`resources: \["nodes"\]`,
+			} {
+				granted := regexp.MustCompile(rule + `\n\s+(verbs: \[[^]]*\])`).FindStringSubmatch(manifests)
+				if granted == nil {
+					t.Errorf("%s is not granted at all, so a dry run could not even read it", rule)
+					continue
+				}
+				if writeVerbs.MatchString(granted[1]) {
+					t.Errorf("a dry-run install is granted %s on %s, so it could still write to a target",
+						granted[1], rule)
+				}
+			}
+			// The pre-delete sweep hands claims back, which is a write. A dry
+			// run never took one, so the Job would have nothing to release and
+			// no permission to release it with.
+			if strings.Contains(manifests, "--release-claims") {
+				t.Error("a dry-run install renders the release-claims hook, which cannot write and has nothing to hand back")
+			}
+			if !strings.Contains(manifests, "- --dry-run") {
+				t.Error("safety.dryRun does not pass --dry-run to the manager, so it would fail every write with a Forbidden")
+			}
+		})
+	}
+}
+
 // TestNodeActionsAreOptIn pins the gate on the one permission Reactor asks for
 // that reaches outside the workloads it was installed to manage.
 //

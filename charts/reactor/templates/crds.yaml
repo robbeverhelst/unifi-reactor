@@ -476,6 +476,28 @@ spec:
                       || self.target.kind in [''Deployment'', ''StatefulSet'']'
                 minItems: 1
                 type: array
+              dryRun:
+                default: false
+                description: |-
+                  DryRun evaluates this Automation fully and reports what it would do,
+                  without touching anything.
+
+                  It is out of force exactly as Suspend is: it claims no target, writes
+                  nothing, and cannot change what any other Automation's targets resolve
+                  to — which is what makes it safe to apply one next to policies that are
+                  live. What it adds is status.targets[].preview: the arbitration
+                  recomputed as if this Automation's condition held and it were in force,
+                  naming what each target would be held at, who would outvote it, who it
+                  would outvote, and what it would hand back afterwards.
+
+                  Turning it on for an Automation that is currently holding a target is a
+                  release, exactly as suspending it is. It stops being in force, so the
+                  target goes back to whatever the remaining claims want.
+
+                  A preview is a fact about the moment it was computed and not a promise
+                  about the next one: the peers, the observed state and the target can all
+                  change before the condition it describes actually holds. See the README.
+                type: boolean
               onExit:
                 description: |-
                   OnExit declares what this Automation wants for its targets once its
@@ -1163,6 +1185,74 @@ spec:
                         replicas", "suspended" — because a bare number stops explaining itself
                         once a target's level is a switch rather than a count.
                       type: string
+                    managedBy:
+                      description: |-
+                        ManagedBy names a controller other than Reactor that already drives this
+                        target's level, as "Kind/namespace/name".
+
+                        Arbitration reaches only the Automations, so a claimant that is not one
+                        cannot be folded in and cannot be resolved against — it can only be
+                        fought, which neither side wins. Reactor therefore declines to claim a
+                        target named here and writes nothing to it, and Applied is False with
+                        reason TargetManagedByHPA. The Automation stays Ready: it is correctly
+                        configured, it simply cannot act on this target.
+
+                        Currently only a HorizontalPodAutoscaler, and only on an install that
+                        turned detection on. Nothing here promises the field is uncontested when
+                        it is empty: KEDA, a GitOps controller correcting drift and a cron job
+                        running kubectl own spec.replicas just as hard, and none of them is
+                        discoverable.
+                      type: string
+                    preview:
+                      description: |-
+                        Preview is what would happen here if this Automation were in force,
+                        reported while it deliberately is not.
+                      properties:
+                        deferredBy:
+                          description: |-
+                            DeferredBy names the Automations whose more restrictive claim would
+                            outvote this one, leaving the target exactly where it already is.
+                          items:
+                            type: string
+                          type: array
+                        desired:
+                          description: |-
+                            Desired is the level this Automation would ask for. Absent when it would
+                            ask for nothing on this target.
+                          format: int32
+                          type: integer
+                        effective:
+                          description: |-
+                            Effective is what arbitration would resolve to across every claim,
+                            including this one.
+                          format: int32
+                          type: integer
+                        level:
+                          description: |-
+                            Level renders Effective in the units of the action that would set it, for
+                            the same reason TargetStatus.Level does.
+                          type: string
+                        onExit:
+                          description: |-
+                            OnExit says what this Automation would want for the target once its
+                            condition stopped holding, in words — "3 replicas", "running", or "left
+                            as found" under reversal None.
+
+                            Rendered rather than numeric because it is read rather than computed
+                            against, and because under reversal Baseline it may describe a value
+                            Reactor has not recorded yet: on a target nothing has ever claimed, the
+                            baseline a claim would capture is simply what the target is at now.
+                          type: string
+                        wouldDefer:
+                          description: |-
+                            WouldDefer names the Automations this claim would outvote: the ones
+                            getting what they want now that would stop getting it. A peer already
+                            outvoted by a third automation is not listed, because it is deferred
+                            either way and this claim is not what did it.
+                          items:
+                            type: string
+                          type: array
+                      type: object
                     ref:
                       description: |-
                         Ref is the target this entry describes, as "Kind/namespace/name", or

@@ -1,4 +1,8 @@
-{{- if .Values.uninstall.releaseClaims }}
+{{- if and .Values.uninstall.releaseClaims (not .Values.safety.dryRun) }}
+# Not rendered for a dry-run install, and there is nothing missing: such an
+# install has never claimed a target and its Automations carry no finalizer, so
+# the sweep would have nothing to release and no permission to release it with.
+#
 # Uninstalling Reactor does not delete your Automations — Helm never removes
 # the CRD it installed, so the resources survive and simply stop reconciling.
 # Without this hook, every workload Reactor had scaled down would freeze there
