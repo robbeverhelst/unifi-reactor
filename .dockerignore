@@ -9,3 +9,7 @@
 # Re-include Go module files
 !go.mod
 !go.sum
+
+# The documentation site is a separate app and is never part of the image, so
+# keep it out of the build context whatever a dependency of it happens to ship.
+docs/

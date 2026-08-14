@@ -1,4 +1,7 @@
-# Development
+---
+title: "Development"
+description: "Building, testing and running Reactor against a cluster, with a mock UniFi console that serves the captured payloads and rehearses a failover or a power cut on demand."
+---
 
 ## Prerequisites
 
@@ -23,9 +26,9 @@ hack/dev/              demo Automations used by `make dev-hello`
 testdata/unifi/        real captured API responses — the parsers' ground truth
 ```
 
-`internal/actions/` is provider-agnostic for the same reason the engine is: a notification action must have no idea what `wan` means. It is also where Reactor's outbound reach is bounded — read the package comment before changing anything in it, and [SECURITY.md](../SECURITY.md#outbound-actions) for why the bounds are where they are.
+`internal/actions/` is provider-agnostic for the same reason the engine is: a notification action must have no idea what `wan` means. It is also where Reactor's outbound reach is bounded — read the package comment before changing anything in it, and [SECURITY.md](https://github.com/robbeverhelst/unifi-reactor/blob/main/SECURITY.md#outbound-actions) for why the bounds are where they are.
 
-The engine must never contain provider-specific logic. Providers translate vendor reality into normalized state; the engine only ever sees that. Keeping the seam clean is what lets new providers arrive without touching the core — see [Adding a provider](adding-a-provider.md) for the contract and a walkthrough of the UniFi one.
+The engine must never contain provider-specific logic. Providers translate vendor reality into normalized state; the engine only ever sees that. Keeping the seam clean is what lets new providers arrive without touching the core — see [Adding a provider](/contributing/adding-a-provider/) for the contract and a walkthrough of the UniFi one.
 
 ## Everyday commands
 
@@ -119,7 +122,7 @@ curl -X POST 'http://localhost:9443/outlets?reset=true'        # back to the cap
 
 `/poe` drives both halves of the PoE story, because the mock has one synthetic switch and one `port_table` and they are the same one: `watts`/`budget`/`silent` move what the `poe` **state key** measures, while `port`/`name`/`uplink`/`poe` break the identity checks the `unifi.poe.cycle` **action** makes. That switch is adopted and online, so it is part of the fleet `devices` counts and is addressable as `mock-switch` through `/device`.
 
-> **`/firmware`, `/temperature` and `/poe` serve fields no capture contains.** The committed records carry no upgrade flags, no thermals and no `port_table`, so those three endpoints render the shape UniFi's API *documents* — including `poe_power` as a string, which is the form most likely to break a parser. Driving them exercises the derivation; it does not confirm a console reports any of it. Until one does, the mock's honest default is what the captures show: those keys are simply absent, and `present=false` puts each back to that state. See [the capture notes](../testdata/unifi/README.md#what-is-not-captured-yet).
+> **`/firmware`, `/temperature` and `/poe` serve fields no capture contains.** The committed records carry no upgrade flags, no thermals and no `port_table`, so those three endpoints render the shape UniFi's API *documents* — including `poe_power` as a string, which is the form most likely to break a parser. Driving them exercises the derivation; it does not confirm a console reports any of it. Until one does, the mock's honest default is what the captures show: those keys are simply absent, and `present=false` puts each back to that state. See [the capture notes](https://github.com/robbeverhelst/unifi-reactor/blob/main/testdata/unifi/README.md#what-is-not-captured-yet).
 
 Per-device keys are opt-in in Reactor (`unifi.devices.perDeviceKeys`), so `device.<name>` will not appear until you ask for it — `devices` is published either way. A device is addressed by the slug of the name it was *captured* under even after `rename=`, which is what makes the rename rehearsal reversible: renaming makes the old key **vanish**, and the reconciler holds the last known state rather than treating it as a recovery.
 
@@ -135,7 +138,7 @@ Reactor never writes an outlet — `/outlets` is the mock's own dev surface, not
 
 `/internet` is the rehearsal you cannot reach through `/flip` or `/wan` at all, and that is the point of the key: the link stays up, the uplink is unchanged, and there is no internet. `/quality` drives the live uplink's `uptime_stats` — availability as a percentage and latency in milliseconds, which on real hardware are averages over the console's 24-hour uptime window and here move instantly. Both follow whichever uplink `/wan` says is live.
 
-> The statuses `/internet` will serve — `warning` and `error`, which map to `degraded` and `down` — have never been seen on a real console's `www` subsystem. Rehearsing them shows what Reactor does with them; it does not confirm a console ever sends them. See [the capture notes](../testdata/unifi/README.md#internet-reachability-and-link-quality-stathealth).
+> The statuses `/internet` will serve — `warning` and `error`, which map to `degraded` and `down` — have never been seen on a real console's `www` subsystem. Rehearsing them shows what Reactor does with them; it does not confirm a console ever sends them. See [the capture notes](https://github.com/robbeverhelst/unifi-reactor/blob/main/testdata/unifi/README.md#internet-reachability-and-link-quality-stathealth).
 
 ### Rehearsing a failover that has never been observed
 
@@ -158,7 +161,7 @@ curl -X POST 'http://localhost:9443/wan?link=primary'
 
 Add `&isp=<name>` to rehearse the carrier changing too; the default is an obviously synthetic one, because the real backup carrier has never been seen.
 
-The same hypotheses are asserted in `internal/providers/unifi/wan_test.go`, derived from the committed capture in code. Neither the mock nor those tests produce a fixture: settling which hypothesis is real needs hardware, and the [capture runbook](../testdata/unifi/README.md#capturing-a-real-failover) is the procedure for it.
+The same hypotheses are asserted in `internal/providers/unifi/wan_test.go`, derived from the committed capture in code. Neither the mock nor those tests produce a fixture: settling which hypothesis is real needs hardware, and the [capture runbook](https://github.com/robbeverhelst/unifi-reactor/blob/main/testdata/unifi/README.md#capturing-a-real-failover) is the procedure for it.
 
 Point the operator at it with `UNIFI_URL=http://<your-host>:9443 UNIFI_API_KEY=mock`. Use a LAN address rather than `localhost` so the pod can reach your machine.
 
@@ -229,7 +232,7 @@ The first command prints every field path in the body; the second keeps the ones
 
 ## Captured payloads
 
-Parsers are written and tested against real responses in [`testdata/unifi/`](../testdata/unifi/README.md), never against assumed formats. Capture them with:
+Parsers are written and tested against real responses in [`testdata/unifi/`](https://github.com/robbeverhelst/unifi-reactor/blob/main/testdata/unifi/README.md), never against assumed formats. Capture them with:
 
 ```sh
 UNIFI_URL=https://192.168.1.1 UNIFI_API_KEY=<key> ./hack/capture-unifi.sh
@@ -282,6 +285,6 @@ git tag v0.3.0 && git push origin v0.3.0
 
 That builds the multi-arch image, packages the chart with `version`/`appVersion` taken from the tag, pushes both to GHCR, and attaches `install.yaml` to a GitHub Release with generated notes. Image and chart versions always move together.
 
-Both artifacts are signed by cosign keyless signing, using the workflow's OIDC token — nothing to configure, no key anywhere. The image also gets an SBOM and build provenance. [SECURITY.md](../SECURITY.md) has the `cosign verify` invocations.
+Both artifacts are signed by cosign keyless signing, using the workflow's OIDC token — nothing to configure, no key anywhere. The image also gets an SBOM and build provenance. [SECURITY.md](https://github.com/robbeverhelst/unifi-reactor/blob/main/SECURITY.md) has the `cosign verify` invocations.
 
 Use conventional commits (`feat:`, `fix:`, `docs:`, …) — they drive the generated release notes.

@@ -1,8 +1,11 @@
-# UniFi Reactor — design specification
+---
+title: "Design specification"
+description: "The full design document: the problem, the state-first architecture, the provider seam, the action catalogue, and the reasoning behind decisions the rest of these docs only state."
+---
 
 > This is the original design document the project was built from, kept as the
 > record of *why* the architecture looks the way it does. For installation and
-> usage, start at the [README](../README.md). Where the two disagree, the README
+> usage, start at the [README](/). Where the two disagree, the README
 > describes what actually ships: notably the API group is
 > `reactor.robbeverhelst.com`, and UPS state arrived as part of the UniFi
 > provider rather than as a separate NUT provider, because UniFi consoles
@@ -662,7 +665,7 @@ Credentials should come from Kubernetes Secrets rather than being stored directl
 > - **Destinations are allowlisted at install time and refused by default.** `spec.actions` is writable by anyone who can create an `Automation`, and the request goes out with the operator's network position rather than the author's, so which hosts that is worth is not a per-Automation decision. The loopback interface and link-local addresses are refused whatever the allowlist says, and redirects are not followed.
 > - **Only the body is templated.** The URL and the headers are literal, because letting observed state edit the destination would give back the choice the allowlist exists to take away.
 >
-> Credentials come from a Secret in the `Automation`'s own namespace — never inline, never cross-namespace. See [SECURITY.md](../SECURITY.md#outbound-actions) for the threat model and the [README](../README.md#telling-you-what-happened) for the shape.
+> Credentials come from a Secret in the `Automation`'s own namespace — never inline, never cross-namespace. See [SECURITY.md](https://github.com/robbeverhelst/unifi-reactor/blob/main/SECURITY.md#outbound-actions) for the threat model and the [README](/actions/notifications-and-http/) for the shape.
 
 #### Named integrations over the generic action
 
@@ -762,7 +765,7 @@ A qBittorrent instance reached over HTTP has no Kubernetes identity to arbitrate
 over, no annotation to hold a baseline, and nothing the uninstall hook could
 reach if it did — that hook runs with no credentials and no destination
 allowlist, by design. The alternatives were considered and rejected in the
-[README](../README.md#it-is-a-level-in-the-world-and-an-edge-action-here):
+[README](/actions/external-services/#it-is-a-level-in-the-world-and-an-edge-action-here):
 status dies with the Automation, a tag written into the user's torrent client
 is both editable by them and unreadable by a client that never parses a response
 body, and a synthesized identity would arbitrate on string equality of a URL.
@@ -827,7 +830,7 @@ action; a private cooldown would be a second, weaker debounce invisible to
 everything beside it.
 
 Every endpoint on this path is **inferred**, and
-[docs/unifi-write-api.md](unifi-write-api.md) splits what was observed on a real
+[docs/unifi-write-api.md](/contributing/unifi-write-api/) splits what was observed on a real
 console from what was not. `hack/mock-unifi` serves and enforces the write
 endpoints so the path is exercised at all.
 
