@@ -332,6 +332,11 @@ type evaluation struct {
 	// observed, so a reaction can be measured from the observation that caused
 	// it rather than from the reconcile that noticed.
 	observedAt time.Time
+	// freshness is how old that observation is, and whether that is longer than
+	// this install allows. It is what turns "Reactor has gone blind" from a
+	// graph nobody is looking at into a sentence on the Automation that is
+	// still acting.
+	freshness engine.Freshness
 }
 
 // evaluate assesses an Automation's condition against the current observation.
@@ -349,6 +354,7 @@ func (r *AutomationReconciler) evaluate(automation *reactorv1alpha1.Automation) 
 	}
 	assessment.known = true
 	assessment.observedAt = observation.ObservedAt
+	assessment.freshness, _ = r.Store.Freshness(automation.Spec.When.Provider)
 
 	for key, want := range automation.Spec.When.State {
 		got, present := observation.State[key]
@@ -430,6 +436,11 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	inForce := automation.InForce()
 
 	assessment := r.evaluate(&automation)
+	// Reported whatever happens below, including on the two held-state paths:
+	// the age of the state a decision was taken against is the thing every
+	// other answer here is qualified by, and it must not be readable only from
+	// the paths that went well.
+	automation.Status.ObservedAt = observedAtOf(assessment)
 	if inForce && !assessment.known {
 		r.setCondition(&automation, conditionReady, metav1.ConditionFalse, "ProviderStateUnavailable",
 			fmt.Sprintf("no state observed yet for provider %q", automation.Spec.When.Provider))
@@ -512,8 +523,7 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	r.reportTransition(&automation, matching != wasMatching, matching)
 
 	if inForce {
-		r.setCondition(&automation, conditionReady, metav1.ConditionTrue, "Reconciled",
-			"automation evaluated against observed state")
+		r.setReadyCondition(&automation, assessment)
 		r.setAppliedCondition(&automation, outcomes)
 	} else {
 		r.setOutOfForceConditions(&automation)
@@ -710,6 +720,57 @@ func targetStatuses(outcomes []targetOutcome) []reactorv1alpha1.TargetStatus {
 		})
 	}
 	return statuses
+}
+
+// observedAtOf is when the state a decision was taken against was read from the
+// provider. Absent until something has been observed at all, which is a
+// different thing from an observation that is old.
+func observedAtOf(assessment evaluation) *metav1.Time {
+	if assessment.observedAt.IsZero() {
+		return nil
+	}
+	at := metav1.NewTime(assessment.observedAt)
+	return &at
+}
+
+// setReadyCondition reports whether this Automation is valid, reconciling, and
+// deciding against an observation recent enough to be worth deciding against.
+//
+// The stale case is deliberately a report and not a behaviour. Reactor goes on
+// acting on the last state it has, because withdrawing state it can no longer
+// confirm would release claims during exactly the incident that took the
+// console away — the same rule, and the same reason, as holding last known
+// state when a key stops being reported. What changes is that it says so.
+//
+// It is Warning for the reason StateKeyUnavailable is: an observation that has
+// stopped arriving is not a resting place. Somebody has to decide whether the
+// console is coming back, and until they do, every decision on this object is
+// being taken against something nothing has confirmed since the time in the
+// message.
+//
+// The message names the observation rather than its age on purpose. An age
+// changes every fifteen seconds, and a condition whose message changes every
+// fifteen seconds is a status write and a LastTransitionTime that say something
+// happened when nothing did.
+func (r *AutomationReconciler) setReadyCondition(
+	automation *reactorv1alpha1.Automation,
+	assessment evaluation,
+) {
+	if !assessment.freshness.Stale {
+		r.setCondition(automation, conditionReady, metav1.ConditionTrue, "Reconciled",
+			"automation evaluated against observed state")
+		return
+	}
+
+	provider := automation.Spec.When.Provider
+	metrics.StaleDecision(provider)
+	message := fmt.Sprintf(
+		"provider %q has not been observed since %s, past the %s this install allows; "+
+			"still acting on the state it last reported",
+		provider, assessment.freshness.ObservedAt.UTC().Format(time.RFC3339), assessment.freshness.Bound)
+	r.eventOnNewReason(automation, conditionReady, corev1.EventTypeWarning,
+		reasonObservationStale, actionEvaluate, "%s", message)
+	r.setCondition(automation, conditionReady, metav1.ConditionFalse, reasonObservationStale, message)
 }
 
 // setAppliedCondition reports whether this Automation's intent is the one in

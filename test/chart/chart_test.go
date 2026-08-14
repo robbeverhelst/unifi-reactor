@@ -45,8 +45,11 @@ const (
 	// allowlist and the permission it implies appear in the rendered release.
 	envAllowedDestinations = "REACTOR_ACTION_ALLOWED_DESTINATIONS"
 	envAllowedWLANs        = "UNIFI_ACTIONS_ALLOWED_WLANS"
-	envAllowedPoEPorts     = "UNIFI_ACTIONS_ALLOWED_POE_PORTS"
-	secretsRule            = `resources: ["secrets"]`
+	// envMaxObservationAge is how the bound on a decision's staleness appears
+	// in the rendered release, and its absence is how "unbounded" appears.
+	envMaxObservationAge = "UNIFI_MAX_OBSERVATION_AGE"
+	envAllowedPoEPorts   = "UNIFI_ACTIONS_ALLOWED_POE_PORTS"
+	secretsRule          = `resources: ["secrets"]`
 	// tokenReviews is how the metrics endpoint's authn/authz filter appears in
 	// the rendered RBAC.
 	tokenReviews = "tokenreviews"
@@ -216,6 +219,21 @@ func TestLogLevelIsSettable(t *testing.T) {
 	}
 	if got := render(t); !strings.Contains(got, "--zap-log-level=info") {
 		t.Fatal("the default log level is not passed at all, leaving it at the binary's own default")
+	}
+}
+
+// TestMaxObservationAgeIsOptIn covers the one thing this value must not do on
+// an upgrade: start reporting a fault that was always there. Without it there
+// is no such thing as an observation that is too old, so an install that never
+// set it must not receive a bound.
+func TestMaxObservationAgeIsOptIn(t *testing.T) {
+	if got := render(t, unifiURL); strings.Contains(got, envMaxObservationAge) {
+		t.Fatal("a maximum observation age is set by default, so upgrading would make automations " +
+			"report ObservationStale for a console that was always this slow")
+	}
+	got := render(t, unifiURL, "unifi.maxObservationAge=5m")
+	if !strings.Contains(got, envMaxObservationAge) || !strings.Contains(got, `value: "5m"`) {
+		t.Fatal("unifi.maxObservationAge did not reach the operator's environment")
 	}
 }
 

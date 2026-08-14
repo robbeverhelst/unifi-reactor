@@ -205,6 +205,10 @@ func (in *AutomationStatus) DeepCopyInto(out *AutomationStatus) {
 			(*out)[key] = val
 		}
 	}
+	if in.ObservedAt != nil {
+		in, out := &in.ObservedAt, &out.ObservedAt
+		*out = (*in).DeepCopy()
+	}
 	if in.LastTransition != nil {
 		in, out := &in.LastTransition, &out.LastTransition
 		*out = new(StateTransition)

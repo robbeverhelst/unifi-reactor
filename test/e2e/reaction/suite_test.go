@@ -27,7 +27,9 @@ package reaction
 
 import (
 	"fmt"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -57,6 +59,10 @@ const (
 	// pollInterval is how often the operator observes the console. Short
 	// enough to keep the suite quick, long enough to be a real poll.
 	pollInterval = "2s"
+	// maxObservationAge is how old the observed state may get before every
+	// automation reports ObservationStale. Fifteen consecutive failed polls,
+	// which nothing but a console deliberately taken away reaches.
+	maxObservationAge = "30s"
 
 	// deploymentKind is how a target is named in kubectl and in status refs.
 	deploymentKind = "deployment"
@@ -105,6 +111,7 @@ const (
 	upsLoadHigh        = "high"
 	internetOK         = "ok"
 	internetDown       = "down"
+	upsOnline          = "online"
 	devicesAllOnline   = "all-online"
 	devicesDegraded    = "degraded"
 	deviceOnline       = "online"
@@ -120,6 +127,13 @@ const (
 	poeInsufficient    = "insufficient"
 	outletOn           = "on"
 	outletOff          = "off"
+
+	// witness is an automation that claims nothing and only reports what it
+	// sees, which is how the suite asks Reactor whether it has caught up with
+	// the console. witnessTarget is the workload it names — nothing else
+	// touches it, and a suspended automation writes to nothing anyway.
+	witness       = "console-witness"
+	witnessTarget = "console-witness-target"
 
 	// settleWindow is how long a workload must hold a value for the suite to
 	// accept that nothing is going to move it. It spans several polls and at
@@ -175,7 +189,7 @@ var _ = BeforeSuite(func() {
 	Eventually(mock.Reachable).Should(Succeed(), "the mock console is not reachable over the Kind port mapping")
 
 	By("starting from a known console state")
-	resetConsole()
+	putConsoleAtRest()
 
 	By("installing the chart")
 	_, err = cluster.Kubectl("-n", releaseNamespace, "create", "secret", "generic",
@@ -189,6 +203,12 @@ var _ = BeforeSuite(func() {
 		"--set", "unifi.url="+harness.MockURL(releaseNamespace),
 		"--set", "unifi.insecureSkipVerify=false",
 		"--set", "unifi.pollInterval="+pollInterval,
+		// Empty in the chart, and set here: the suite asserts that an automation
+		// says how old the state it is deciding against is once the console
+		// stops answering — and goes on holding its target while it says it.
+		// Comfortably above any normal hiccup at a 2s poll, so only a console
+		// that is deliberately taken away reaches it.
+		"--set", "unifi.maxObservationAge="+maxObservationAge,
 		// Off by default in the chart, and on here: the suite asserts that
 		// Reactor declines a workload a HorizontalPodAutoscaler already drives,
 		// which is exactly the behaviour this value turns on.
@@ -202,7 +222,42 @@ var _ = BeforeSuite(func() {
 		"--set", "log.format=json",
 		"--wait", "--timeout=180s")
 	Expect(err).NotTo(HaveOccurred())
+
+	By("applying the witness that tells the suite when Reactor has caught up with the console")
+	Expect(cluster.Apply(workload(witnessTarget, 1))).To(Succeed())
+	Expect(cluster.Apply(witnessAutomation())).To(Succeed())
+	awaitConsoleObserved()
 })
+
+// witnessAutomation renders the automation resetConsole waits on: suspended, so
+// it is out of force and claims nothing, and naming every key the reset
+// restores so that its status answers "has Reactor seen this yet?".
+//
+// Suspended is exactly the right shape and not a trick. A suspended automation
+// is documented as one that goes on observing and reporting while claiming
+// nothing — which is what makes it safe to leave in place beside every other
+// spec in this suite, and why it can never be the reason one of them fails.
+func witnessAutomation() string {
+	var state strings.Builder
+	for _, key := range slices.Sorted(maps.Keys(consoleAtRest)) {
+		fmt.Fprintf(&state, "      %s: %q\n", key, consoleAtRest[key])
+	}
+	return fmt.Sprintf(`apiVersion: reactor.robbeverhelst.com/v1alpha1
+kind: Automation
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  suspend: true
+  when:
+    provider: unifi
+    state:
+%s  actions:
+    - type: kubernetes.scale
+      target: {kind: Deployment, name: %s}
+      replicas: 0
+`, witness, appsNamespace, state.String(), witnessTarget)
+}
 
 var _ = AfterSuite(func() {
 	if cluster == nil {
@@ -218,10 +273,67 @@ var _ = AfterSuite(func() {
 	}
 })
 
+// consoleAtRest is what the keys putConsoleAtRest restores read as once Reactor
+// has observed the reset. It is what the witness automation below watches for.
+//
+// It names the keys that are always PRESENT after a reset, which is all of them
+// bar three: firmware, temperature and poe reset to "not reported at all", and
+// an absent key cannot bleed into the next suite anyway — an automation that
+// cannot see a key holds its last matching, which for one that has just been
+// created is false. wan.quality and isp are left out for the opposite reason:
+// they are derived from probes and lookups rather than restored to a value.
+var consoleAtRest = map[string]string{
+	keyWAN:        wanPrimary,
+	keyUPS:        upsOnline,
+	keyUPSBattery: batteryNormal,
+	keyUPSRuntime: upsRuntimeAmple,
+	keyUPSLoad:    upsLoadNormal,
+	keyInternet:   internetOK,
+	keyDevices:    devicesAllOnline,
+	// warning, not ok: the capture has one of three access points
+	// disconnected, so a console put back to it is half-broken by construction.
+	// The fleet specs start by fixing that; a reset does not.
+	keyWiFi:   wifiWarning,
+	keyOutlet: outletOn,
+}
+
 // resetConsole returns the rehearsed console to mains power on the primary
-// uplink, so every spec starts from the same place regardless of what the one
-// before it rehearsed.
+// uplink and does not come back until Reactor has observed that, so every spec
+// starts from a console Reactor already agrees with rather than from one it is
+// about to.
+//
+// The waiting is the point, and it is not test hygiene. Writing to the console
+// changes what is true; it does not change what Reactor is acting on. Between
+// the two there is a window bounded by the poll interval times the debounce
+// samples of the slowest key touched — a real, documented property of the
+// product, not an artefact of the harness. A suite that applies an automation
+// inside that window is applying it against the PREVIOUS suite's state, and
+// what it then observes is a reaction to a console that no longer exists.
+//
+// That is what made three of these suites intermittently red, and it is why the
+// fix belongs here rather than as a defensive reset in every BeforeAll. One
+// place has to know that the window exists; seven places quietly working around
+// it is how it stops being known at all.
 func resetConsole() {
+	putConsoleAtRest()
+	awaitConsoleObserved()
+}
+
+// awaitConsoleObserved blocks until Reactor reports every key the reset
+// restored at its at-rest value, which is the only evidence available that the
+// window above has closed.
+func awaitConsoleObserved() {
+	Eventually(func(g Gomega) {
+		observer := automationOf(g, witness)
+		g.Expect(observer.Status.ObservedState).To(Equal(consoleAtRest))
+		g.Expect(observer.Status.Matching).To(BeTrue())
+	}).Should(Succeed(), "Reactor is still acting on the console state the previous spec left behind")
+}
+
+// putConsoleAtRest performs the writes, without waiting for anyone to notice
+// them. It is separate only for the one caller that runs before the operator
+// exists at all.
+func putConsoleAtRest() {
 	Expect(mock.WAN(wanPrimary)).To(Succeed())
 	// runtime and output are put back to the captured figures explicitly: the
 	// mock holds an override until it is told otherwise, and a spec that

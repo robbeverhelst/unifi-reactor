@@ -58,6 +58,17 @@ const (
 	// is not a resting place: the hardware publishing a key has gone, and
 	// somebody has to decide whether it is coming back.
 	reasonStateKeyUnavailable = "StateKeyUnavailable"
+	// reasonObservationStale is the adjacent case, and a Warning for the same
+	// reason. There the console answered and left a key out; here it has
+	// stopped answering, so every key is as old as the last reply. Both hold
+	// the last known state and go on acting on it, because losing sight of the
+	// world is not evidence about the world — and both have to say so, or the
+	// only difference between Reactor working and Reactor blind is a graph.
+	//
+	// It is raised only on an install that set unifi.maxObservationAge. Without
+	// a bound there is no such thing as too old, and inventing one would make
+	// an upgrade start reporting a fault that was always there.
+	reasonObservationStale = "ObservationStale"
 	// reasonRetryBudgetExhausted is raised once, when Reactor stops retrying a
 	// target and starts waiting for the next state change instead.
 	reasonRetryBudgetExhausted = "RetryBudgetExhausted"

@@ -1169,6 +1169,41 @@ Debouncing happens in the shared state store, so every automation sees the same 
 
 This is the setting to revisit the moment you write a [`kubernetes.restart`](#restart-is-why-debounce-matters): scaling is idempotent and a flap costs nothing, while a restart under a flapping key is a rollout per poll.
 
+### How long Reactor may act on state that has already changed
+
+Debounce is half of an answer to a question worth asking outright, because a policy engine acting on something that stopped being true is the failure everything else here is arranged to avoid. **There are two windows, and only one of them is bounded by anything.**
+
+**A value that changed** reaches every Automation within **`pollInterval` × the key's debounce samples**. Worst case is the change landing just after a poll, then needing its samples on the poll cadence: `wan` at the defaults is 30 seconds, `internet` is 90. Both terms are yours, and that product *is* the bound — there is deliberately nothing else in the path. The reconciler re-evaluates every 15 seconds regardless and is woken immediately on a transition, so it contributes latency, not staleness.
+
+The webhook fast path narrows the **first** term only. A delivery brings the next observation forward, and while a value is still proving itself against its debounce threshold a delivery is [ignored outright](#webhook-fast-path). That is not an oversight: a delivery only ever says *look now*, and if it could also supply the samples that promote a value, anyone who can reach the endpoint could fast-forward a key straight through the settling time you asked for.
+
+**A console that stops answering** has no such window. A failed observation is logged and dropped — the next poll is the recovery mechanism — so the store keeps reporting the last state it has, and every reconcile re-decides against it for as long as the console is away. That is **correct and stays correct**: withdrawing state Reactor can no longer confirm would release claims during exactly the incident that took the console offline, which is the same reason a key that vanishes gets [`StateKeyUnavailable`](docs/troubleshooting.md#2-statekeyunavailable-and-held-state) and held state rather than an `onExit`.
+
+What was missing is that the second case said nothing. `StateKeyUnavailable` announces itself on the Automation; a console that has gone quiet announced itself only in `time() - reactor_last_observation_timestamp_seconds`, which needs metrics enabled and somebody watching. So:
+
+```yaml
+unifi:
+  pollInterval: 30s
+  maxObservationAge: 5m    # empty by default: unbounded, and silent
+```
+
+Past that age, every Automation driven by the provider reports it, and **goes on acting**:
+
+```text
+Ready  False  ObservationStale
+provider "unifi" has not been observed since 2026-08-14T09:12:41Z, past the 5m0s this
+install allows; still acting on the state it last reported
+```
+
+```yaml
+status:
+  observedAt: "2026-08-14T09:12:41Z"   # always reported; this is what every field below is only as current as
+```
+
+plus a Warning `Event` and `reactor_stale_decisions_total`, which is the attributable half of the observation gauge: the gauge says Reactor went blind, this says automations were still deciding while it was.
+
+It is off by default and it changes no behaviour when on — no claim is released, no `onExit` runs, no target moves. Set it against `pollInterval` and the samples above rather than in isolation: a changed value already takes up to 90 seconds to be believed at the defaults, so anything under about four poll intervals reports a slow console rather than a blind operator.
+
 ## Knowing it is working
 
 Reactor's worst failure is **silent and fails open**. If it stops observing — an expired API key, a rebooted console, a network partition — every automation quietly stops reacting. Nothing in the cluster notices, and the next real outage simply does not get handled. There is no error to find, because nothing errored.
@@ -1192,6 +1227,7 @@ helm upgrade reactor ... \
 | Metric | Type | Answers |
 | --- | --- | --- |
 | `reactor_last_observation_timestamp_seconds` | gauge | is Reactor still seeing anything |
+| `reactor_stale_decisions_total` | counter | how much deciding it did while it was not ([above](#how-long-reactor-may-act-on-state-that-has-already-changed)) |
 | `reactor_observations_total` | counter | how often polling succeeds and fails |
 | `reactor_state_info` | gauge 0/1 | what each state key holds right now |
 | `reactor_state_transitions_total` | counter | how often failover actually happens |
@@ -1323,6 +1359,7 @@ Chart values ([full reference](charts/reactor/README.md)):
 | `unifi.url` | — | UniFi console base URL; the provider stays disabled until this is set |
 | `unifi.site` | `default` | UniFi Network site |
 | `unifi.pollInterval` | `30s` | how often WAN, internet and UPS state are observed |
+| `unifi.maxObservationAge` | `""` | how old the observed state may get before every automation reports `ObservationStale` and says so. Empty is unbounded — and silent ([above](#how-long-reactor-may-act-on-state-that-has-already-changed)) |
 | `unifi.insecureSkipVerify` | `true` | accept the console's self-signed certificate |
 | `unifi.existingSecret` | `unifi-reactor-credentials` | Secret holding `UNIFI_API_KEY`; re-read on every poll, so rotating the key needs no restart |
 | `log.level` | `info` | `debug` adds the per-observation lines used to work out why an automation did not fire |
@@ -1372,6 +1409,13 @@ See the [chart reference](charts/reactor/README.md#webhook-fast-path-optional-of
 ## Stability
 
 Early days: the API group is `v1alpha1` and the project is pre-1.0, so expect breaking changes between minor versions.
+
+### What a v1.1 user has to change
+
+Nothing is required, and no workload changes what it does. Two things become visible that were not:
+
+- **`unifi.maxObservationAge` is new and empty, which is exactly what you have today** — unbounded, and silent, if the console stops answering. Setting it makes every automation report `Ready=False` with reason `ObservationStale` past that age, raise a Warning `Event`, and publish `reactor_stale_decisions_total`. It changes nothing about what is written: no claim is released and no `onExit` runs, because going blind must not scale workloads back up mid-outage ([why](#how-long-reactor-may-act-on-state-that-has-already-changed)). Start at four or five poll intervals.
+- **`status.observedAt` is new on every Automation**, additive and always populated once anything has been observed. If you have alerting or scripts that treat an unexpected status field as drift, this is the one to expect.
 
 **`spec.trigger` — the event-shaped trigger kind — has been removed from `v1alpha1`.** Up to v0.3.0 the CRD accepted it, CEL-validated it, and then ignored it: no version of the engine has ever processed an event trigger. A v1 whose API accepts configuration it silently drops is worse than one that does not offer the field at all, so it is gone until it is real. Two things had to exist before it could come back, and one of them now does:
 

@@ -860,6 +860,23 @@ type AutomationStatus struct {
 	// +optional
 	ObservedState map[string]string `json:"observedState,omitempty"`
 
+	// ObservedAt is when the provider state above was read from the provider,
+	// which is not the same as when this Automation last reconciled.
+	//
+	// It is the qualifier on every other field here. A decision is only as
+	// current as the observation it was taken against, and the two windows that
+	// separate them are very different: a value that CHANGED reaches this
+	// object within one poll interval times the samples its key must hold for,
+	// while a provider that has stopped answering leaves this timestamp
+	// standing still and every decision below being re-taken against it. Past
+	// the age the install allows, Ready goes False with reason
+	// ObservationStale — and Reactor still acts, because withdrawing state it
+	// cannot confirm would release claims mid-incident.
+	//
+	// Absent until the provider has reported anything at all.
+	// +optional
+	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
+
 	// LastTransition is the state change that last flipped Matching.
 	// +optional
 	LastTransition *StateTransition `json:"lastTransition,omitempty"`

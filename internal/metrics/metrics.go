@@ -220,6 +220,18 @@ var (
 			"carries the detail, and a rising count is how a wrong derivation announces itself.",
 	}, []string{labelProvider, labelSignal})
 
+	// staleDecisions is the other half of lastObservation, and the half that is
+	// attributable. The gauge says Reactor has gone blind; this says automations
+	// were still deciding while it was, which is the part that reaches a
+	// workload. It is published only by an install that set a bound, so on every
+	// other install it is absent rather than zero.
+	staleDecisions = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "reactor_stale_decisions_total",
+		Help: "Reconciles that acted on provider state older than the age this install allows. " +
+			"Reactor deliberately keeps acting — going blind must not release a claim mid-incident — " +
+			"so this counts decisions taken against state nothing has confirmed since.",
+	}, []string{labelProvider})
+
 	// reactionLatency is the metric that would have caught the v0.3.0 latency
 	// bug the week it shipped, instead of by hand-reading log timestamps.
 	reactionLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
@@ -247,6 +259,7 @@ func init() {
 		actions,
 		actionDuration,
 		providerSignals,
+		staleDecisions,
 		reactionLatency,
 		webhookDeliveries,
 	)
@@ -377,6 +390,14 @@ func ActionSkipped(actionType, kind string, onExit bool) {
 // the outside world and would be unbounded here.
 func SignalsDisagreed(provider, signal string) {
 	providerSignals.WithLabelValues(provider, signal).Inc()
+}
+
+// StaleDecision records one reconcile taken against state older than the age
+// this install allows. It is called per reconcile rather than per transition
+// because that is the question: not how often Reactor went blind, but how much
+// deciding it did while it was.
+func StaleDecision(provider string) {
+	staleDecisions.WithLabelValues(provider).Inc()
 }
 
 // ReactionCompleted records how long it took to get from the observation that

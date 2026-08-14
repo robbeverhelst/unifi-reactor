@@ -934,6 +934,7 @@ publishing — which fails as silence rather than as an error.
 | `unifi.url` | `""` | UniFi console base URL (required to enable the provider) |
 | `unifi.site` | `default` | UniFi Network site |
 | `unifi.pollInterval` | `30s` | WAN state poll interval (polling is the source of truth) |
+| `unifi.maxObservationAge` | `""` | How old the observed state may get before every automation reports `Ready=False` with reason `ObservationStale`. Empty is unbounded, which is the pre-v1.2 behaviour. It changes what Reactor *says* and never what it writes — a console that has gone quiet must not release the claims it made while it was answering. Set it to four or five `pollInterval`s |
 | `unifi.insecureSkipVerify` | `true` | Accept the console's self-signed certificate |
 | `unifi.existingSecret` | `unifi-reactor-credentials` | Secret containing `UNIFI_API_KEY`, mounted and re-read per poll |
 | `log.level` | `info` | `debug`, `info`, `error`, or a V-level number |

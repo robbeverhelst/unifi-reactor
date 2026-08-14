@@ -21,6 +21,30 @@ unifi:
   site: default
   # How often to poll WAN state. Polling is the source of truth for state triggers.
   pollInterval: 30s
+  # How old the observed state may get before every automation driven by this
+  # provider reports Ready=False with reason ObservationStale, raises a Warning
+  # Event, and counts reactor_stale_decisions_total.
+  #
+  # Empty — the default — means unbounded, which is what every install had
+  # before this value existed: if the console stops answering, automations go on
+  # acting on the last state it reported and nothing on them says how old it is.
+  # The only signal is the fleet-wide
+  # `time() - reactor_last_observation_timestamp_seconds`, which needs metrics
+  # enabled and somebody watching a graph.
+  #
+  # This bounds what Reactor SAYS, never what it does. A stale observation does
+  # not release a claim, does not run onExit, and does not change what any target
+  # is held at — that would scale workloads back up during the outage that took
+  # the console away, which is precisely the failure holding last known state
+  # exists to prevent. It is the same rule as StateKeyUnavailable, applied to the
+  # whole observation rather than to one key.
+  #
+  # Set it against pollInterval and the debounce samples below rather than in
+  # isolation. A changed value already takes up to pollInterval times its key's
+  # sample count to be believed — 90s for `internet` at the defaults — so
+  # anything under about four poll intervals reports a slow console rather than a
+  # blind operator. 5m at the default 30s poll is a reasonable starting point.
+  maxObservationAge: ""
   # UniFi OS consoles serve a self-signed certificate by default.
   insecureSkipVerify: true
   ups:

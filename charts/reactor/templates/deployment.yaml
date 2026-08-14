@@ -77,6 +77,12 @@ spec:
               value: {{ .Values.unifi.site | quote }}
             - name: UNIFI_POLL_INTERVAL
               value: {{ .Values.unifi.pollInterval | quote }}
+            {{- with .Values.unifi.maxObservationAge }}
+            # Only set when the operator asked for a bound. Unset means
+            # unbounded, which is what every install had before this existed.
+            - name: UNIFI_MAX_OBSERVATION_AGE
+              value: {{ . | quote }}
+            {{- end }}
             - name: UNIFI_INSECURE_SKIP_VERIFY
               value: {{ .Values.unifi.insecureSkipVerify | quote }}
             - name: UNIFI_UPS_LOW_BATTERY_PERCENT
