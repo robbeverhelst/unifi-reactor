@@ -589,6 +589,23 @@ kubectl delete crd automations.reactor.robbeverhelst.com
 
 *Deleting the CRD while Automations still carry finalizers.* Nothing is left to remove them and deletion hangs forever. Clear the finalizers first (the patch above, over every Automation), then delete the CRD.
 
+**And one case where the finalizer fired and could not finish.** Different from the three above: Reactor is running, the finalizer is doing exactly its job, and the release itself keeps failing — the target has been deleted, RBAC changed under it, an admission webhook is refusing the write. Each failed attempt is counted in `status.releaseAttempts` and reported as `Applied=False` with reason `ReleaseFailed`, carrying the error:
+
+```sh
+kubectl -n media get automation pause-downloads-on-backup-wan -o jsonpath=\
+'{.status.releaseAttempts}{"\n"}{.status.conditions[?(@.type=="Applied")].message}{"\n"}'
+```
+
+It is bounded at three attempts, 5 then 10 seconds apart, after which Reactor removes the finalizer anyway and lets the object go:
+
+```text
+Warning  ReleaseFailed  could not hand targets back after 3 attempts, deleting anyway: ...
+```
+
+That is the same trade this whole section is about, made in the other direction: a stranded workload is recoverable from its `baseline-replicas` annotation, and a resource stuck `Terminating` forever is not. So treat that Event as the one that sends you to the restore commands at the top of this section — it is the only case where the finalizer existed, ran, and still left a workload behind.
+
+You will never catch `releaseAttempts` at 3. The third failure is the reconcile that removes the finalizer, so the object is deleted before that value could be written; on a live object it reads 1 or 2, and only ever while it is `Terminating`.
+
 **What is explicitly not covered:** the controller being deleted outright, permanently evicted, or the cluster rebuilt. Reactor does not supervise its own absence. The baseline annotation on the target is the answer in those cases, and it is the reason it lives there.
 
 > The finalizer, the pre-delete hook, and `uninstall.releaseClaims` land with the target-ownership change. On v0.3.0 there is no finalizer and no release-on-delete: deleting an Automation strands its target, and the manual restore above is the only route.

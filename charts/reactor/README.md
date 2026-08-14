@@ -142,6 +142,14 @@ kubectl patch automation <name> -n <namespace> \
   --type=merge -p '{"metadata":{"finalizers":[]}}'
 ```
 
+A delete the operator *does* process can still fail to hand the workload back —
+the target is gone, RBAC changed under it, an admission webhook refuses the
+write. That is bounded rather than retried forever: three attempts, counted in
+the Automation's `status.releaseAttempts`, and then the finalizer is removed
+anyway with a Warning `ReleaseFailed` Event naming the error. A workload left
+where it was is recoverable from its `baseline-replicas` annotation; a resource
+stuck `Terminating` is not.
+
 ## HorizontalPodAutoscalers (optional, off by default)
 
 Reactor writes `spec.replicas`. So does an HPA, from metrics, and neither is

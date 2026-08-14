@@ -396,6 +396,16 @@ And an honest limit: the general problem is not solvable by detection. KEDA, a G
 
 Deleting an automation while it is holding a workload down hands the workload back rather than stranding it — a finalizer releases the claim first. Removing the policy removes its effect, even mid-outage, so an automation deleted while the UPS is still on battery brings its workload back up.
 
+That release can fail — the target has been deleted, RBAC changed under it, an admission webhook is refusing the write — and the finalizer is bounded so that it can never be the reason a resource does not delete. It tries three times, 5 then 10 seconds apart, counting the failures in `status.releaseAttempts`, and then removes itself anyway:
+
+```text
+Warning  ReleaseFailed  could not hand targets back after 3 attempts, deleting anyway: ...
+```
+
+That Event is the signal to go and look at the target by hand, because it is the one case where the finalizer existed, ran, and still left something behind. The trade is deliberate: a workload left where it was is recoverable from its `baseline-replicas` annotation, and a resource stuck `Terminating` forever is not.
+
+`status.releaseAttempts` only ever exists on an automation that is mid-deletion, and it stops at 2. The third failure is the reconcile that removes the finalizer, so the object is gone before a 3 could be written to it.
+
 `helm uninstall` is the case worth understanding, because Helm does **not** delete the `Automation` CRD or your `Automation` resources. They survive the uninstall and simply stop reconciling. A pre-delete hook therefore releases every claim before the operator goes away, and removes the finalizers, which nothing would be left to service:
 
 ```sh
