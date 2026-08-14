@@ -35,13 +35,31 @@ const (
 	TypeNtfy        = "notification.ntfy"
 	TypeDiscord     = "notification.discord"
 	TypeSlack       = "notification.slack"
+	// TypeHomeAssistant calls one Home Assistant service. It is a shape over
+	// http.request rather than a second transport: the same allowlist, the same
+	// dialer floor, the same Secret rules. What it adds is that the path is
+	// built from a domain and a service rather than written out, so the action
+	// says what it is and cannot become a general request to an allowed host.
+	TypeHomeAssistant = "homeassistant.service"
+	// TypeQBittorrentPause and TypeQBittorrentResume pause and resume every
+	// torrent on one qBittorrent instance.
+	//
+	// They are named as verbs rather than as one type with a paused flag, and
+	// that is the whole design argument in the naming: an adjective is a level
+	// and gets arbitrated, a verb is an occurrence and does not. Pausing is a
+	// level in the world and an occurrence here, because the target is not a
+	// Kubernetes object and there is nowhere to record the baseline a release
+	// would need. See the README.
+	TypeQBittorrentPause  = "qbittorrent.pause"
+	TypeQBittorrentResume = "qbittorrent.resume"
 )
 
-// IsOutbound reports whether an action type leaves the cluster, and is what the
-// controller uses to decide an action belongs to this package.
+// IsOutbound reports whether an action type leaves the cluster, and so whether
+// it is one this package sends.
 func IsOutbound(actionType string) bool {
 	switch actionType {
-	case TypeHTTPRequest, TypeNtfy, TypeDiscord, TypeSlack:
+	case TypeHTTPRequest, TypeNtfy, TypeDiscord, TypeSlack, TypeHomeAssistant,
+		TypeQBittorrentPause, TypeQBittorrentResume:
 		return true
 	}
 	return false
@@ -67,6 +85,13 @@ const (
 	// userAgent identifies Reactor to whatever it calls, so an operator reading
 	// an access log on the far end can tell what this traffic is.
 	userAgent = "unifi-reactor"
+	// headerCookie carries a session cookie back to the service that issued it,
+	// and is the only header this package sets from a response.
+	headerCookie = "Cookie"
+	// logoutTimeout bounds ending a session. It is short and deliberately not
+	// the action's own timeout: the action has already happened, and this is
+	// tidying up after it rather than part of it.
+	logoutTimeout = 3 * time.Second
 	// DefaultTimeout bounds one attempt at an outbound action when the
 	// Automation does not set spec.actions[].timeoutSeconds. It is shorter than
 	// the desired-state default because an edge action runs inside a reconcile
@@ -87,8 +112,45 @@ type Request struct {
 	// get, because a duplicate of an unknown POST is not noise, it is a second
 	// side effect.
 	Retryable bool
-	// Timeout bounds one attempt.
+	// Timeout bounds one attempt. In a session it bounds each leg separately.
 	Timeout time.Duration
+	// Session, when set, is a login performed immediately before this request
+	// and torn down immediately after it. Nil for everything that authenticates
+	// with a static credential, which is almost everything.
+	Session *Session
+}
+
+// Session is a login exchange wrapped around one request, for a service that
+// authenticates with a cookie it issues rather than with a token you hold.
+//
+// It exists because the rule everywhere else here — a credential is never held
+// longer than the request that uses it — is not automatically true of a
+// session. A session cookie is a bearer of the same authority as the password
+// that produced it, so caching one across reconciles would be exactly the thing
+// this package does not do with the password itself.
+//
+// So there is no cache and no session store. The login happens inside the one
+// action, the cookie lives in a local variable for the two or three requests
+// that need it, and Logout ends it on the server rather than leaving it to
+// expire. The cost is one extra round trip per action; the benefit is that the
+// rule holds as written, on both ends of the connection.
+//
+// The cookie is never logged, never put in status, never attached to an Event
+// and never reaches a template. Nothing but the origin escapes this package.
+type Session struct {
+	// Login establishes the session. Its response is read for one cookie and
+	// otherwise discarded like any other.
+	Login Request
+
+	// Cookie is the name of the cookie the login is expected to set. A login
+	// that answers 200 and sets no such cookie is a failure, not a success:
+	// that is how qBittorrent reports a rejected username or password.
+	Cookie string
+
+	// Logout ends the session. It is best effort — the action has already
+	// happened by the time it runs, and a session Reactor could not close is
+	// not a reason to report the action as failed. A zero URL skips it.
+	Logout Request
 }
 
 // Result describes a delivered request. It carries no response body and no full
@@ -149,26 +211,59 @@ func (c *Client) Enabled() bool { return !c.policy.Empty() }
 
 // Do sends the request, checking the destination first and retrying only a
 // request that has declared itself safe to repeat.
+//
+// A request carrying a Session is one unit: an attempt is the whole
+// login-act-logout exchange, and a retry logs in again rather than reusing a
+// cookie from the attempt that failed. That is the conservative reading — the
+// attempt may have failed precisely because the session was no longer good —
+// and it is what keeps a retry from being the one place a session outlives the
+// request it was made for.
 func (c *Client) Do(ctx context.Context, req Request) (Result, error) {
 	target, origin, err := c.policy.Check(req.URL)
 	if err != nil {
 		return Result{Origin: origin}, err
 	}
+	if req.Session == nil {
+		return c.repeat(ctx, origin, req.Retryable, func(ctx context.Context) (int, error) {
+			return c.attempt(ctx, target, req)
+		})
+	}
 
+	// Every leg is checked against the allowlist on its own. They come from one
+	// base address today, so this is belt and braces — but a session whose
+	// login went somewhere the allowlist never approved is exactly the shape of
+	// bug that would be invisible until it mattered.
+	endpoints, err := c.policy.checkSession(req.Session)
+	if err != nil {
+		return Result{Origin: origin}, err
+	}
+	return c.repeat(ctx, origin, req.Retryable, func(ctx context.Context) (int, error) {
+		return c.runSession(ctx, target, req, endpoints)
+	})
+}
+
+// repeat runs one attempt at a time until it succeeds, stops being worth
+// repeating, or runs out of attempts.
+func (c *Client) repeat(
+	ctx context.Context,
+	origin string,
+	retryable bool,
+	attempt func(context.Context) (int, error),
+) (Result, error) {
 	attempts := 1
-	if req.Retryable {
+	if retryable {
 		attempts = retryAttempts
 	}
 
 	var lastErr error
-	for attempt := 1; attempt <= attempts; attempt++ {
-		if attempt > 1 {
-			if err := wait(ctx, retryDelay<<(attempt-2)); err != nil {
-				return Result{Origin: origin, Attempts: int32(attempt - 1)}, lastErr
+	for try := 1; try <= attempts; try++ {
+		if try > 1 {
+			if err := wait(ctx, retryDelay<<(try-2)); err != nil {
+				return Result{Origin: origin, Attempts: int32(try - 1)}, lastErr
 			}
 		}
-		status, err := c.attempt(ctx, target, req)
-		result := Result{Origin: origin, Status: status, Attempts: int32(attempt)}
+		status, err := attempt(ctx)
+		result := Result{Origin: origin, Status: status, Attempts: int32(try)}
 		if err == nil {
 			return result, nil
 		}
@@ -194,17 +289,25 @@ func wait(ctx context.Context, d time.Duration) error {
 
 // attempt makes one request and classifies the outcome.
 func (c *Client) attempt(ctx context.Context, target *url.URL, req Request) (int, error) {
-	timeout := req.Timeout
-	if timeout <= 0 {
-		timeout = DefaultTimeout
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	ctx, cancel := context.WithTimeout(ctx, timeoutOf(req))
 	defer cancel()
 
+	response, err := c.send(ctx, target, req)
+	if err != nil {
+		return 0, err
+	}
+	defer drain(response)
+	return classify(response)
+}
+
+// send performs one request. The context must already carry the attempt's
+// timeout, because the caller owns the response — and so the reading of its
+// body, which the deadline has to outlive.
+func (c *Client) send(ctx context.Context, target *url.URL, req Request) (*http.Response, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, req.Method, target.String(), bytes.NewReader(req.Body))
 	if err != nil {
 		// Only reachable for a malformed method, which the CRD enum prevents.
-		return 0, errors.New("could not build the request")
+		return nil, errors.New("could not build the request")
 	}
 	httpReq.Header = req.Header.Clone()
 	if httpReq.Header == nil {
@@ -214,13 +317,14 @@ func (c *Client) attempt(ctx context.Context, target *url.URL, req Request) (int
 
 	response, err := c.http.Do(httpReq)
 	if err != nil {
-		return 0, sanitize(err)
+		return nil, sanitize(err)
 	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxResponseBody))
-		_ = response.Body.Close()
-	}()
+	return response, nil
+}
 
+// classify turns a status code into the outcome of an attempt, deciding what
+// is worth another try.
+func classify(response *http.Response) (int, error) {
 	switch {
 	case response.StatusCode >= 200 && response.StatusCode < 300:
 		return response.StatusCode, nil
@@ -229,6 +333,137 @@ func (c *Client) attempt(ctx context.Context, target *url.URL, req Request) (int
 	default:
 		return response.StatusCode, fmt.Errorf("responded %s", response.Status)
 	}
+}
+
+// drain reads a bounded prefix of a response so the connection can be reused,
+// and closes it. Nothing read here is kept: a response can echo a request back,
+// credentials included.
+func drain(response *http.Response) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxResponseBody))
+	_ = response.Body.Close()
+}
+
+func timeoutOf(req Request) time.Duration {
+	if req.Timeout <= 0 {
+		return DefaultTimeout
+	}
+	return req.Timeout
+}
+
+// sessionEndpoints are the checked login and logout URLs of one session.
+// logout is nil when the session declares none.
+type sessionEndpoints struct{ login, logout *url.URL }
+
+// checkSession validates every leg of a session against the allowlist before
+// any of them is dialled.
+func (p Policy) checkSession(session *Session) (sessionEndpoints, error) {
+	if session.Cookie == "" {
+		return sessionEndpoints{}, errors.New("a session names no cookie to look for")
+	}
+	if session.Login.Session != nil {
+		// Not reachable from any action here. It is refused rather than
+		// recursed into, because a login that needs a login is a configuration
+		// mistake and not a thing worth supporting.
+		return sessionEndpoints{}, errors.New("a session login may not itself need a session")
+	}
+
+	login, _, err := p.Check(session.Login.URL)
+	if err != nil {
+		return sessionEndpoints{}, err
+	}
+	endpoints := sessionEndpoints{login: login}
+	if session.Logout.URL != "" {
+		logout, _, err := p.Check(session.Logout.URL)
+		if err != nil {
+			return sessionEndpoints{}, err
+		}
+		endpoints.logout = logout
+	}
+	return endpoints, nil
+}
+
+// runSession logs in, performs the request with the session cookie, and ends
+// the session whatever the request did.
+func (c *Client) runSession(
+	ctx context.Context,
+	target *url.URL,
+	req Request,
+	endpoints sessionEndpoints,
+) (int, error) {
+	cookie, err := c.login(ctx, endpoints.login, *req.Session)
+	if err != nil {
+		return 0, err
+	}
+	defer c.logout(ctx, endpoints.logout, *req.Session, cookie)
+
+	authenticated := req
+	authenticated.Header = req.Header.Clone()
+	if authenticated.Header == nil {
+		authenticated.Header = http.Header{}
+	}
+	authenticated.Header.Set(headerCookie, cookie)
+	return c.attempt(ctx, target, authenticated)
+}
+
+// login performs the login leg and returns the session cookie as a Cookie
+// header value.
+//
+// A 200 that sets no cookie is a failure, and not a transient one: that is how
+// qBittorrent reports a wrong username or password, and a credential does not
+// get better by asking again.
+func (c *Client) login(ctx context.Context, target *url.URL, session Session) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeoutOf(session.Login))
+	defer cancel()
+
+	response, err := c.send(ctx, target, session.Login)
+	if err != nil {
+		return "", fmt.Errorf("logging in: %w", err)
+	}
+	defer drain(response)
+	if _, err := classify(response); err != nil {
+		return "", fmt.Errorf("logging in: %w", err)
+	}
+
+	for _, cookie := range response.Cookies() {
+		if cookie.Name != session.Cookie || cookie.Value == "" {
+			continue
+		}
+		// Rebuilt with the name and value only. A cookie parsed from a
+		// Set-Cookie header serializes back as a Set-Cookie header, attributes
+		// and all, which is not what belongs in a Cookie request header.
+		return (&http.Cookie{Name: cookie.Name, Value: cookie.Value}).String(), nil
+	}
+	return "", fmt.Errorf(
+		"the login was accepted but set no %q cookie, which is how a rejected username or password is reported",
+		session.Cookie)
+}
+
+// logout ends the session, best effort.
+//
+// It runs on a context detached from the caller's, because by the time it runs
+// the action's own deadline may be spent — and a session left open on the far
+// end is precisely what this exists to prevent. Its failure is not reported:
+// the action has already happened, and a session Reactor could not close is not
+// a reason to tell an operator the action did not work.
+func (c *Client) logout(ctx context.Context, target *url.URL, session Session, cookie string) {
+	if target == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), logoutTimeout)
+	defer cancel()
+
+	request := session.Logout
+	request.Header = request.Header.Clone()
+	if request.Header == nil {
+		request.Header = http.Header{}
+	}
+	request.Header.Set(headerCookie, cookie)
+
+	response, err := c.send(ctx, target, request)
+	if err != nil {
+		return
+	}
+	drain(response)
 }
 
 // transientError marks a failure worth another attempt — but only for a request

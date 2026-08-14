@@ -164,6 +164,33 @@ func defaultPort(scheme string) string {
 	return "80"
 }
 
+// endpointOn appends a fixed path to the base address of a service.
+//
+// It is what makes a named integration narrower than the http.request the same
+// allowlist entry already permits: the caller supplies the path segments, the
+// Automation supplies only the base, and the two are joined with escaping
+// rather than concatenated. A base may carry a path — an instance behind a
+// reverse proxy at /home-assistant is ordinary — but not a query or a fragment,
+// which on something described as a base address is a sign it is being used to
+// reach past the part of the URL Reactor controls.
+//
+// service names the integration for the error text, because "the url is not
+// valid" is not worth reading when an Automation has two of them.
+func endpointOn(base, service string, segments ...string) (string, error) {
+	parsed, err := url.Parse(base)
+	if err != nil {
+		// Deliberately not wrapping: a parse error quotes the whole input back,
+		// and this text reaches the Automation's status.
+		return "", fmt.Errorf("the %s url is not a valid URL", service)
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf(
+			"the %s url is the base address of the instance and takes no query or fragment; "+
+				"Reactor appends the path itself", service)
+	}
+	return parsed.JoinPath(segments...).String(), nil
+}
+
 // Empty reports whether the policy allows nothing at all, which is the default
 // and means outbound actions are switched off. Callers check it before
 // resolving credentials, so a disabled install never reads a Secret it has no

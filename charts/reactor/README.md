@@ -323,7 +323,7 @@ Worth knowing before switching it on:
 
 ## Outbound actions
 
-`http.request` and the `notification.*` action types send a request out of the cluster. Both are **off until you say where they may go**:
+`http.request`, the `notification.*` types and the named integrations (`homeassistant.service`, `qbittorrent.pause` / `qbittorrent.resume`) send a request out of the cluster. All of them are **off until you say where they may go**, and all of them go through one client, so this one value covers every current and future outbound action type:
 
 ```yaml
 actions:
@@ -341,7 +341,7 @@ kubectl -n media get automation notify-on-failover -o jsonpath='{.status.edgeAct
 # outbound actions are disabled on this install: no destination is allowed, so https://ntfy.example.com:443 was refused
 ```
 
-**Why this is a chart value and not an Automation field.** Anyone who can create an `Automation` in their own namespace can ask Reactor to make a request, and it goes out from inside the cluster with the operator's network position rather than theirs — reaching `ClusterIP` Services, your gateway, and whatever else this pod can route to. Which destinations that is worth is a cluster decision, so it lives here. [SECURITY.md](../../SECURITY.md#outbound-actions-http-request-and-notification) has the full threat model.
+**Why this is a chart value and not an Automation field.** Anyone who can create an `Automation` in their own namespace can ask Reactor to make a request, and it goes out from inside the cluster with the operator's network position rather than theirs — reaching `ClusterIP` Services, your gateway, and whatever else this pod can route to. Which destinations that is worth is a cluster decision, so it lives here. [SECURITY.md](../../SECURITY.md#outbound-actions) has the full threat model.
 
 Two things are refused regardless of what you list: the loopback interface, and link-local addresses (`169.254.0.0/16`, `fe80::/10`) where cloud instance metadata services live. Redirects are never followed. Private ranges are **not** blocked — an ntfy box on the LAN is a legitimate destination and nothing can tell it apart from a `ClusterIP` Service, which is why the list is default-deny.
 
@@ -371,9 +371,10 @@ kubectl -n media create secret generic ntfy-credentials \
 
 | Key | Used for |
 | --- | --- |
-| `url` | The destination. Required for `notification.*`; an alternative to `request.url` for `http.request` |
-| `authorization` | Sent as the `Authorization` header |
+| `url` | The destination. Required for `notification.*`; an alternative to `request.url` for `http.request` and to `homeAssistant.url` for `homeassistant.service` |
+| `authorization` | Sent as the `Authorization` header. This is where a Home Assistant long-lived access token goes, as `Bearer <token>` |
 | `header-<Name>` | Sent as the header `<Name>`, e.g. `header-X-Api-Key` |
+| `username` / `password` | The login for a service that issues a session rather than accepting a token — `qbittorrent.*`. They never become a header, and the session they produce is ended rather than cached |
 
 The Secret must live in the `Automation`'s own namespace — there is no namespace field on `secretRef`, on purpose. Nothing from it is logged, put in status, or attached to an `Event`; a destination is only ever reported as `scheme://host:port`.
 

@@ -170,6 +170,122 @@ type HTTPRequest struct {
 	Idempotent *bool `json:"idempotent,omitempty"`
 }
 
+// HomeAssistantService is one Home Assistant service call.
+//
+// It is a shape over the same outbound transport http.request uses — the same
+// install-level destination allowlist, the same address floor in the dialer,
+// the same rule that credentials come only from a Secret in this Automation's
+// own namespace. What it adds is that the request path is built from a domain
+// and a service rather than written out, so the action states what it is and
+// cannot be turned into an arbitrary request to an allowed host.
+//
+// The direction matters and is the reason this exists. Home Assistant can
+// already see UniFi; what it cannot see is the cluster. This is the seam
+// Reactor reaches it through, and it is also why Reactor does not observe
+// presence itself.
+type HomeAssistantService struct {
+	// URL is the base address of the Home Assistant instance, e.g.
+	// https://home-assistant.example.com. It may carry a path, for an instance
+	// behind a reverse proxy, and takes no query or fragment. The service path
+	// is appended by Reactor and is not expressible here.
+	//
+	// Omit it to take the base address from the Secret's url key instead.
+	// Exactly one of the two must supply it.
+	// +kubebuilder:validation:MaxLength=2048
+	// +optional
+	URL string `json:"url,omitempty"`
+
+	// SecretRef names a Secret in this Automation's namespace holding the
+	// long-lived access token, under the authorization key and in the form
+	// "Bearer <token>". It may also hold the base address under url.
+	//
+	// A token is required: Home Assistant authenticates every API call, and
+	// there is no unauthenticated shape of this action to fall back to.
+	SecretRef SecretReference `json:"secretRef"`
+
+	// Domain of the service being called, e.g. "light", "script", "notify".
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern="^[a-z0-9_]+$"
+	Domain string `json:"domain"`
+
+	// Service to call within the domain, e.g. "turn_on".
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern="^[a-z0-9_]+$"
+	Service string `json:"service"`
+
+	// Data is the service data, rendered as a Go text/template against the
+	// transition and sent as the JSON request body. It must render to a JSON
+	// object; omitting it sends an empty one. Available fields are Automation,
+	// Namespace, Name, Provider, Matching, Key, From, To, State and Time, and a
+	// json function quotes a value safely for embedding. See the README.
+	// +kubebuilder:validation:MaxLength=4096
+	// +optional
+	Data string `json:"data,omitempty"`
+
+	// Idempotent declares that calling this service twice is the same as
+	// calling it once, which is what lets Reactor retry it after a timeout or a
+	// 5xx. It defaults to false, and has to: light.turn_on is idempotent and
+	// script.turn_on, notify.mobile_app and button.press are not, and Reactor
+	// cannot tell which one it was handed. A duplicate announcement or a second
+	// press is worse than a missed one when nobody knows what was pressed.
+	// +optional
+	Idempotent *bool `json:"idempotent,omitempty"`
+}
+
+// QBittorrent is the instance a qbittorrent.pause or qbittorrent.resume acts on.
+//
+// Pausing is a level in the world — paused or running — and an edge action
+// here, which is the one thing about this type worth understanding before
+// using it.
+//
+// A desired-state action is arbitrated across every Automation claiming its
+// target, and what makes that possible is not the fold: it is that the target
+// is a Kubernetes object, so the value it held before Reactor first touched it
+// can be recorded as an annotation ON that object, where it outlives both the
+// Automation and Reactor itself. A qBittorrent instance reached over HTTP has
+// no such place. It has no Kubernetes identity to arbitrate over, no annotation
+// to hold a baseline, and no way for the pre-delete sweep — which reads those
+// annotations with no credentials and no allowlist — to hand it back.
+//
+// So the honest shape is an edge action, and two limitations follow from that
+// rather than being oversights:
+//
+//   - It is not arbitrated. Two Automations pausing the same instance for
+//     unrelated reasons do not resolve to one claim; each fires on its own
+//     transition, and whichever resumes first resumes everything.
+//   - It has no baseline. A resume resumes every torrent, including ones
+//     paused by hand before Reactor ever ran. Nothing here can tell those
+//     apart, because nothing recorded which they were.
+//
+// A design for non-Kubernetes desired-state targets — somewhere legitimate to
+// keep a baseline and a claim for a thing with no object to hang them on — does
+// not exist yet, and inventing one inside this type would be the worst place to
+// try. See the README for the alternatives that were considered.
+type QBittorrent struct {
+	// URL is the base address of the qBittorrent WebUI, e.g.
+	// http://qbittorrent.media.svc.cluster.local:8080. The API paths are
+	// appended by Reactor and are not expressible here.
+	//
+	// Omit it to take the base address from the Secret's url key instead.
+	// Exactly one of the two must supply it.
+	// +kubebuilder:validation:MaxLength=2048
+	// +optional
+	URL string `json:"url,omitempty"`
+
+	// SecretRef names a Secret in this Automation's namespace holding the WebUI
+	// username and password, under the username and password keys. It may also
+	// hold the base address under url.
+	//
+	// Both are required. qBittorrent issues a session cookie rather than
+	// accepting a static token, and that login is the entire reason this action
+	// exists rather than being an http.request — an instance configured to
+	// bypass authentication for its subnet is expressible as one POST with
+	// http.request, and that is the honest thing to write for it.
+	SecretRef SecretReference `json:"secretRef"`
+}
+
 // Notification is the message a notification.* action sends.
 //
 // The destination is not expressible here at all: it comes from the referenced
@@ -200,14 +316,24 @@ type Notification struct {
 // Types divide into two kinds. A desired-state action (kubernetes.scale,
 // kubernetes.cronjob.suspend) declares a level and is arbitrated continuously
 // across every Automation sharing its target. An edge action (kubernetes.restart,
-// http.request, notification.*) expresses an occurrence: it fires on this
-// Automation's own transitions, owns no target and arbitrates with nothing.
+// http.request, notification.*, homeassistant.service, qbittorrent.*) expresses
+// an occurrence: it fires on this Automation's own transitions, owns no target
+// and arbitrates with nothing.
+//
+// The dividing line is not "does this express a level" — pausing a torrent
+// client plainly does. It is whether there is somewhere to record the value the
+// target held before Reactor claimed it, so that release can put it back. For a
+// Kubernetes object that is an annotation on the object; for anything else
+// there is no answer yet, which is why qbittorrent.* is an edge action and is
+// named as a verb. See the QBittorrent type.
 //
 // A desired-state action's level is an integer the arbiter orders and nothing
 // more, so a boolean level is carried as its own field — replicas for a count,
 // suspended and cordoned for a switch — rather than by overloading one of them.
 // The units differ; the ordering does not.
 // +kubebuilder:validation:XValidation:rule="(self.type == 'http.request') == has(self.request)",message="spec.actions: request is required by http.request and rejected on every other type"
+// +kubebuilder:validation:XValidation:rule="(self.type == 'homeassistant.service') == has(self.homeAssistant)",message="spec.actions: homeAssistant is required by homeassistant.service and rejected on every other type"
+// +kubebuilder:validation:XValidation:rule="self.type.startsWith('qbittorrent.') == has(self.qbittorrent)",message="spec.actions: qbittorrent is required by the qbittorrent.* types and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type.startsWith('notification.') == has(self.notification)",message="spec.actions: notification is required by the notification.* types and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type.startsWith('kubernetes.') == has(self.target)",message="spec.actions: target is required by the kubernetes.* actions and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type == 'kubernetes.scale' || !has(self.replicas)",message="spec.actions: replicas belongs to kubernetes.scale"
@@ -219,7 +345,7 @@ type Notification struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.target) || self.type != 'kubernetes.restart' || self.target.kind in ['Deployment', 'StatefulSet']",message="spec.actions: kubernetes.restart targets a kind with a pod template: Deployment or StatefulSet"
 type Action struct {
 	// Type of the action, e.g. "kubernetes.scale".
-	// +kubebuilder:validation:Enum=kubernetes.scale;kubernetes.cronjob.suspend;kubernetes.cordon;kubernetes.restart;http.request;notification.ntfy;notification.discord;notification.slack
+	// +kubebuilder:validation:Enum=kubernetes.scale;kubernetes.cronjob.suspend;kubernetes.cordon;kubernetes.restart;http.request;notification.ntfy;notification.discord;notification.slack;homeassistant.service;qbittorrent.pause;qbittorrent.resume
 	Type string `json:"type"`
 
 	// Target of a kubernetes.* action.
@@ -265,6 +391,14 @@ type Action struct {
 	// Notification is the message a notification.* action sends.
 	// +optional
 	Notification *Notification `json:"notification,omitempty"`
+
+	// HomeAssistant is the service call a homeassistant.service action makes.
+	// +optional
+	HomeAssistant *HomeAssistantService `json:"homeAssistant,omitempty"`
+
+	// QBittorrent is the instance a qbittorrent.* action acts on.
+	// +optional
+	QBittorrent *QBittorrent `json:"qbittorrent,omitempty"`
 
 	// TimeoutSeconds bounds a single attempt at this action, so an
 	// unreachable target or endpoint cannot occupy a reconcile indefinitely.

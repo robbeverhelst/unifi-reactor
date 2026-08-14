@@ -39,6 +39,19 @@ import (
 const (
 	testWebhookURL = "https://ntfy.example.com/reactor"
 	secretName     = "ntfy-credentials"
+	// The Home Assistant fixtures. The address resolves nowhere and is never
+	// dialled: the outbound transport is stubbed here.
+	haURL        = "https://home-assistant.example.com"
+	haSecretName = "home-assistant-credentials"
+	haToken      = "Bearer tk_example"
+	// The service every Home Assistant fixture calls unless it is testing the
+	// path rules themselves.
+	haDomain  = "light"
+	haService = "turn_on"
+	// The qBittorrent fixtures, on a documentation address that resolves
+	// nowhere. The exchange itself is covered in internal/actions.
+	qbitURL        = "http://qbittorrent.example.com:8080"
+	qbitSecretName = "qbittorrent-credentials"
 )
 
 // recordingDoer stands in for the outbound transport. No test here opens a
@@ -394,22 +407,43 @@ var _ = Describe("Edge actions", func() {
 		})
 	})
 
-	Context("schema validation", func() {
-		// The action type enum is a CRD schema change, and the CEL rules beside
-		// it are what stop a type and its configuration block drifting apart.
-		rejects := func(name string, action reactorv1alpha1.Action) {
-			automation := &reactorv1alpha1.Automation{
-				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
-				Spec: reactorv1alpha1.AutomationSpec{
-					When: &reactorv1alpha1.StateTrigger{
-						Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
-					},
-					Actions: []reactorv1alpha1.Action{action},
+	// The action type enum is a CRD schema change, and the CEL rules beside it
+	// are what stop a type and its configuration block drifting apart. These
+	// run against a real API server, which is the only thing that compiles CEL.
+	rejects := func(name string, action reactorv1alpha1.Action) {
+		automation := &reactorv1alpha1.Automation{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+			Spec: reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
 				},
-			}
-			Expect(k8sClient.Create(ctx, automation)).NotTo(Succeed())
+				Actions: []reactorv1alpha1.Action{action},
+			},
 		}
+		Expect(k8sClient.Create(ctx, automation)).NotTo(Succeed())
+	}
 
+	Context("what an Event says an action did", func() {
+		// The Event is what an operator reads instead of controller logs, so the
+		// verb has to fit what was acted on: a message is delivered, an object
+		// is applied to, and a service is commanded at an address.
+		It("uses a verb that fits the thing acted on", func() {
+			for actionType, want := range map[string]string{
+				actions.TypeNtfy:              verbDelivered,
+				actions.TypeHTTPRequest:       verbDelivered,
+				actionKubernetesRestart:       verbApplied,
+				actions.TypeHomeAssistant:     verbCommanded,
+				actions.TypeQBittorrentPause:  verbCommanded,
+				actions.TypeQBittorrentResume: verbCommanded,
+			} {
+				done, failed := edgeVerbs(actionType)
+				Expect(done).To(Equal(want), actionType)
+				Expect(failed).NotTo(BeEmpty(), actionType)
+			}
+		})
+	})
+
+	Context("schema validation", func() {
 		It("rejects an action whose type and configuration block disagree", func() {
 			rejects("no-notification", reactorv1alpha1.Action{Type: actions.TypeNtfy})
 			rejects("no-request", reactorv1alpha1.Action{Type: actions.TypeHTTPRequest})
@@ -417,6 +451,17 @@ var _ = Describe("Edge actions", func() {
 				Type: actionKubernetesScale,
 				Notification: &reactorv1alpha1.Notification{
 					SecretRef: reactorv1alpha1.SecretReference{Name: secretName}, Message: "x",
+				},
+			})
+			rejects("no-home-assistant", reactorv1alpha1.Action{Type: actions.TypeHomeAssistant})
+			rejects("home-assistant-on-http", reactorv1alpha1.Action{
+				Type:    actions.TypeHTTPRequest,
+				Request: &reactorv1alpha1.HTTPRequest{URL: "https://example.com/hook"},
+				HomeAssistant: &reactorv1alpha1.HomeAssistantService{
+					URL:       haURL,
+					SecretRef: reactorv1alpha1.SecretReference{Name: haSecretName},
+					Domain:    haDomain,
+					Service:   haService,
 				},
 			})
 		})
@@ -488,6 +533,256 @@ var _ = Describe("Edge actions", func() {
 
 			Expect(outbound.requests()).To(BeEmpty())
 			Expect(statusOf(name).EdgeActions[0].Reason).To(ContainSubstring("belongs in the referenced secret"))
+		})
+	})
+
+	Context("homeassistant.service", func() {
+		homeAssistant := func(spec *reactorv1alpha1.HomeAssistantService) reactorv1alpha1.Action {
+			return reactorv1alpha1.Action{Type: actions.TypeHomeAssistant, HomeAssistant: spec}
+		}
+
+		callService := func(name string, spec *reactorv1alpha1.HomeAssistantService) {
+			createAutomation(name, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
+				},
+				Actions: []reactorv1alpha1.Action{homeAssistant(spec)},
+			})
+			observe(map[string]string{keyWAN: wanBackup})
+			reconcileOnce(name)
+		}
+
+		It("posts to the service endpoint with the token and the rendered data", func() {
+			const name = "edge-ha"
+			createSecret(haSecretName, map[string][]byte{
+				actions.SecretKeyAuthorization: []byte(haToken),
+			})
+			callService(name, &reactorv1alpha1.HomeAssistantService{
+				URL:       haURL,
+				SecretRef: reactorv1alpha1.SecretReference{Name: haSecretName},
+				Domain:    "notify",
+				Service:   "persistent_notification",
+				Data:      `{"message": {{ json .To }}}`,
+			})
+
+			sent := outbound.requests()
+			Expect(sent).To(HaveLen(1))
+			Expect(sent[0].URL).To(Equal(haURL + "/api/services/notify/persistent_notification"))
+			Expect(sent[0].Header.Get("Authorization")).To(Equal(haToken))
+			Expect(sent[0].Header.Get("Content-Type")).To(Equal("application/json"))
+			Expect(string(sent[0].Body)).To(Equal(`{"message": "backup"}`))
+			Expect(sent[0].Retryable).To(BeFalse(),
+				"a service call is a command, and Reactor cannot tell which ones repeat safely")
+			Expect(statusOf(name).EdgeActions[0].Status).To(Equal(executionSuccess))
+		})
+
+		It("takes the base address from the secret when the automation does not name one", func() {
+			const name = "edge-ha-secret-url"
+			createSecret(haSecretName, map[string][]byte{
+				actions.SecretKeyURL:           []byte(haURL),
+				actions.SecretKeyAuthorization: []byte(haToken),
+			})
+			callService(name, &reactorv1alpha1.HomeAssistantService{
+				SecretRef: reactorv1alpha1.SecretReference{Name: haSecretName},
+				Domain:    haDomain,
+				Service:   haService,
+			})
+
+			sent := outbound.requests()
+			Expect(sent).To(HaveLen(1))
+			Expect(sent[0].URL).To(Equal(haURL + "/api/services/" + haDomain + "/" + haService))
+			Expect(string(sent[0].Body)).To(Equal("{}"), "a service with no data still wants an object")
+		})
+
+		It("retries only when the author declares the service safe to repeat", func() {
+			const name = "edge-ha-idempotent"
+			createSecret(haSecretName, map[string][]byte{
+				actions.SecretKeyAuthorization: []byte(haToken),
+			})
+			idempotent := true
+			callService(name, &reactorv1alpha1.HomeAssistantService{
+				URL:        haURL,
+				SecretRef:  reactorv1alpha1.SecretReference{Name: haSecretName},
+				Domain:     haDomain,
+				Service:    haService,
+				Data:       `{"entity_id": "light.hall"}`,
+				Idempotent: &idempotent,
+			})
+
+			sent := outbound.requests()
+			Expect(sent).To(HaveLen(1))
+			Expect(sent[0].Retryable).To(BeTrue())
+		})
+
+		It("refuses to send without a token rather than collecting a 401", func() {
+			const name = "edge-ha-no-token"
+			createSecret(haSecretName, map[string][]byte{actions.SecretKeyURL: []byte(haURL)})
+			callService(name, &reactorv1alpha1.HomeAssistantService{
+				SecretRef: reactorv1alpha1.SecretReference{Name: haSecretName},
+				Domain:    haDomain,
+				Service:   haService,
+			})
+
+			Expect(outbound.requests()).To(BeEmpty())
+			Expect(statusOf(name).EdgeActions[0].Reason).To(
+				ContainSubstring(actions.SecretKeyAuthorization))
+		})
+
+		It("reports data that did not render to a JSON object rather than posting it", func() {
+			const name = "edge-ha-bad-data"
+			createSecret(haSecretName, map[string][]byte{
+				actions.SecretKeyAuthorization: []byte(haToken),
+			})
+			callService(name, &reactorv1alpha1.HomeAssistantService{
+				URL:       haURL,
+				SecretRef: reactorv1alpha1.SecretReference{Name: haSecretName},
+				Domain:    haDomain,
+				Service:   haService,
+				Data:      `["light.hall"]`,
+			})
+
+			Expect(outbound.requests()).To(BeEmpty())
+			Expect(statusOf(name).EdgeActions[0].Reason).To(ContainSubstring("JSON object"))
+		})
+
+		// The domain and the service are the only part of the path an
+		// Automation chooses. The API server rejects a traversal at admission;
+		// this asserts the rule is on the schema rather than only in Go.
+		It("rejects a domain or service that is not a bare slug", func() {
+			for _, spec := range []*reactorv1alpha1.HomeAssistantService{
+				{Domain: "../../auth", Service: haService},
+				{Domain: haDomain, Service: haService + "?x=1"},
+				{Domain: "Light", Service: haService},
+			} {
+				spec.URL = haURL
+				spec.SecretRef = reactorv1alpha1.SecretReference{Name: haSecretName}
+				automation := &reactorv1alpha1.Automation{
+					ObjectMeta: metav1.ObjectMeta{Name: "ha-path", Namespace: testNamespace},
+					Spec: reactorv1alpha1.AutomationSpec{
+						When: &reactorv1alpha1.StateTrigger{
+							Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
+						},
+						Actions: []reactorv1alpha1.Action{homeAssistant(spec)},
+					},
+				}
+				Expect(k8sClient.Create(ctx, automation)).NotTo(Succeed())
+			}
+		})
+	})
+
+	Context("qbittorrent.pause and qbittorrent.resume", func() {
+		qbit := func(actionType string) reactorv1alpha1.Action {
+			return reactorv1alpha1.Action{
+				Type: actionType,
+				QBittorrent: &reactorv1alpha1.QBittorrent{
+					URL:       qbitURL,
+					SecretRef: reactorv1alpha1.SecretReference{Name: qbitSecretName},
+				},
+			}
+		}
+
+		It("pauses on the way in and resumes on the way out, each on its own edge", func() {
+			const name = "edge-qbit"
+			createSecret(qbitSecretName, map[string][]byte{
+				actions.SecretKeyUsername: []byte("reactor"),
+				actions.SecretKeyPassword: []byte("hunter2"),
+			})
+			createAutomation(name, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
+				},
+				Actions: []reactorv1alpha1.Action{qbit(actions.TypeQBittorrentPause)},
+				OnExit:  []reactorv1alpha1.Action{qbit(actions.TypeQBittorrentResume)},
+			})
+
+			observe(map[string]string{keyWAN: wanBackup})
+			reconcileOnce(name)
+			observe(map[string]string{keyWAN: wanPrimary})
+			reconcileOnce(name)
+
+			sent := outbound.requests()
+			Expect(sent).To(HaveLen(2))
+			Expect(sent[0].URL).To(Equal(qbitURL + "/api/v2/torrents/pause"))
+			Expect(sent[1].URL).To(Equal(qbitURL + "/api/v2/torrents/resume"))
+
+			By("carrying a login and a logout around each one")
+			for _, request := range sent {
+				Expect(request.Session).NotTo(BeNil())
+				Expect(request.Session.Cookie).To(Equal("SID"))
+				Expect(request.Session.Login.URL).To(Equal(qbitURL + "/api/v2/auth/login"))
+				Expect(request.Session.Logout.URL).To(Equal(qbitURL + "/api/v2/auth/logout"))
+				Expect(string(request.Body)).To(Equal("hashes=all"))
+				Expect(request.Retryable).To(BeTrue(),
+					"pausing a paused torrent is a no-op, which is the one edge action that can argue this")
+			}
+
+			By("carrying no credential in the Automation's status")
+			status := statusOf(name)
+			Expect(status.EdgeActions).To(HaveLen(1))
+			Expect(status.EdgeActions[0].Type).To(Equal(actions.TypeQBittorrentResume))
+			Expect(status.EdgeActions[0].Status).To(Equal(executionSuccess))
+		})
+
+		It("refuses to act without both a username and a password", func() {
+			const name = "edge-qbit-half-credentials"
+			createSecret(qbitSecretName, map[string][]byte{
+				actions.SecretKeyUsername: []byte("reactor"),
+			})
+			createAutomation(name, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
+				},
+				Actions: []reactorv1alpha1.Action{qbit(actions.TypeQBittorrentPause)},
+			})
+
+			observe(map[string]string{keyWAN: wanBackup})
+			reconcileOnce(name)
+
+			Expect(outbound.requests()).To(BeEmpty())
+			Expect(statusOf(name).EdgeActions[0].Reason).To(
+				ContainSubstring(actions.SecretKeyPassword))
+		})
+
+		// It owns no target and takes part in no arbitration — status.targets
+		// stays empty, which is the difference between this and a
+		// kubernetes.scale that would express the same intent more bluntly.
+		It("claims nothing, so nothing is arbitrated over it", func() {
+			const name = "edge-qbit-unarbitrated"
+			createSecret(qbitSecretName, map[string][]byte{
+				actions.SecretKeyUsername: []byte("reactor"),
+				actions.SecretKeyPassword: []byte("hunter2"),
+			})
+			createAutomation(name, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
+				},
+				Actions: []reactorv1alpha1.Action{qbit(actions.TypeQBittorrentPause)},
+			})
+
+			observe(map[string]string{keyWAN: wanBackup})
+			reconcileOnce(name)
+
+			Expect(statusOf(name).Targets).To(BeEmpty())
+		})
+
+		It("rejects a target on it, and a qbittorrent block on anything else", func() {
+			rejects("qbit-no-block", reactorv1alpha1.Action{Type: actions.TypeQBittorrentPause})
+			rejects("qbit-targeted", reactorv1alpha1.Action{
+				Type:   actions.TypeQBittorrentPause,
+				Target: &reactorv1alpha1.TargetRef{Kind: kindDeployment, Name: targetQbit},
+				QBittorrent: &reactorv1alpha1.QBittorrent{
+					URL:       qbitURL,
+					SecretRef: reactorv1alpha1.SecretReference{Name: qbitSecretName},
+				},
+			})
+			rejects("qbit-block-on-scale", reactorv1alpha1.Action{
+				Type:   actionKubernetesScale,
+				Target: &reactorv1alpha1.TargetRef{Kind: kindDeployment, Name: targetQbit},
+				QBittorrent: &reactorv1alpha1.QBittorrent{
+					URL:       qbitURL,
+					SecretRef: reactorv1alpha1.SecretReference{Name: qbitSecretName},
+				},
+			})
 		})
 	})
 })
