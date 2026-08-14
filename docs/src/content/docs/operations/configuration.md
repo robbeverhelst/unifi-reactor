@@ -14,6 +14,8 @@ Chart values ([full reference](https://github.com/robbeverhelst/unifi-reactor/bl
 | `unifi.url` | — | UniFi console base URL; the provider stays disabled until this is set |
 | `unifi.site` | `default` | UniFi Network site |
 | `unifi.pollInterval` | `30s` | how often WAN, internet and UPS state are observed |
+
+| `unifi.maxObservationAge` | `""` | how old the observed state may get before every automation reports `ObservationStale` and says so. Empty is unbounded — and silent ([above](/concepts/settling-a-noisy-signal/#how-long-reactor-may-act-on-state-that-has-already-changed)) |
 | `unifi.insecureSkipVerify` | `true` | accept the console's self-signed certificate |
 | `unifi.existingSecret` | `unifi-reactor-credentials` | Secret holding `UNIFI_API_KEY`; re-read on every poll, so rotating the key needs no restart |
 | `log.level` | `info` | `debug` adds the per-observation lines used to work out why an automation did not fire |

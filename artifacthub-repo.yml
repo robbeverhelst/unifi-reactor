@@ -13,7 +13,7 @@
 #     artifacthub-repo.yml:application/vnd.cncf.artifacthub.repository-metadata.layer.v1.yaml
 #
 # The full runbook, including which steps can only be done from a signed-in
-# Artifact Hub session, is in docs/distribution.md.
+# Artifact Hub session, is in https://reactor.robbeverhelst.com/contributing/distribution/.
 
 # The email below must match the address the Artifact Hub account signs in
 # with, or the ownership claim is refused. It is this project's commit-author
@@ -26,4 +26,4 @@ owners:
 # badge; the ownership claim above works without it. Add it, then push this
 # file again with the same oras command.
 #
-# repositoryID: <issued by Artifact Hub — see docs/distribution.md>
+# repositoryID: <issued by Artifact Hub — see https://reactor.robbeverhelst.com/contributing/distribution/>

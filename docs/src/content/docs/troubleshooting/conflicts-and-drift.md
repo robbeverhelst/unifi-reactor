@@ -35,6 +35,38 @@ kubectl -n media get deploy qbittorrent -o jsonpath='{.metadata.annotations}'
 
 **A scale-*up* Automation loses to any scale-down claim on the same target**, because `min` encodes "most restrictive wins". `status.targets[].effective` makes it visible instead of silent. If you need the opposite, that is a design conversation, not a misconfiguration.
 
+### The workload came back at the wrong number
+
+A different failure with the same shape, and the one that is easy to miss because it only shows up *after* the incident is over. Two Automations sharing a target can disagree about what its **normal** size is:
+
+```yaml
+# power/shed-on-battery          # net/pause-on-backup-wan
+onExit: [replicas: 1]            onExit: [replicas: 3]
+```
+
+While either matches, the workload is at 0 and everything above applies. When the last one releases, the reversals are folded the same way live claims are — `min(1, 3) = 1` — and the workload comes back at 1.
+
+**Reactor still takes `min`, and will not guess which number you meant.** What it does is say that the two specs contradict each other, from the moment they do rather than at release:
+
+```sh
+kubectl -n power get automation shed-on-battery -o jsonpath='{.status.targets[0].reversalDisagreement}'
+# [{"claimant":"net/pause-on-backup-wan","desired":3,"level":"3 replicas"},
+#  {"claimant":"power/shed-on-battery","desired":1,"level":"1 replicas"}]
+```
+
+```sh
+# every automation currently contradicting another about a target
+kubectl get automation -A -o json | jq -r '
+  .items[] | .status.targets[]? | select(.reversalDisagreement) |
+  "\(.ref): \([.reversalDisagreement[] | "\(.claimant) wants \(.level)"] | join(", "))"' | sort -u
+```
+
+There is a Warning `Event` with reason `ReversalDisagreement` on each Automation involved, and `reactor_reversal_disagreements_total` for the fleet-wide count.
+
+**Fix it in the specs, not in Reactor.** Decide what the workload's normal size is and write the same number in both, or give one of them `reversal: None` so it contributes no level at all. `None` is never part of a disagreement, and two Automations both on `Baseline` agree by construction — they resolve to the same recorded baseline. The cases reported are `Declared` against `Declared`, and `Declared` against `Baseline`.
+
+**It is a Warning, unlike `DeferredToOtherAutomation`.** Being outvoted on a live claim is two correct policies arbitrating, which is the design working. This is two policies that cannot both be correct, where the value Reactor picks is a tie-break rather than an answer.
+
 **None of this reaches a claimant that is not an Automation.** The fold is over what Reactor can see, so a HorizontalPodAutoscaler on the same Deployment is not resolved — it is fought, unless detection is on. That is [§15](#15-reactor-and-a-horizontalpodautoscaler-want-the-same-deployment), and it looks quite different: a workload that flaps rather than one that settles on a value somebody else asked for.
 
 > The fold, `status.targets[]`, and the target annotations land with the target-ownership change. On v0.3.0 the outcome of two Automations on one target depends on reconcile order.
@@ -89,6 +121,23 @@ kubectl delete crd automations.reactor.robbeverhelst.com
 ```
 
 *Deleting the CRD while Automations still carry finalizers.* Nothing is left to remove them and deletion hangs forever. Clear the finalizers first (the patch above, over every Automation), then delete the CRD.
+
+**And one case where the finalizer fired and could not finish.** Different from the three above: Reactor is running, the finalizer is doing exactly its job, and the release itself keeps failing — the target has been deleted, RBAC changed under it, an admission webhook is refusing the write. Each failed attempt is counted in `status.releaseAttempts` and reported as `Applied=False` with reason `ReleaseFailed`, carrying the error:
+
+```sh
+kubectl -n media get automation pause-downloads-on-backup-wan -o jsonpath=\
+'{.status.releaseAttempts}{"\n"}{.status.conditions[?(@.type=="Applied")].message}{"\n"}'
+```
+
+It is bounded at three attempts, 5 then 10 seconds apart, after which Reactor removes the finalizer anyway and lets the object go:
+
+```text
+Warning  ReleaseFailed  could not hand targets back after 3 attempts, deleting anyway: ...
+```
+
+That is the same trade this whole section is about, made in the other direction: a stranded workload is recoverable from its `baseline-replicas` annotation, and a resource stuck `Terminating` forever is not. So treat that Event as the one that sends you to the restore commands at the top of this section — it is the only case where the finalizer existed, ran, and still left a workload behind.
+
+You will never catch `releaseAttempts` at 3. The third failure is the reconcile that removes the finalizer, so the object is deleted before that value could be written; on a live object it reads 1 or 2, and only ever while it is `Terminating`.
 
 **What is explicitly not covered:** the controller being deleted outright, permanently evicted, or the cluster rebuilt. Reactor does not supervise its own absence. The baseline annotation on the target is the answer in those cases, and it is the reason it lives there.
 

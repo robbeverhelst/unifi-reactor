@@ -54,3 +54,38 @@ Debounce is also the whole of the flap control for `wan.quality`, and that is wo
 Debouncing happens in the shared state store, so every automation sees the same settled value. Two automations can never disagree about the current state and fight over a workload they share.
 
 This is the setting to revisit the moment you write a [`kubernetes.restart`](/actions/kubernetes/#restart-is-why-debounce-matters): scaling is idempotent and a flap costs nothing, while a restart under a flapping key is a rollout per poll.
+
+## How long Reactor may act on state that has already changed
+
+Debounce is half of an answer to a question worth asking outright, because a policy engine acting on something that stopped being true is the failure everything else here is arranged to avoid. **There are two windows, and only one of them is bounded by anything.**
+
+**A value that changed** reaches every Automation within **`pollInterval` × the key's debounce samples**. Worst case is the change landing just after a poll, then needing its samples on the poll cadence: `wan` at the defaults is 30 seconds, `internet` is 90. Both terms are yours, and that product *is* the bound — there is deliberately nothing else in the path. The reconciler re-evaluates every 15 seconds regardless and is woken immediately on a transition, so it contributes latency, not staleness.
+
+The webhook fast path narrows the **first** term only. A delivery brings the next observation forward, and while a value is still proving itself against its debounce threshold a delivery is [ignored outright](/operations/webhook-fast-path/). That is not an oversight: a delivery only ever says *look now*, and if it could also supply the samples that promote a value, anyone who can reach the endpoint could fast-forward a key straight through the settling time you asked for.
+
+**A console that stops answering** has no such window. A failed observation is logged and dropped — the next poll is the recovery mechanism — so the store keeps reporting the last state it has, and every reconcile re-decides against it for as long as the console is away. That is **correct and stays correct**: withdrawing state Reactor can no longer confirm would release claims during exactly the incident that took the console offline, which is the same reason a key that vanishes gets [`StateKeyUnavailable`](/troubleshooting/state-keys/#2-statekeyunavailable-and-held-state) and held state rather than an `onExit`.
+
+What was missing is that the second case said nothing. `StateKeyUnavailable` announces itself on the Automation; a console that has gone quiet announced itself only in `time() - reactor_last_observation_timestamp_seconds`, which needs metrics enabled and somebody watching. So:
+
+```yaml
+unifi:
+  pollInterval: 30s
+  maxObservationAge: 5m    # empty by default: unbounded, and silent
+```
+
+Past that age, every Automation driven by the provider reports it, and **goes on acting**:
+
+```text
+Ready  False  ObservationStale
+provider "unifi" has not been observed since 2026-08-14T09:12:41Z, past the 5m0s this
+install allows; still acting on the state it last reported
+```
+
+```yaml
+status:
+  observedAt: "2026-08-14T09:12:41Z"   # always reported; this is what every field below is only as current as
+```
+
+plus a Warning `Event` and `reactor_stale_decisions_total`, which is the attributable half of the observation gauge: the gauge says Reactor went blind, this says automations were still deciding while it was.
+
+It is off by default and it changes no behaviour when on — no claim is released, no `onExit` runs, no target moves. Set it against `pollInterval` and the samples above rather than in isolation: a changed value already takes up to 90 seconds to be believed at the defaults, so anything under about four poll intervals reports a slow console rather than a blind operator.

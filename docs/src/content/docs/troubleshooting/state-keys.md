@@ -28,6 +28,54 @@ kubectl -n reactor-system logs deploy/reactor | grep 'state observed' | tail -1
 
 ---
 
+## 2a. `ObservationStale`, and how old a decision is allowed to be
+
+```text
+Ready  False  ObservationStale
+provider "unifi" has not been observed since 2026-08-14T09:12:41Z, past the 5m0s this
+install allows; still acting on the state it last reported
+```
+
+**What it means.** The console has stopped answering. Not one key missing from a reply — [that is §2](/troubleshooting/state-keys/#2-statekeyunavailable-and-held-state) — but no successful reply at all since the timestamp in the message. A failed observation is logged and dropped, because the next poll is the recovery mechanism, so the state Reactor reports is simply the last one it got.
+
+**What Reactor does: exactly what it was doing.** Nothing is released, no `onExit` runs, no target moves. This is deliberate and it is the behaviour you want for the same reason §2 is: the console is often unreachable *because* of the thing the automation is reacting to. Handing workloads back the moment Reactor loses sight of a UPS would bring them up on battery power. So the bound governs what is **said**, never what is **done**.
+
+**Two windows, and only this one is unbounded.** A value that *changed* reaches an automation within `unifi.pollInterval` × that key's debounce samples — 30 seconds for `wan` at the defaults, 90 for `internet`. A console that has gone quiet has no such window at all, which is why it is the one that has to announce itself.
+
+**How old is it?** Every Automation reports the observation its decisions are being taken against, whether or not a bound is set:
+
+```sh
+kubectl get automation -A -o custom-columns=\
+'NAME:.metadata.name,MATCHING:.status.matching,OBSERVED:.status.observedAt'
+```
+
+**Turning the report on.** It is empty by default, which means unbounded:
+
+```sh
+helm upgrade reactor ... --set unifi.maxObservationAge=5m
+```
+
+Set it against `unifi.pollInterval` and the debounce samples rather than in isolation. Anything under about four poll intervals reports a slow console rather than a blind operator.
+
+**Then fix the console, not the Automation.** The cause is in [§3](/troubleshooting/credentials-and-reachability/#3-credentials-and-reachability) — an expired API key, a rebooted gateway, a network policy, a certificate. Every failed attempt logs it:
+
+```sh
+kubectl -n reactor-system logs deploy/reactor | grep 'state observation failed'
+```
+
+The condition clears on its own on the first successful poll; nothing has to be reset.
+
+**The fleet-wide version of the same question** needs no bound and no Automation, but it does need `metrics.enabled`, and somebody looking:
+
+```promql
+time() - reactor_last_observation_timestamp_seconds   # is Reactor still seeing anything
+rate(reactor_stale_decisions_total[15m])              # was it still deciding while it was not
+```
+
+The shipped `ReactorObservationStale` alert is the first of those. The counter is the attributable half: the gauge says Reactor went blind, the counter says automations went on making decisions while it was.
+
+**What it is not.** It is not `ProviderStateUnavailable`, which means nothing has *ever* been observed — a first start against a console that has never answered. An install that has been running for a week and lost its console reports this instead, and keeps its claims.
+
 ## 10. `wan` and `isp` disagree about a failover
 
 Reactor derives `wan` from which WAN port reports `is_uplink`, and cross-checks it against two

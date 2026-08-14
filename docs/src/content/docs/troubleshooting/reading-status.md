@@ -12,6 +12,8 @@ description: "What the Ready and Applied conditions actually mean, every reason 
 | `DryRun` | `spec.dryRun: true`, or the whole install runs with `safety.dryRun`. Everything is evaluated; nothing is written. | [§14](/troubleshooting/nothing-is-happening/#14-an-automation-is-not-acting-and-is-telling-you-what-it-would-do) |
 | `ProviderStateUnavailable` | No state has been observed yet for this provider. | [§1](/troubleshooting/nothing-is-happening/#1-nothing-happens-when-the-state-changes) |
 | `StateKeyUnavailable` | A key this Automation needs vanished from the observation. Last known matching state is held. | [§2](/troubleshooting/state-keys/#2-statekeyunavailable-and-held-state) |
+
+| `ObservationStale` | The console has stopped answering at all, and the last state it gave is older than `unifi.maxObservationAge`. Everything is held and still acted on. | [§2a](/troubleshooting/state-keys/#2a-observationstale-and-how-old-a-decision-is-allowed-to-be) |
 | `ActionFailed` | An action returned an error. `status.lastExecution.reason` has the message. | [§5](/troubleshooting/rbac-and-crd/#5-rbac-refuses-a-cross-namespace-target), [§6](/troubleshooting/rbac-and-crd/#6-the-crd-invalid-ownership-metadata-or-a-stale-schema) |
 
 `Applied` carries its own reasons, and two of them are not faults: `DeferredToOtherAutomation` is a peer's more restrictive claim winning, and `TargetManagedByHPA` is Reactor declining a target another controller drives — [§15](/troubleshooting/conflicts-and-drift/#15-reactor-and-a-horizontalpodautoscaler-want-the-same-deployment).
@@ -46,7 +48,11 @@ kubectl -n media describe automation pause-downloads-on-backup-wan | tail -20
 | `TargetHeld` / `TargetReleased` | Normal | a write to a target actually happened; the message names the level in words ("0 replicas", "suspended") |
 | `DeferredToOtherAutomation` | Normal | a peer's more restrictive claim won — [§7](/troubleshooting/conflicts-and-drift/#7-two-automations-fighting-over-one-target) |
 | `EdgeActionSent` | Normal | an edge action ran: a notification or HTTP request delivered, or a restart applied |
+
+| `ReversalDisagreement` | Warning | two Automations declared different `onExit` levels for one target, so they disagree about its normal size — [§7](/troubleshooting/conflicts-and-drift/#the-workload-came-back-at-the-wrong-number) |
 | `StateKeyUnavailable` | Warning | a key vanished and state is being held — [§2](/troubleshooting/state-keys/#2-statekeyunavailable-and-held-state) |
+
+| `ObservationStale` | Warning | the console has stopped answering and decisions are being taken against old state — [§2a](/troubleshooting/state-keys/#2a-observationstale-and-how-old-a-decision-is-allowed-to-be) |
 | `ActionFailed` | Warning | a desired-state action could not be applied — [§5](/troubleshooting/rbac-and-crd/#5-rbac-refuses-a-cross-namespace-target) |
 | `RetryBudgetExhausted` | Warning | Reactor stopped retrying and is waiting for the next state change |
 | `EdgeActionFailed` / `EdgeActionSkipped` | Warning | an edge action did not happen — [§12](/troubleshooting/actions-and-targets/#12-an-edge-action-did-not-happen--or-happened-too-often) |
@@ -57,6 +63,10 @@ kubectl -n media describe automation pause-downloads-on-backup-wan | tail -20
 
 **Being outvoted is `Normal`, not a Warning.** Two Automations sharing a
 workload and one of them losing is the arbitration working as designed.
+`ReversalDisagreement` is the Warning next to it, and the difference is not
+severity for its own sake: two automations wanting a workload down for different
+reasons are both right, while two declaring different normal sizes for it cannot
+both be — nothing Reactor does resolves that, so somebody has to.
 
 **Events fire on edges, not on states.** A condition that has been held for an
 hour raised one Event when it started, not one every fifteen seconds — so an

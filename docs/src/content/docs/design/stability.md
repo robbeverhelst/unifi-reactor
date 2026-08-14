@@ -5,6 +5,15 @@ description: "What is pre-1.0 and may break, why spec.trigger was removed from v
 
 Early days: the API group is `v1alpha1` and the project is pre-1.0, so expect breaking changes between minor versions.
 
+## What a v1.1 user has to change
+
+Nothing is required, and no workload changes what it does. One procedure gets shorter, and three things become visible that were not:
+
+- **The first upgrade from chart 0.3.0 or earlier no longer needs the two `kubectl` commands.** The chart adopts the CRD into the release itself, through a pre-upgrade hook Job rendered only when there is something to adopt and cleaned up when it succeeds ([what it does, in full](/troubleshooting/rbac-and-crd/#upgrading-from-chart-030-or-earlier)). If that `label`/`annotate` pair is written down in a runbook, it is now the fallback rather than the procedure; `crds.adopt: false` keeps the manual route.
+- **`unifi.maxObservationAge` is new and empty, which is exactly what you have today** — unbounded, and silent, if the console stops answering. Setting it makes every automation report `Ready=False` with reason `ObservationStale` past that age, raise a Warning `Event`, and publish `reactor_stale_decisions_total`. It changes nothing about what is written: no claim is released and no `onExit` runs, because going blind must not scale workloads back up mid-outage ([why](/concepts/settling-a-noisy-signal/#how-long-reactor-may-act-on-state-that-has-already-changed)). Start at four or five poll intervals.
+- **`status.observedAt` is new on every Automation**, additive and always populated once anything has been observed. If you have alerting or scripts that treat an unexpected status field as drift, this is the one to expect.
+- **Two automations that declare different `onExit` levels for one target now say so** — a Warning `Event` with reason `ReversalDisagreement`, `status.targets[].reversalDisagreement`, and `reactor_reversal_disagreements_total`. **Nothing about the resolved value changes**: `min` still wins, and the workload comes back at exactly the number it came back at before ([why it is reported and not resolved](/concepts/reversal-and-baselines/#when-they-disagree-about-coming-back)). This is not gated behind a value, because a contradiction between two of your own specs is not something to opt into being told about — but if you have such a pair today, expect one Warning per automation involved on the first reconcile after the upgrade. Fixing it is a one-line spec edit.
+
 **`spec.trigger` — the event-shaped trigger kind — has been removed from `v1alpha1`.** Up to v0.3.0 the CRD accepted it, CEL-validated it, and then ignored it: no version of the engine has ever processed an event trigger. A v1 whose API accepts configuration it silently drops is worse than one that does not offer the field at all, so it is gone until it is real. Two things had to exist before it could come back, and one of them now does:
 
 - **an action that expresses an occurrence** — *met.* `http.request` and `notification.*` are edge actions: they fire on a transition rather than declaring a level, so an event trigger now has something to run.

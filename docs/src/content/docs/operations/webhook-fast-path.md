@@ -9,14 +9,9 @@ Reactions are normally no faster than `unifi.pollInterval`. UniFi's Alarm Manage
 
 It is off by default and stays an optimization. A delivery **triggers a poll**; it never sets state. Its payload is not parsed at all, so a delivery that is dropped, duplicated, replayed or forged costs at most one extra request to your console. Every delivery must present a shared secret, the receiver is not exposed outside the cluster unless you expose it, and self-registration fails soft — if the console does not behave as expected, Reactor logs why and carries on polling.
 
-See the [chart reference](/operations/webhook-fast-path/) for the values, how to make the receiver reachable from your console, and what is worth knowing before turning self-registration on.
+The values, how to make the receiver reachable from your console, and what is worth knowing before turning self-registration on are all below.
 
-Reaction latency is normally bounded by `unifi.pollInterval`. UniFi's Alarm Manager can post to
-Reactor instead, and Reactor then re-observes immediately.
-
-A delivery only ever **triggers a poll**. Its payload is never read and can never set state, so a
-delivery that is dropped, duplicated, replayed or forged costs at most one extra request to your
-console. Polling stays the source of truth; leaving this off costs latency and nothing else.
+## Turning it on
 
 ```sh
 kubectl -n reactor-system create secret generic unifi-reactor-webhook \

@@ -112,6 +112,7 @@ export default defineConfig({
             { label: 'How to contribute', slug: 'contributing' },
             { label: 'Development', slug: 'contributing/development' },
             { label: 'Adding a provider', slug: 'contributing/adding-a-provider' },
+            { label: 'Distribution', slug: 'contributing/distribution' },
             { label: 'UniFi Alarm Manager API', slug: 'contributing/unifi-alarm-manager-api' },
             { label: 'Writing to a UniFi console', slug: 'contributing/unifi-write-api' },
           ],

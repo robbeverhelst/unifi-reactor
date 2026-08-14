@@ -28,7 +28,7 @@ maintainers:
 
 # Artifact Hub metadata. The registration runbook, and the two steps that can
 # only be done from a signed-in Artifact Hub session, are in
-# docs/distribution.md.
+# https://reactor.robbeverhelst.com/contributing/distribution/.
 annotations:
   artifacthub.io/license: Apache-2.0
   artifacthub.io/operator: "true"
