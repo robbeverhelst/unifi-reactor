@@ -1,5 +1,4 @@
 //go:build e2e
-// +build e2e
 
 /*
 Copyright 2026.
@@ -25,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -44,6 +44,13 @@ const metricsServiceName = "unifi-reactor-controller-manager-metrics-service"
 
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "unifi-reactor-metrics-binding"
+
+// curlMetricsCommand retries the metrics endpoint so that a curl pod scheduled
+// before the metrics server is listening still succeeds. It is built here
+// rather than inline in the pod override, which is a raw string literal that
+// cannot be broken across lines.
+const curlMetricsCommand = "for i in $(seq 1 30); do curl -v -k -H 'Authorization: Bearer %s' " +
+	"https://%s.%s.svc.cluster.local:8443/metrics && exit 0 || sleep 2; done; exit 1"
 
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
@@ -225,9 +232,7 @@ var _ = Describe("Manager", Ordered, func() {
 							"name": "curl",
 							"image": "curlimages/curl:latest",
 							"command": ["/bin/sh", "-c"],
-							"args": [
-								"for i in $(seq 1 30); do curl -v -k -H 'Authorization: Bearer %s' https://%s.%s.svc.cluster.local:8443/metrics && exit 0 || sleep 2; done; exit 1"
-							],
+							"args": [%s],
 							"securityContext": {
 								"readOnlyRootFilesystem": true,
 								"allowPrivilegeEscalation": false,
@@ -243,7 +248,8 @@ var _ = Describe("Manager", Ordered, func() {
 						}],
 						"serviceAccountName": "%s"
 					}
-				}`, token, metricsServiceName, namespace, serviceAccountName))
+				}`, strconv.Quote(fmt.Sprintf(curlMetricsCommand, token, metricsServiceName, namespace)),
+					serviceAccountName))
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create curl-metrics pod")
 

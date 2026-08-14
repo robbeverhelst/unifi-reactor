@@ -120,6 +120,11 @@ scaled down would therefore stay down forever, so a `pre-delete` hook Job
 releases every claim first and removes the finalizers that nothing would be
 left to service.
 
+The Job stops the operator before releasing anything. Helm removes the
+release's own resources only once its pre-delete hooks have finished, so a
+controller still running would simply re-claim what the hook released, and
+re-add the finalizer — turning a later `kubectl delete crd` into a hang.
+
 ```sh
 helm uninstall reactor -n reactor-system              # workloads restored
 helm uninstall reactor -n reactor-system --no-hooks   # skip it, leave them as they are
@@ -435,6 +440,6 @@ networkPolicy:
 | `actions.allowedDestinations` | `[]` | Where outbound actions may go. Empty refuses all of them; see [Outbound actions](#outbound-actions) |
 | `uninstall.releaseClaims` | `true` | Run a pre-delete Job that hands every held workload back before the operator is removed |
 | `uninstall.timeoutSeconds` | `120` | Hard bound on that Job, so a stuck release delays rather than blocks the uninstall |
-| `rbac.clusterWide` | `true` | `false` restricts the operator to the release namespace (cross-namespace `target.namespace` stops working) |
+| `rbac.clusterWide` | `true` | `false` restricts the operator to watching and acting on the release namespace only (cross-namespace `target.namespace` stops working, and Automations elsewhere are not reconciled at all) |
 | `image.repository` | `ghcr.io/robbeverhelst/unifi-reactor` | Manager image |
 | `image.tag` | chart `appVersion` | Image tag |

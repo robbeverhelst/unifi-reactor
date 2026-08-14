@@ -38,6 +38,22 @@ make help     # every target
 
 CI runs lint, tests, e2e, and a manifest-drift check, so `make manifests generate` output must be committed.
 
+## End-to-end tests
+
+Three suites, each in its own throwaway Kind cluster, each its own CI job:
+
+```sh
+make test-e2e        # the manager comes up under the kustomize manifests
+make test-reaction   # reactions, restarts, and arbitration against a real API server
+make test-lifecycle  # helm uninstall and the upgrade from the crds/ packaging
+```
+
+The two new ones install the Helm chart and point it at a rehearsed UniFi console running inside the cluster, then assert on what happened to real workloads: replicas, the `reactor.robbeverhelst.com/*` annotations, `status.targets[]`, and the `Ready` and `Applied` conditions. They cover the things that cannot be reached from a unit test — converging on a state that changed while the operator was down, two Automations arbitrating one workload, and what `helm uninstall` leaves behind.
+
+Each target creates its Kind cluster, runs the suite, and deletes the cluster whether or not it passed. Every `kubectl` and `helm` call inside the suites names its cluster explicitly and refuses to address anything that is not a local Kind context — they install cluster-wide RBAC and delete CRDs, so an unpinned command is not a failed test but an outage.
+
+The suites reach the mock over a fixed node port mapped to the host by `test/e2e/kind-config.yaml`, which is why they create their own clusters rather than reusing one you already have.
+
 `make manifests` also regenerates `charts/reactor/templates/crds.yaml` via `hack/sync-chart-crds.sh`. The CRD is a chart *template* deliberately: Helm installs a chart's `crds/` directory on first install only and never upgrades it, so every later schema change would ship silently broken. Don't hand-edit the chart's copy — the tests in `test/chart/` fail when it drifts from `config/crd/bases`, and they need `helm` on your PATH to run at all.
 
 ## Running against a cluster
@@ -69,7 +85,10 @@ curl -X POST http://localhost:9443/flip                        # WAN primary <->
 curl -X POST 'http://localhost:9443/ups?mode=battery&level=80' # power outage
 curl -X POST 'http://localhost:9443/ups?level=5'               # battery critical
 curl -X POST 'http://localhost:9443/ups?mode=mains&level=100'  # power restored
+curl -X POST 'http://localhost:9443/ups?present=false'         # UPS drops off the console
 ```
+
+`present=false` removes the UPS from the device list rather than reporting a value for it, so the `ups` keys vanish entirely. That is the case an Automation has to distinguish from "the outage ended", and the one the reconciler answers with `StateKeyUnavailable`.
 
 ### Rehearsing a failover that has never been observed
 

@@ -179,6 +179,19 @@ func baselineOf(deployment *appsv1.Deployment) (level *int64, recorded bool) {
 	return &parsed, true
 }
 
+// outOfScope reports whether a target could not be read because Reactor is not
+// allowed to see it, in either of the two ways that happens.
+//
+// A cluster-wide install is refused by the API server and gets a Forbidden. A
+// namespaced install never asks: its cache is restricted to the one namespace
+// it may watch, so the cached client rejects the read itself, with an error
+// that carries no status and would otherwise be reported as an unexplained
+// failure to reach the target. Both mean the same thing to the person reading
+// the status, so both get the same sentence.
+func outOfScope(err error) bool {
+	return errors.IsForbidden(err) || strings.Contains(err.Error(), "unknown namespace for the cache")
+}
+
 // targetOutcome is one target's arbitration, from the point of view of the
 // Automation being reconciled.
 type targetOutcome struct {
@@ -221,7 +234,7 @@ func (r *AutomationReconciler) reconcileTarget(
 	var deployment appsv1.Deployment
 	name := types.NamespacedName{Namespace: key.Namespace, Name: key.Name}
 	if err := r.Get(ctx, name, &deployment); err != nil {
-		if errors.IsForbidden(err) {
+		if outOfScope(err) {
 			return outcome, fmt.Errorf(
 				"target %s not reachable with current RBAC (cross-namespace targets need cluster-wide permissions): %w",
 				key, err)

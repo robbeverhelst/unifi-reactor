@@ -1,0 +1,13 @@
+# The e2e suites drive a rehearsed UniFi console running inside the cluster.
+# Mapping its node port to the host lets them do that over a plain HTTP call,
+# rather than through a `kubectl port-forward` that has to be kept alive for
+# the length of a suite and is a classic source of flakes.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30943
+        hostPort: 30943
+        listenAddress: "127.0.0.1"
+        protocol: TCP

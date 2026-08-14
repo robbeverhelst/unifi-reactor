@@ -590,7 +590,7 @@ var _ = Describe("Automation Controller", func() {
 			Expect(replicasOf(baseline)).To(Equal(int32(1)))
 
 			By("running the pre-delete release with the power still out")
-			Expect(ReleaseAllClaims(ctx, k8sClient)).To(Succeed())
+			Expect(ReleaseAllClaims(ctx, k8sClient, ReleaseOptions{})).To(Succeed())
 
 			Expect(replicasOf(declared)).To(Equal(int32(2)), "declared onExit value")
 			Expect(replicasOf(baseline)).To(Equal(int32(4)), "recorded baseline")
@@ -607,6 +607,58 @@ var _ = Describe("Automation Controller", func() {
 			}
 		})
 
+		// Helm removes the operator's Deployment only after its pre-delete
+		// hooks have run, so the sweep has to stop Reactor itself. A controller
+		// still watching re-claims everything the sweep just released and
+		// re-adds the finalizer, which by then has nothing left to service it.
+		It("stops the operator before handing anything back", func() {
+			const (
+				target  = "uninstall-with-manager"
+				manager = "reactor-manager"
+			)
+			createDeployment(manager, 1)
+			createDeployment(target, 2)
+			createAutomation(target, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyUPS: upsOnBattery},
+				},
+				Actions: []reactorv1alpha1.Action{scaleTo(target, 0)},
+			})
+
+			observe(map[string]string{keyUPS: upsOnBattery})
+			reconcileOnce(target)
+			Expect(replicasOf(target)).To(Equal(int32(0)))
+
+			Expect(ReleaseAllClaims(ctx, k8sClient, ReleaseOptions{
+				Manager: types.NamespacedName{Namespace: testNamespace, Name: manager},
+			})).To(Succeed())
+
+			Expect(replicasOf(manager)).To(Equal(int32(0)), "the operator was left running during the sweep")
+			Expect(replicasOf(target)).To(Equal(int32(2)))
+		})
+
+		// Namespace-scoped RBAC grants no cluster-wide list, so a sweep that
+		// enumerated every namespace would fail outright and take the uninstall
+		// with it.
+		It("sweeps only the namespace it was given", func() {
+			const target = "uninstall-out-of-scope"
+			createDeployment(target, 2)
+			createAutomation(target, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyUPS: upsOnBattery},
+				},
+				Actions: []reactorv1alpha1.Action{scaleTo(target, 0)},
+			})
+
+			observe(map[string]string{keyUPS: upsOnBattery})
+			reconcileOnce(target)
+			Expect(replicasOf(target)).To(Equal(int32(0)))
+
+			Expect(ReleaseAllClaims(ctx, k8sClient, ReleaseOptions{Namespace: "kube-system"})).To(Succeed())
+			Expect(replicasOf(target)).To(Equal(int32(0)), "a scoped sweep reached outside its namespace")
+			Expect(annotationsOf(target)).To(HaveKey(annotationBaselineReplicas))
+		})
+
 		It("is a no-op for targets it never claimed", func() {
 			const target = "never-claimed"
 			createDeployment(target, 3)
@@ -617,7 +669,7 @@ var _ = Describe("Automation Controller", func() {
 				Actions: []reactorv1alpha1.Action{scaleTo(target, 0)},
 			})
 
-			Expect(ReleaseAllClaims(ctx, k8sClient)).To(Succeed())
+			Expect(ReleaseAllClaims(ctx, k8sClient, ReleaseOptions{})).To(Succeed())
 			Expect(replicasOf(target)).To(Equal(int32(3)))
 		})
 	})

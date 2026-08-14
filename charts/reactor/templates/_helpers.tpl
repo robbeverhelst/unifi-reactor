@@ -28,6 +28,19 @@ app.kubernetes.io/name: {{ include "reactor.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
+{{/*
+The namespace the operator may see. Namespace-scoped RBAC grants no cluster-wide
+list, so watching every namespace would leave every informer failing while the
+health probes still report the pod ready. Rendered into both the manager and the
+pre-delete hook so they agree on scope.
+*/}}
+{{- define "reactor.watchNamespaceEnv" -}}
+{{- if not .Values.rbac.clusterWide }}
+- name: WATCH_NAMESPACE
+  value: {{ .Release.Namespace | quote }}
+{{- end }}
+{{- end -}}
+
 {{- define "reactor.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}
 {{- default (include "reactor.fullname" .) .Values.serviceAccount.name -}}

@@ -278,7 +278,7 @@ Two ways out, and the second is usually better in a homelab you did not want clu
 - `helm upgrade ... --set rbac.clusterWide=true`
 - Move the Automation into the target's namespace and drop `target.namespace`. Automations are namespaced precisely so they can live next to what they act on.
 
-> With `rbac.clusterWide: false`, Automations outside the release namespace are not reconciled at all — the operator has no permission to watch them, so they never get a status. If a resource you created is showing no status whatsoever, check this before anything else, and check the operator log for `failed to list` errors.
+> With `rbac.clusterWide: false`, the operator watches only the release namespace, and Automations outside it are not reconciled at all — they never get a status. If a resource you created is showing no status whatsoever, check this before anything else. The chart passes the scope to the operator as `WATCH_NAMESPACE`; without it a namespaced install would watch every namespace, be refused at every list, and sit there reporting itself healthy while reconciling nothing.
 
 ---
 
@@ -409,6 +409,8 @@ kubectl -n media patch automation pause-downloads-on-backup-wan \
 That strands whatever it was holding. Restore the target by hand using the baseline annotation above.
 
 *`helm uninstall`.* The CRD carries `helm.sh/resource-policy: keep`, so both it and every Automation stored under it *survive* the uninstall — deliberately, because losing people's resources to an uninstall is worse. They simply stop reconciling, and workloads freeze wherever Reactor last put them. No finalizer ever fires, because nothing is being deleted. The chart ships a pre-delete hook that releases every claim before the controller goes away, gated by `uninstall.releaseClaims` (default `true`); if you disabled it, or the hook failed, sweep the annotations manually before removing the chart.
+
+The hook stops the operator before it releases anything. Helm removes the release's own resources only once its pre-delete hooks have finished, so a controller left running would re-claim every workload the hook had just released — and re-add the finalizer, which by then has nothing left to service it. If an uninstall is interrupted after the hook has run but before Helm finishes, the operator is left scaled to zero; `helm upgrade` or `helm rollback` puts it back.
 
 Deleting the CRD afterwards is a deliberate, separate act, and it takes every Automation with it:
 

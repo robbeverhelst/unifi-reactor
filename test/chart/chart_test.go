@@ -18,9 +18,9 @@ limitations under the License.
 //
 // These are render-time tests: they prove the CRD is part of the release (so
 // `helm upgrade` applies it) rather than a crds/ file Helm would install once
-// and never touch again. Proving the upgrade end to end — install an old
-// chart, upgrade, read the live schema back from the API server — needs a real
-// cluster and belongs with the chart e2e work in #35.
+// and never touch again. The upgrade itself — install the old packaging,
+// adopt the CRD, upgrade, and read the live schema back from the API server —
+// is proven end to end by test/e2e/lifecycle, which needs a real cluster.
 package chart
 
 import (
@@ -164,6 +164,92 @@ func TestCredentialsAreMountedForRotation(t *testing.T) {
 	}
 	if !strings.Contains(manifests, "secretName: \"unifi-reactor-credentials\"") {
 		t.Fatal("the credentials Secret is not mounted")
+	}
+}
+
+// TestNamespacedRBACScopesTheWatch covers the pairing that makes
+// rbac.clusterWide=false usable at all. A namespaced Role grants no
+// cluster-wide list, so an operator left watching every namespace is refused
+// at every list and reconciles nothing — while its health probes, which only
+// ping, keep reporting it ready.
+func TestNamespacedRBACScopesTheWatch(t *testing.T) {
+	scoped := render(t, unifiURL, "rbac.clusterWide=false")
+	if !strings.Contains(scoped, "name: WATCH_NAMESPACE") {
+		t.Fatal("namespace-scoped RBAC did not tell the operator which namespace it may watch")
+	}
+	if strings.Contains(scoped, "kind: ClusterRole") {
+		t.Fatal("rbac.clusterWide=false still rendered cluster-scoped RBAC")
+	}
+	if wide := render(t, unifiURL); strings.Contains(wide, "name: WATCH_NAMESPACE") {
+		t.Fatal("a cluster-wide install was restricted to one namespace")
+	}
+}
+
+// TestSecretAccessFollowsTheGrantedScope pins the corner where two independent
+// switches meet. Whether the Secret rule is granted at all is covered by the
+// outbound-action tests; this is about *which* role carries it, because
+// allowing a destination must not quietly widen a namespaced install into
+// cluster-wide read access to every Secret in the cluster.
+func TestSecretAccessFollowsTheGrantedScope(t *testing.T) {
+	const destination = "actions.allowedDestinations={https://ntfy.example.com}"
+
+	namespaced := render(t, unifiURL, "rbac.clusterWide=false", destination)
+	if strings.Contains(namespaced, "kind: ClusterRole") {
+		t.Fatal("allowing a destination widened a namespaced install to cluster-scoped RBAC")
+	}
+	scoped, found := managerRules(namespaced, "kind: Role")
+	if !found {
+		t.Fatal("no manager Role rendered for a namespaced install")
+	}
+	if !strings.Contains(scoped, secretsRule) {
+		t.Error("a namespaced install allowing a destination cannot read the Secret it authenticates with")
+	}
+
+	// The same switch, off, in the mode the outbound-action tests do not cover.
+	if off := render(t, unifiURL, "rbac.clusterWide=false"); strings.Contains(off, secretsRule) {
+		t.Error("a namespaced install that allows no destination was still granted read access to Secrets")
+	}
+
+	// And cluster-wide, the rule belongs to the manager's own ClusterRole
+	// rather than to some other document that happens to mention Secrets.
+	wide, found := managerRules(render(t, unifiURL, destination), "kind: ClusterRole")
+	if !found {
+		t.Fatal("no manager ClusterRole rendered for a cluster-wide install")
+	}
+	if !strings.Contains(wide, secretsRule) {
+		t.Error("the Secret read was granted somewhere other than the manager's ClusterRole")
+	}
+}
+
+// managerRules returns the rule block of the manager's Role or ClusterRole,
+// so an assertion about what it permits cannot be satisfied by a different
+// document in the release that happens to mention the same resource.
+func managerRules(manifests, kind string) (string, bool) {
+	for document := range strings.SplitSeq(manifests, "\n---") {
+		// "rules:" is what tells the role apart from the binding that
+		// references it, which names the same kind and the same object.
+		if strings.Contains(document, kind) && strings.Contains(document, "-manager\n") &&
+			strings.Contains(document, "\nrules:") {
+			return document, true
+		}
+	}
+	return "", false
+}
+
+// TestReleaseHookStopsTheOperator is the ordering the uninstall depends on.
+// Helm removes the release's own resources only after its pre-delete hooks
+// finish, so the hook has to stop the operator itself; one left running
+// re-claims everything the hook released and re-adds the finalizer that by
+// then has nothing to service it.
+func TestReleaseHookStopsTheOperator(t *testing.T) {
+	manifests := render(t, unifiURL)
+	for _, wiring := range []string{"name: MANAGER_DEPLOYMENT", "name: MANAGER_NAMESPACE"} {
+		if !strings.Contains(manifests, wiring) {
+			t.Errorf("the pre-delete hook is not told %q, so it cannot stop the operator first", wiring)
+		}
+	}
+	if disabled := render(t, unifiURL, "uninstall.releaseClaims=false"); strings.Contains(disabled, "kind: Job") {
+		t.Error("uninstall.releaseClaims=false still rendered the release hook")
 	}
 }
 
