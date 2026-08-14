@@ -50,6 +50,12 @@ const jsonNull = "null"
 // so both are written to the shape UniFi's API documents and to the names issue
 // #14 lists, and added to hack/capture-unifi.sh. See the live-verification list
 // in testdata/unifi/README.md.
+//
+// write.go reads this same port_table, untyped, to guard a power-cycle. The two
+// are deliberately separate — that one must refuse on any field it cannot read,
+// this one must tell absent from zero on every number, and neither could be the
+// other — but they share field names that Go cannot share through a struct tag.
+// TestBothPoEReadersAgreeOnOnePortTable is what fails if they drift apart.
 type poeFields struct {
 	// TotalMaxPower is the switch's whole PoE budget in watts: the denominator.
 	// A pointer, because a switch reporting no budget is not a switch with no

@@ -68,6 +68,11 @@ const (
 	// The device and port_table fields the PoE check reads. Every one of them
 	// is a refusal if it is absent: a guard that silently does not apply is
 	// worse than one that declines.
+	//
+	// poe.go reads the same port_table through a typed struct to measure the
+	// PoE budget for the poe state key. That reader omits its key where this
+	// one refuses, which is why they are not one decoder;
+	// TestBothPoEReadersAgreeOnOnePortTable holds them to the same field names.
 	fieldMAC       = "mac"
 	fieldPortTable = "port_table"
 	fieldPortIndex = "port_idx"

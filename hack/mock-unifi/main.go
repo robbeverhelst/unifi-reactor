@@ -91,6 +91,10 @@ limitations under the License.
 //	curl -X POST 'http://localhost:9443/device?name=ups-2u&present=false'  # gone from the list
 //	curl -X POST 'http://localhost:9443/device?reset=true'
 //
+// The synthetic PoE switch the write path cycles is part of that fleet too —
+// adopted, online, and addressable as mock-switch — because a switch Reactor
+// may cut power to is one the console manages.
+//
 // Rehearse a firmware update becoming available. The captures carry no upgrade
 // fields at all, so what this serves is the shape UniFi documents — enough to
 // drive the parser, not evidence that a console reports it this way:
@@ -112,15 +116,16 @@ limitations under the License.
 //	curl -X POST 'http://localhost:9443/temperature?present=false'           # no thermals reported
 //	curl -X POST 'http://localhost:9443/temperature?reset=true'
 //
-// Rehearse a PoE budget running out. No capture carries a port_table or a PoE
-// budget — the UPS 2U is a switch-type device with neither — so this serves the
-// shape UniFi documents, with poe_power as the STRING that firmware is
-// documented to use:
+// Rehearse a PoE budget running out, on the same synthetic switch and the same
+// port table the write path guards — there is one switch here and both halves
+// read it. No capture carries a PoE budget or a port_table at all, so this
+// serves the shape UniFi documents, with poe_power as the STRING that firmware
+// is documented to use:
 //
 //	curl -X POST 'http://localhost:9443/poe?watts=55&budget=60'   # almost no headroom
 //	curl -X POST 'http://localhost:9443/poe?watts=12&budget=60'   # comfortable
 //	curl -X POST 'http://localhost:9443/poe?silent=true'          # a powered port reporting no wattage
-//	curl -X POST 'http://localhost:9443/poe?present=false'        # no PoE switch at all
+//	curl -X POST 'http://localhost:9443/poe?present=false'        # no budget served at all
 //	curl -X POST 'http://localhost:9443/poe?reset=true'
 //
 // Rehearse the UPS dropping off the console entirely — the ups keys vanish
@@ -247,6 +252,21 @@ const (
 	fieldIsUplink  = "is_uplink"
 	fieldPortPoE   = "port_poe"
 	fieldPoEEnable = "poe_enable"
+	fieldPortTable = "port_table"
+	// The two fields the poe STATE key reads on that same table: what a port is
+	// delivering, and the switch's whole budget. Named beside the others
+	// because they describe one structure — the write path guards a port and
+	// the state key measures the budget, and both read this port_table.
+	fieldPoEPower = "poe_power"
+	fieldMaxPower = "total_max_power"
+	// paramSilent is a powered port that will not say what it is delivering,
+	// and fieldType is how a device record spells what kind of thing it is.
+	paramSilent = "silent"
+	paramWatts  = "watts"
+	fieldType   = "type"
+	// zeroWatts is a port delivering nothing, which is a reading rather than a
+	// missing one. UniFi is documented to report this field as a string.
+	zeroWatts = "0.00"
 
 	// statusHealthOK is what the capture's www subsystem reports. The other
 	// values this mock will happily serve — "warning", "error" — are the ones
@@ -261,7 +281,6 @@ const (
 	valueCaptured = "captured"
 	fieldDevices  = "devices"
 	fieldPresent  = "present"
-	paramName     = "name"
 	paramAdopted  = "adopted"
 	paramBudget   = "budget"
 
@@ -538,7 +557,6 @@ func main() {
 	mux.HandleFunc("POST /firmware", m.setFirmware)
 	mux.HandleFunc("POST /temperature", m.setTemperature)
 	mux.HandleFunc("POST /wifi", m.setWiFi)
-	mux.HandleFunc("POST /poe", m.setPoE)
 
 	// The write path: the Network application under /proxy/network, but
 	// authenticated the UniFi OS way — a session cookie plus the csrf header.
@@ -600,10 +618,19 @@ func (m *mock) devices() []any {
 	}
 	// The synthetic switch is appended rather than substituted: the captured
 	// records are the ground truth and this one is not, so it never replaces
-	// anything that came off a console. The state parser ignores it — it has
-	// neither WAN ports nor a vbms_table — which is what makes it safe to serve
-	// on the same endpoint.
-	return append(visible, cloneJSON(m.switchDevice))
+	// anything that came off a console.
+	//
+	// It now goes through the same override path as the captured devices, which
+	// it did not need to before this batch: it has neither WAN ports nor a
+	// vbms_table, so the state parser had nothing to read on it. It has a port
+	// table the poe key measures and an adoption the fleet keys count, so
+	// leaving it outside would make the one switch here invisible to the one
+	// state key about switches.
+	switchDevice := cloneJSON(m.switchDevice)
+	if switchDevice != nil && m.rewriteFleet(switchDevice) {
+		visible = append(visible, switchDevice)
+	}
+	return visible
 }
 
 // cloneJSON deep-copies a decoded document, so a handler cannot hand a caller a
@@ -623,7 +650,7 @@ func cloneJSON(value map[string]any) map[string]any {
 // rewriteFleet applies one device's overrides and reports whether it should
 // still appear in the list at all.
 func (m *mock) rewriteFleet(device map[string]any) bool {
-	name, _ := device[paramName].(string)
+	name, _ := device[fieldName].(string)
 	override := m.deviceOverrides[slugifyName(name)]
 	if override != nil && override.absent {
 		return false
@@ -656,35 +683,68 @@ func (m *mock) rewriteFleet(device map[string]any) bool {
 	return true
 }
 
-// rewritePoE injects a PoE budget and a two-port table onto switch-type
-// devices. poe_power is served as a string, because that is the form UniFi is
-// documented to use and the form most likely to break a parser.
+// rewritePoE puts a budget and a per-port draw on the synthetic switch, which
+// is the only device here with a port table.
+//
+// It writes into THAT table rather than inventing one, and that is the whole
+// point of doing it here: the write path guards a port by reading the same
+// table, so a mock carrying two port tables would be rehearsing two different
+// switches and letting the two halves of the PoE story drift apart. Nothing is
+// injected until /poe names a budget, because no capture carries one.
 func (m *mock) rewritePoE(device map[string]any) {
-	if m.poeBudget == nil || device["type"] != "usw" {
+	if device["mac"] != mockSwitchMAC || m.poeBudget == nil {
 		return
 	}
-	device["total_max_power"] = *m.poeBudget
+	device[fieldMaxPower] = *m.poeBudget
 	watts := 0.0
 	if m.poeWatts != nil {
 		watts = *m.poeWatts
 	}
-	powered := map[string]any{
-		"port_idx": 1, "poe_enable": true, "poe_class": "Class 4",
-		"poe_power": strconv.FormatFloat(watts, 'f', 2, 64),
+	table, ok := device[fieldPortTable].([]any)
+	if !ok {
+		return
 	}
-	if m.poeSilent {
-		// Powering something and refusing to say how much.
-		delete(powered, "poe_power")
-	}
-	device["port_table"] = []any{
-		powered,
-		map[string]any{"port_idx": 2, "poe_enable": false, "poe_power": "0.00", "poe_class": "Unknown"},
+	// The whole draw goes on the first powered port that is not the uplink, so
+	// the arithmetic in the log is the one that was asked for rather than a
+	// figure spread across ports. An uplink port powers nothing.
+	assigned := false
+	for _, entry := range table {
+		port, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		powered, _ := port[fieldPoEEnable].(bool)
+		uplink, _ := port[fieldIsUplink].(bool)
+		switch {
+		case !powered || uplink || assigned:
+			port[fieldPoEPower] = zeroWatts
+		case m.poeSilent:
+			// Powering something and refusing to say how much, which makes the
+			// whole switch unreadable rather than looking like free headroom.
+			delete(port, fieldPoEPower)
+			assigned = true
+		default:
+			port[fieldPoEPower] = strconv.FormatFloat(watts, 'f', 2, 64)
+			assigned = true
+		}
 	}
 }
 
-// setPoE drives the PoE budget and draw, which the poe key buckets.
-func (m *mock) setPoE(w http.ResponseWriter, r *http.Request) {
+// setPoEBudget drives the budget and draw the poe STATE key buckets, and
+// reports whether the request was one of its own. It is the half of POST /poe
+// that addresses the switch rather than one of its ports.
+func (m *mock) setPoEBudget(w http.ResponseWriter, r *http.Request) bool {
 	query := r.URL.Query()
+	named := false
+	for _, param := range []string{paramWatts, paramBudget, paramSilent, fieldPresent, "reset"} {
+		if query.Get(param) != "" {
+			named = true
+		}
+	}
+	if !named {
+		return false
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -693,7 +753,7 @@ func (m *mock) setPoE(w http.ResponseWriter, r *http.Request) {
 		present, err := strconv.ParseBool(raw)
 		if err != nil {
 			http.Error(w, "present must be a boolean", http.StatusBadRequest)
-			return
+			return true
 		}
 		clear = clear || !present
 	}
@@ -701,14 +761,14 @@ func (m *mock) setPoE(w http.ResponseWriter, r *http.Request) {
 		m.poeWatts, m.poeBudget, m.poeSilent = nil, nil, false
 		log.Print("PoE fields are no longer served, as in the capture")
 		writeJSON(w, map[string]any{"poe": "absent"})
-		return
+		return true
 	}
 
 	for _, field := range []struct {
 		name   string
 		target **float64
 	}{
-		{"watts", &m.poeWatts},
+		{paramWatts, &m.poeWatts},
 		{paramBudget, &m.poeBudget},
 	} {
 		raw := query.Get(field.name)
@@ -718,15 +778,15 @@ func (m *mock) setPoE(w http.ResponseWriter, r *http.Request) {
 		value, err := strconv.ParseFloat(raw, 64)
 		if err != nil {
 			http.Error(w, field.name+" must be a number of watts", http.StatusBadRequest)
-			return
+			return true
 		}
 		*field.target = &value
 	}
-	if raw := query.Get("silent"); raw != "" {
+	if raw := query.Get(paramSilent); raw != "" {
 		silent, err := strconv.ParseBool(raw)
 		if err != nil {
-			http.Error(w, "silent must be a boolean", http.StatusBadRequest)
-			return
+			http.Error(w, paramSilent+" must be a boolean", http.StatusBadRequest)
+			return true
 		}
 		m.poeSilent = silent
 	}
@@ -740,10 +800,11 @@ func (m *mock) setPoE(w http.ResponseWriter, r *http.Request) {
 	log.Printf("PoE: watts=%s budget=%s silent=%v",
 		describeFloat(m.poeWatts), describeFloat(m.poeBudget), m.poeSilent)
 	writeJSON(w, map[string]any{
-		"watts": m.poeWatts, paramBudget: m.poeBudget, "silent": m.poeSilent,
-		fieldNote: "no capture carries a port_table or a PoE budget; this serves the shape UniFi " +
+		paramWatts: m.poeWatts, paramBudget: m.poeBudget, paramSilent: m.poeSilent,
+		keyNote: "no capture carries a port_table or a PoE budget; this serves the shape UniFi " +
 			"documents, with poe_power as the string that firmware is documented to use",
 	})
+	return true
 }
 
 // rewriteThermals injects the temperature fields. Nothing is injected until
@@ -987,7 +1048,7 @@ func (m *mock) setWiFi(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
 		paramAdopted: m.apAdopted, "disconnected": m.apDisconnected,
 		"status": m.wlanStatus, fieldPresent: !m.noWLAN,
-		fieldNote: "wifi is derived from the counts, not from status; setting only status makes " +
+		keyNote: "wifi is derived from the counts, not from status; setting only status makes " +
 			"Reactor report a disagreement, which is the point of it",
 	})
 }
@@ -1275,7 +1336,7 @@ func (m *mock) setFirmware(w http.ResponseWriter, r *http.Request) {
 	defer m.mu.Unlock()
 
 	targets := m.capturedSlugs()
-	if name := slugifyName(query.Get(paramName)); name != "" {
+	if name := slugifyName(query.Get(fieldName)); name != "" {
 		if !slices.Contains(targets, name) {
 			http.Error(w, fmt.Sprintf("no captured device named %q; try one of: %s\n",
 				name, strings.Join(targets, ", ")), http.StatusBadRequest)
@@ -1352,7 +1413,7 @@ func (m *mock) setTemperature(w http.ResponseWriter, r *http.Request) {
 	defer m.mu.Unlock()
 
 	targets := m.capturedSlugs()
-	if name := slugifyName(query.Get(paramName)); name != "" {
+	if name := slugifyName(query.Get(fieldName)); name != "" {
 		if !slices.Contains(targets, name) {
 			http.Error(w, fmt.Sprintf("no captured device named %q; try one of: %s\n",
 				name, strings.Join(targets, ", ")), http.StatusBadRequest)
@@ -1415,7 +1476,7 @@ func (m *mock) setTemperature(w http.ResponseWriter, r *http.Request) {
 		map[bool]string{false: "temperatures[]", true: "general_temperature"}[general])
 	writeJSON(w, map[string]any{
 		fieldDevices: m.describeDevices(),
-		fieldNote: "no capture carries any thermal field; this serves the shape UniFi documents, " +
+		keyNote: "no capture carries any thermal field; this serves the shape UniFi documents, " +
 			"which is enough to drive the parser and not evidence that a console reports it",
 	})
 }
@@ -1448,7 +1509,7 @@ func (m *mock) setDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slug := slugifyName(query.Get(paramName))
+	slug := slugifyName(query.Get(fieldName))
 	if slug == "" {
 		http.Error(w, "name is required; GET /device lists what the capture holds", http.StatusBadRequest)
 		return
@@ -1513,9 +1574,9 @@ func (m *mock) describeDevices() []any {
 		if !ok {
 			continue
 		}
-		name, _ := device[paramName].(string)
+		name, _ := device[fieldName].(string)
 		described = append(described, map[string]any{
-			paramName: name,
+			fieldName: name,
 			"key":     "device." + slugifyName(name),
 			"state":   device["state"],
 			// The handle to address it by, which does not move when it is
@@ -1533,13 +1594,16 @@ func (m *mock) capturedSlugs() []string {
 	if err := json.Unmarshal(m.pristine, &devices); err != nil {
 		return nil
 	}
-	var slugs []string
+	// The synthetic switch is part of the fleet the state keys describe, so it
+	// is addressable here too — it is simply not a capture, which is what the
+	// name says.
+	slugs := []string{mockSwitchName}
 	for _, d := range devices {
 		device, ok := d.(map[string]any)
 		if !ok {
 			continue
 		}
-		if name, ok := device[paramName].(string); ok {
+		if name, ok := device[fieldName].(string); ok {
 			slugs = append(slugs, slugifyName(name))
 		}
 	}
@@ -1753,14 +1817,24 @@ func (m *mock) setWLAN(w http.ResponseWriter, r *http.Request) {
 // prefix on committed fixtures; this file is not one, and follows it anyway.
 const mockSwitchMAC = "aa:bb:cc:00:11:33"
 
+// mockSwitchName is what the switch is called, and therefore the key
+// device.<name> publishes it under and the handle /device addresses it by. It
+// slugifies to itself on purpose.
+const mockSwitchName = "mock-switch"
+
 // mockSwitch builds a PoE switch. NOT A CAPTURE: no switch record has ever been
 // recorded from a console, so this carries only the port_table fields the PoE
 // check reads. The four ports are the four cases worth rehearsing — a normal
 // PoE port, the uplink, a port with no PoE, and a port whose power is off.
 func mockSwitch() map[string]any {
 	return map[string]any{
-		"mac": mockSwitchMAC, "model": "MOCKPOE", "type": "usw", fieldName: "mock-switch",
-		"port_table": []any{
+		"mac": mockSwitchMAC, "model": "MOCKPOE", fieldType: "usw", fieldName: mockSwitchName,
+		// Adopted and online, because a switch Reactor may cut power to is a
+		// switch the console manages — and because the fleet keys (devices,
+		// device.<name>) count only devices that say so. Nothing read either
+		// field before this batch.
+		"state": 1, "adopted": true,
+		fieldPortTable: []any{
 			map[string]any{
 				fieldPortIndex: 1, fieldName: "mock-uplink",
 				fieldIsUplink: true, fieldPortPoE: true, fieldPoEEnable: true,
@@ -1853,22 +1927,46 @@ func (m *mock) portByIndex(index int) (map[string]any, bool) {
 func (m *mock) describePoE(w http.ResponseWriter, _ *http.Request) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// The switch as stat/device would serve it, decorations included: what this
+	// endpoint reports and what Reactor reads have to be the same switch.
+	served := cloneJSON(m.switchDevice)
+	if served != nil {
+		m.rewritePoE(served)
+	}
 	writeJSON(w, map[string]any{
-		"switch": m.switchDevice,
+		"switch": served,
 		"cycles": m.cycles,
+		// The state half of the same switch: what it is delivering against what
+		// it can, which is what the poe key buckets. Nil means no budget is
+		// being served at all, which is the state every capture is in.
+		paramWatts: m.poeWatts, paramBudget: m.poeBudget, paramSilent: m.poeSilent,
 		keyNote: "synthetic, not a capture: no switch record has ever been recorded from a console, " +
-			"and no power-cycle command has ever been sent to one. See docs/unifi-write-api.md.",
+			"no power-cycle command has ever been sent to one, and no capture carries a PoE budget. " +
+			"See docs/unifi-write-api.md and testdata/unifi/README.md.",
 	})
 }
 
-// setPoEPort breaks the identity checks on purpose. Renaming a port is the
-// re-patched rack; marking one as the uplink or as non-PoE is each of the two
-// floors. All three should produce a refusal from Reactor and no cycle here.
+// setPoEPort drives both halves of the PoE story, because there is one switch
+// and one port table and they are the same one.
+//
+// Naming a port breaks the write path's identity checks on purpose — renaming a
+// port is the re-patched rack, marking one as the uplink or as non-PoE is each
+// of the two floors, and all three should produce a refusal from Reactor and no
+// cycle here. Naming watts or a budget instead drives the poe STATE key, which
+// measures the same table rather than guarding it.
 func (m *mock) setPoEPort(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
+	// The budget half addresses the switch rather than a port, so it is handled
+	// before the port index is required. A request naming neither is a mistake
+	// worth reporting rather than a no-op.
+	if m.setPoEBudget(w, r) {
+		return
+	}
 	index, err := strconv.Atoi(query.Get("port"))
 	if err != nil {
-		http.Error(w, "port must be an integer index, e.g. ?port=7&name=re-patched", http.StatusBadRequest)
+		http.Error(w, "name a port to change its identity (?port=7&name=re-patched), "+
+			"or watts/budget to change what the switch is delivering (?watts=55&budget=60)",
+			http.StatusBadRequest)
 		return
 	}
 

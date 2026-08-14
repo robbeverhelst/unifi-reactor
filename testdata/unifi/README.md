@@ -369,7 +369,13 @@ shape **in code**, as a hypothesis rather than as a fixture.
 
 > ⚠️ **Unverified.** A `stat-device-switch.json` from a US-8-60W or a US-48 is
 > the single capture that would settle this key, the PoE half of `temperature`,
-> and the firmware flags at once.
+> and the firmware flags at once — **and the write path's PoE guard with them**,
+> which reads the same `port_table` for `is_uplink`, `port_poe` and a port name.
+> The allowlist projection carries both readers' fields for exactly that reason:
+> keeping only one set would make the first switch capture useless to the other
+> half, and look like evidence that its fields do not exist. Port names are
+> replaced with their index, because a port is usually named after the room or
+> the person on the end of it.
 
 ## What is not captured yet
 
@@ -423,7 +429,13 @@ UniFi also has a `network:ups_overload_detected` alarm trigger, which corroborat
 
 `unifi.wlan.*` and `unifi.poe.cycle` write to the console, and **no capture backs any of it**. There
 is no `rest/wlanconf` response here and no switch record — every device capture above is a gateway
-or a UPS — so the fields those actions read are inferred rather than observed. See
+or a UPS — so the fields those actions read are inferred rather than observed.
+
+> Since the state batch, `hack/capture-unifi.sh` writes a `stat-device-switch.json` when a switch is
+> adopted, and its `port_table` projection carries the write path's three fields (`is_uplink`,
+> `port_poe`, and a port name replaced by its index) alongside the `poe` state key's. One capture
+> would therefore give the PoE half of both paths its first ground truth at once. The WLAN half
+> still has none, and `wlanconf` is the record that carries pre-shared keys. See
 [docs/unifi-write-api.md](../../docs/unifi-write-api.md), which splits the two, and note that
 `hack/mock-unifi` builds its WLAN table and its PoE switch **in code**, clearly labelled, precisely
 so nothing in `testdata/` claims to have come off a console when it did not.

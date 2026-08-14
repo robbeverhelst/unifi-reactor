@@ -35,6 +35,17 @@ WAN='{is_uplink, up, ifname, name, speed, ip: (if .ip then "'"$PUB_IP"'" else nu
 
 # A device record. vbms_table is pure battery telemetry with no identifiers,
 # so it is kept whole; everything else is named explicitly.
+#
+# The port_table projection carries what BOTH port readers need: poe_enable,
+# poe_power and poe_class for the poe state key, and is_uplink, port_poe and a
+# name for the write path's guard on a power-cycle. Keeping only one set would
+# make the first switch capture useless to the other half and look like evidence
+# that its fields do not exist.
+#
+# Port names are replaced with their index, for the reason the switch's own name
+# is replaced: a port is usually named after the room or the person on the end
+# of it. The write path matches on that name, so what a fixture needs to carry
+# is the shape and the correlation with port_idx, not somebody's study.
 DEVICE='{
   model, type, name, state, adopted, version, displayable_version,
   disconnection_reason,
@@ -43,7 +54,10 @@ DEVICE='{
   has_temperature, has_fan, overheating, general_temperature,
   temperatures: (if .temperatures then [.temperatures[] | {name, type, value}] else null end),
   total_max_power,
-  port_table: (if .port_table then [.port_table[] | {port_idx, poe_enable, poe_power, poe_class}] else null end),
+  port_table: (if .port_table then [.port_table[] | {
+    port_idx, poe_enable, poe_power, poe_class, is_uplink, port_poe,
+    name: ("port-" + (.port_idx | tostring))
+  }] else null end),
   wan1: (if .wan1 then (.wan1 | '"$WAN"') else null end),
   wan2: (if .wan2 then (.wan2 | '"$WAN"') else null end),
   uplink: (if .uplink then {name: .uplink.name, type: .uplink.type} else null end),
