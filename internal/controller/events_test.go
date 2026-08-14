@@ -186,8 +186,8 @@ func TestOnlyChangedTargetsRaiseAnEvent(t *testing.T) {
 
 	zero, one := int32(0), int32(1)
 	r.eventsForTargets(automation, []targetOutcome{
-		{ref: "Deployment/media/unchanged", effective: &one, changed: false},
-		{ref: "Deployment/media/qbittorrent", effective: &zero, changed: true},
+		{ref: "Deployment/media/unchanged", effective: &one, level: "1 replicas", changed: false},
+		{ref: "Deployment/media/qbittorrent", effective: &zero, level: "0 replicas", changed: true},
 		{ref: "Deployment/media/sonarr", effective: nil, changed: true},
 	})
 
@@ -195,9 +195,9 @@ func TestOnlyChangedTargetsRaiseAnEvent(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("expected one Event per write that happened, got %d: %v", len(got), got)
 	}
-	scaled, ok := recorder.find(reasonTargetScaled)
-	if !ok || !strings.Contains(scaled.Note, "qbittorrent") || !strings.Contains(scaled.Note, "0 replicas") {
-		t.Errorf("the scale Event does not say what was written: %+v", scaled)
+	held, ok := recorder.find(reasonTargetHeld)
+	if !ok || !strings.Contains(held.Note, "qbittorrent") || !strings.Contains(held.Note, "0 replicas") {
+		t.Errorf("the write Event does not say what was written: %+v", held)
 	}
 	released, ok := recorder.find(reasonTargetReleased)
 	if !ok || !strings.Contains(released.Note, "sonarr") {

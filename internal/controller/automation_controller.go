@@ -62,8 +62,13 @@ const (
 	// reasonActionFailed is reported when a desired-state action could not be
 	// applied to its target.
 	reasonActionFailed = "ActionFailed"
-	// actionKubernetesScale is the only action type implemented in v0.1.
+	// actionKubernetesScale holds a workload at a replica count.
 	actionKubernetesScale = "kubernetes.scale"
+	// actionCronJobSuspend holds a CronJob at suspended or running. Suspending
+	// stops new Jobs being created and deliberately leaves a Job already
+	// running alone: declining to start more work is a different and far safer
+	// act than killing work in flight.
+	actionCronJobSuspend = "kubernetes.cronjob.suspend"
 	// reevaluateInterval bounds how stale a matching decision can get relative
 	// to the poller's StateStore when nothing else triggers a reconcile.
 	reevaluateInterval = 15 * time.Second
@@ -134,6 +139,7 @@ func retryBackoff(attempts int32) time.Duration {
 // element for it, it is an edge action and belongs out of this map.
 var desiredStateActions = map[string]bool{
 	actionKubernetesScale: true,
+	actionCronJobSuspend:  true,
 }
 
 func isDesiredState(actionType string) bool {
@@ -172,7 +178,15 @@ type AutomationReconciler struct {
 // +kubebuilder:rbac:groups=reactor.robbeverhelst.com,resources=automations,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=reactor.robbeverhelst.com,resources=automations/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=reactor.robbeverhelst.com,resources=automations/finalizers,verbs=update
-// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
+// Targets are read as unstructured objects through the uncached client, so a
+// target kind needs get to read it and patch to write it — no list, no watch,
+// and no informer holding every object of that kind in memory.
+// A replica count is read and written through the scale subresource, so a
+// scalable kind needs its parent for the annotations and its /scale for the
+// level. That split is what keeps one executor serving every scalable kind.
+// +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;patch
+// +kubebuilder:rbac:groups=apps,resources=deployments/scale;statefulsets/scale,verbs=get;update
+// +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;patch
 // mgr.GetEventRecorder returns the events.k8s.io/v1 recorder, not the deprecated
 // core/v1 one. They share storage but are separate API groups for authorization,
 // and a rule naming only "" fails every emission with a Forbidden the broadcaster
@@ -535,6 +549,7 @@ func targetStatuses(outcomes []targetOutcome) []reactorv1alpha1.TargetStatus {
 			Ref:        outcome.ref,
 			Desired:    outcome.desired,
 			Effective:  outcome.effective,
+			Level:      outcome.level,
 			DeferredBy: outcome.deferredBy,
 		})
 	}

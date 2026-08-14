@@ -90,7 +90,7 @@ kubectl -n media describe automation pause-downloads-on-backup-wan | tail -20
 | Reason | Type | Means |
 | --- | --- | --- |
 | `StateEntered` / `StateExited` | Normal | the condition started or stopped holding; the message names the key that moved |
-| `TargetScaled` / `TargetReleased` | Normal | a write to a target actually happened |
+| `TargetHeld` / `TargetReleased` | Normal | a write to a target actually happened; the message names the level in words ("0 replicas", "suspended") |
 | `DeferredToOtherAutomation` | Normal | a peer's more restrictive claim won — [§7](#7-two-automations-fighting-over-one-target) |
 | `EdgeActionSent` | Normal | a notification or HTTP request was delivered |
 | `StateKeyUnavailable` | Warning | a key vanished and state is being held — [§2](#2-statekeyunavailable-and-held-state) |
@@ -328,6 +328,14 @@ kubectl auth can-i patch deployments \
   --as system:serviceaccount:reactor-system:reactor
 ```
 
+Scaling needs **two** permissions, because a replica count is read and written through the `scale` subresource while the baseline annotation goes on the object itself. If a target's annotations appear but its replicas never move, this is why:
+
+```sh
+kubectl auth can-i update statefulsets/scale \
+  --namespace other-ns \
+  --as system:serviceaccount:reactor-system:reactor
+```
+
 Two ways out, and the second is usually better in a homelab you did not want cluster-wide RBAC in:
 
 - `helm upgrade ... --set rbac.clusterWide=true`
@@ -413,7 +421,7 @@ status:
 
 ```sh
 kubectl -n media get deploy qbittorrent -o jsonpath='{.metadata.annotations}'
-# reactor.robbeverhelst.com/baseline-replicas: "1"
+# reactor.robbeverhelst.com/baseline-replicas: "1"   # or baseline-suspend on a CronJob
 # reactor.robbeverhelst.com/claimed-by: "power/shed-on-battery,net/pause-on-backup-wan"
 # reactor.robbeverhelst.com/claimed-at: "..."
 ```

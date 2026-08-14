@@ -28,9 +28,33 @@ rules:
   - apiGroups: ["reactor.robbeverhelst.com"]
     resources: ["automations/finalizers"]
     verbs: ["update"]
+  # The target kinds an Automation may name, and nothing else. Reactor reads a
+  # target as an unstructured object through its uncached client, so a kind
+  # costs "get" to read and "patch" to write it — no list, no watch, and no
+  # informer holding every Deployment in the cluster in the operator's memory.
+  #
+  # This list and the target.kind enum in the CRD are the same decision written
+  # twice: the enum is what turns an unsupported kind into a rejected write at
+  # admission instead of a Forbidden at 3am. Adding a kind means adding it to
+  # both.
+  #
+  # kubernetes.scale reads and writes a replica count through the scale
+  # subresource, so a scalable kind is two rules: its own object, for the
+  # annotations that record the baseline and the claim, and its /scale, for the
+  # level. That split is what lets one executor serve every scalable kind
+  # without knowing where any of them keeps its replicas.
   - apiGroups: ["apps"]
-    resources: ["deployments"]
-    verbs: ["get", "list", "watch", "update", "patch"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale", "statefulsets/scale"]
+    verbs: ["get", "update"]
+  # kubernetes.cronjob.suspend. Suspending sets spec.suspend and nothing else:
+  # this grants no permission over Jobs, so a Job already running is untouched
+  # and untouchable, which is deliberate.
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "patch"]
   # Events on the Automations themselves: every transition, every write to a
   # target, every action that failed. Automations live in the namespaces they
   # act on, so this follows the same scope as the rest of the manager's rules

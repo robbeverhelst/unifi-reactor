@@ -30,7 +30,7 @@ Your UniFi gear already knows all of this. **UniFi Reactor** is a Kubernetes ope
 
 - **State, not events** — Reactor polls the UniFi Network API and reconciles against what it observes. A dropped webhook, a network blip, or a controller restart can't strand your cluster in the wrong mode, because the next observation corrects it. Webhooks are an optimization, never the mechanism of record.
 - **Reversal is explicit** — an automation says what to do when a condition starts holding, and separately what it wants once it stops. Nothing is inferred, undoing is never guessed, and every execution is recorded in the resource's status.
-- **One workload, many automations** — a target's replica count is arbitrated across every automation pointing at it, not written by whichever one saw a transition last. Two automations can pause the same workload for unrelated reasons, and it stays paused until *neither* wants it down.
+- **One workload, many automations** — a target's level is arbitrated across every automation pointing at it, not written by whichever one saw a transition last. Two automations can pause the same workload for unrelated reasons, and it stays paused until *neither* wants it down.
 - **Safe by default** — a dedicated ServiceAccount with exactly the verbs it needs, no `cluster-admin`, no arbitrary shell execution, and credentials read from Kubernetes Secrets. Scaling is desired-state (`replicas = 0`), so retrying it is harmless; the actions that leave the cluster are refused until you say where they may go.
 - **Boring to operate** — one static binary in a distroless image, no database, no queue, no UI. Small enough to forget about in a homelab.
 
@@ -113,6 +113,31 @@ kubectl -n media get automation
 
 Shedding load during a power cut is the same shape, matching `ups: on-battery` instead.
 
+### Stopping scheduled work
+
+Scaling cannot express "do not start the nightly backup tonight" — that is `spec.suspend` on a CronJob, and it is the single highest-value thing to stop during an outage or on a metered uplink:
+
+```yaml
+  actions:
+    - type: kubernetes.cronjob.suspend
+      target: { kind: CronJob, name: velero-backup, namespace: velero }
+```
+
+`suspended` defaults to `true`, which is what the action is named after; write `suspended: false` in `onExit` to ask for it back explicitly, or omit `onExit` and Reactor restores whatever the CronJob was set to before it claimed it.
+
+**Suspending stops new Jobs being created and does nothing to a Job already running.** That is deliberate, and Reactor is not granted any permission over Jobs at all, so it could not delete one if it wanted to: declining to start more work is a very different act from killing work in flight, and killing work in flight is not a decision an outage should make on your behalf. If a running backup is what you need stopped, stop it yourself.
+
+### The two shapes an action has
+
+| | Declares | Arbitrated? | Types |
+| --- | --- | --- | --- |
+| **Desired-state** | a *level* — what a target should be | yes, continuously across every automation sharing the target | `kubernetes.scale`, `kubernetes.cronjob.suspend` |
+| **Edge** | an *occurrence* | no — fires on this automation's own transition and owns nothing | `http.request`, `notification.*` |
+
+`kubernetes.scale` works through the [scale subresource](https://kubernetes.io/docs/reference/using-api/api-concepts/#subresources), so `kind: Deployment` and `kind: StatefulSet` take the same path and Reactor never has to know where a kind keeps its replicas. `target.kind` is still a closed list, on purpose: a kind is only reachable if the chart granted RBAC for it, and RBAC has to name resources explicitly — so an open field would turn a typo into a `Forbidden` discovered *during* the outage, instead of a rejected write at admission.
+
+A level is ordered and nothing else: **lower is more restrictive, and a shared target resolves to the lowest anyone asked for.** For `kubernetes.scale` that is the replica count, so shedding wins. For `kubernetes.cronjob.suspend` it is a switch, ordered so that *suspended* is the restrictive answer — which means suspended wins over running for exactly the same reason 0 replicas wins over 3, and with no new rule to learn. `status.targets[].level` says which in words.
+
 ## When two automations share a workload
 
 qBittorrent genuinely should pause for *both* a metered uplink and a power cut. Point both automations at it and nothing has to be coordinated by hand:
@@ -124,7 +149,7 @@ kubectl -n media get automation
 # shed-on-battery         unifi      true       false       True    3h
 ```
 
-While *any* automation's condition holds, the workload stays at the **most restrictive** replica count asked for. The WAN recovering above does not bring qBittorrent back, because the UPS automation still wants it down — and the automation that lost says so plainly:
+While *any* automation's condition holds, the workload stays at the **most restrictive** level asked for. The WAN recovering above does not bring qBittorrent back, because the UPS automation still wants it down — and the automation that lost says so plainly:
 
 ```sh
 kubectl -n media get automation pause-on-backup-wan -o jsonpath='{.status.targets[0]}'
@@ -136,7 +161,7 @@ The workload comes back only once **no** automation wants it down.
 
 ### What "coming back" means
 
-`onExit` declares the value an automation wants once nothing is holding the workload down. Omit it and Reactor restores the **baseline** — what the workload was set to before it first claimed it, recorded on the Deployment itself:
+`onExit` declares the level an automation wants once nothing is holding the workload down. Omit it and Reactor restores the **baseline** — what the target was set to before it first claimed it, recorded on the target itself:
 
 ```sh
 kubectl -n media get deploy qbittorrent -o jsonpath='{.metadata.annotations}'
@@ -145,7 +170,7 @@ kubectl -n media get deploy qbittorrent -o jsonpath='{.metadata.annotations}'
 #  "reactor.robbeverhelst.com/claimed-at":"2026-08-13T02:41:07Z"}
 ```
 
-Those annotations are how a workload explains itself at 3am, and they are removed the moment nothing claims it — after which Reactor asserts nothing and you can scale it by hand freely.
+The baseline annotation is named for what it records, so a CronJob carries `baseline-suspend: "false"` rather than a replica count that would mean nothing there — `baseline-replicas` keeps meaning exactly one replica count, forever. Those annotations are how a workload explains itself at 3am, and they are removed the moment nothing claims it — after which Reactor asserts nothing and you can scale it by hand freely.
 
 | `spec.reversal` | What the automation wants once nothing claims the target | Default when |
 | --- | --- | --- |
@@ -222,7 +247,7 @@ kubectl patch automation <name> -n <namespace> \
 
 Everything above is invisible unless someone is reading controller logs — including the cases where Reactor deliberately did *nothing*, like holding state when the console went quiet. Two action types fix that by leaving the cluster: `notification.*` sends a message, `http.request` calls anything with an HTTP API.
 
-Both are **edge actions**. They fire on this automation's own transitions and own nothing — unlike `kubernetes.scale`, which declares a level that is arbitrated across every automation sharing a target. An edge action in an `onExit` block still fires on this automation's own edge.
+Both are **edge actions**. They fire on this automation's own transitions and own nothing — unlike the desired-state actions, which declare a level that is arbitrated across every automation sharing a target. An edge action in an `onExit` block still fires on this automation's own edge.
 
 ```yaml
 apiVersion: reactor.robbeverhelst.com/v1alpha1
@@ -467,7 +492,7 @@ kubectl -n media describe automation pause-downloads-on-backup-wan
 Type     Reason                     Age    From        Message
 ----     ------                     ----   ----        -------
 Normal   StateEntered               3m12s  automation  wan moved from "primary" to "backup", so the condition started holding
-Normal   TargetScaled               3m12s  automation  Deployment/media/qbittorrent set to 0 replicas
+Normal   TargetHeld                 3m12s  automation  Deployment/media/qbittorrent held at 0 replicas
 Normal   EdgeActionSent             3m11s  automation  notification.ntfy delivered to https://ntfy.example.com:443 after 1 attempt(s)
 Normal   DeferredToOtherAutomation  2m40s  automation  a more restrictive claim is in effect: Deployment/media/qbittorrent held by power/shed-on-battery
 Warning  StateKeyUnavailable        1m02s  automation  provider "unifi" stopped reporting ups; holding the last known state rather than treating lost sight of it as the condition ending
@@ -484,7 +509,7 @@ Volume is bounded by the same rule everywhere: **Events fire on edges, not on st
 | Reason | Type | Raised when |
 | --- | --- | --- |
 | `StateEntered` / `StateExited` | Normal | the condition started or stopped holding, naming the key that moved |
-| `TargetScaled` / `TargetReleased` | Normal | a write to a target actually happened |
+| `TargetHeld` / `TargetReleased` | Normal | a write to a target actually happened; the message names the level in words |
 | `DeferredToOtherAutomation` | Normal | a peer's more restrictive claim is the one in effect |
 | `EdgeActionSent` | Normal | a notification or HTTP request was delivered |
 | `StateKeyUnavailable` | Warning | a provider stopped reporting a key, so state is being held |

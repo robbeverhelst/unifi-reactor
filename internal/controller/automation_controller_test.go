@@ -23,8 +23,10 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -35,21 +37,21 @@ import (
 )
 
 const (
-	testNamespace  = "default"
-	wanPrimary     = "primary"
-	wanBackup      = "backup"
-	keyWAN         = "wan"
-	keyUPS         = "ups"
-	upsOnline      = "online"
-	upsOnBattery   = "on-battery"
-	kindDeployment = "Deployment"
-	targetQbit     = "qbittorrent"
-	labelApp       = "app"
+	testNamespace = "default"
+	wanPrimary    = "primary"
+	wanBackup     = "backup"
+	keyWAN        = "wan"
+	keyUPS        = "ups"
+	upsOnline     = "online"
+	upsOnBattery  = "on-battery"
+	targetQbit    = "qbittorrent"
+	labelApp      = "app"
 )
 
 // stallingClient stands in for a target that has stopped answering: reads of
 // the Automation itself still work, so the reconcile gets far enough to block
-// on the target the way a wedged API call would.
+// on the target the way a wedged API call would. Targets are read as
+// unstructured objects, which is what distinguishes them here.
 type stallingClient struct {
 	client.Client
 }
@@ -60,7 +62,7 @@ func (s stallingClient) Get(
 	obj client.Object,
 	opts ...client.GetOption,
 ) error {
-	if _, isTarget := obj.(*appsv1.Deployment); !isTarget {
+	if _, isTarget := obj.(*unstructured.Unstructured); !isTarget {
 		return s.Client.Get(ctx, key, obj, opts...)
 	}
 	<-ctx.Done()
@@ -168,6 +170,78 @@ var _ = Describe("Automation Controller", func() {
 		Expect(k8sClient.Get(ctx, key, &deployment)).To(Succeed())
 		deployment.Spec.Replicas = &replicas
 		Expect(k8sClient.Update(ctx, &deployment)).To(Succeed())
+	}
+
+	scaleKindTo := func(kind, target string, replicas int32) reactorv1alpha1.Action {
+		return reactorv1alpha1.Action{
+			Type:     actionKubernetesScale,
+			Target:   &reactorv1alpha1.TargetRef{Kind: kind, Name: target},
+			Replicas: &replicas,
+		}
+	}
+
+	createStatefulSet := func(name string, replicas int32) {
+		selector := &metav1.LabelSelector{MatchLabels: map[string]string{labelApp: name}}
+		set := &appsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+			Spec: appsv1.StatefulSetSpec{
+				Replicas:    &replicas,
+				ServiceName: name,
+				Selector:    selector,
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{labelApp: name}},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{
+						{Name: name, Image: "example/" + name},
+					}},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, set)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, set) })
+	}
+
+	statefulSetOf := func(name string) appsv1.StatefulSet {
+		var set appsv1.StatefulSet
+		key := types.NamespacedName{Name: name, Namespace: testNamespace}
+		Expect(k8sClient.Get(ctx, key, &set)).To(Succeed())
+		return set
+	}
+
+	suspendCronJob := func(target string, suspended *bool) reactorv1alpha1.Action {
+		return reactorv1alpha1.Action{
+			Type:      actionCronJobSuspend,
+			Target:    &reactorv1alpha1.TargetRef{Kind: kindCronJob, Name: target},
+			Suspended: suspended,
+		}
+	}
+
+	createCronJob := func(name string, suspended bool) {
+		cronJob := &batchv1.CronJob{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+			Spec: batchv1.CronJobSpec{
+				Schedule: "0 3 * * *",
+				Suspend:  &suspended,
+				JobTemplate: batchv1.JobTemplateSpec{Spec: batchv1.JobSpec{
+					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+						RestartPolicy: corev1.RestartPolicyOnFailure,
+						Containers:    []corev1.Container{{Name: name, Image: "example/" + name}},
+					}},
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cronJob)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, cronJob) })
+	}
+
+	cronJobOf := func(name string) batchv1.CronJob {
+		var cronJob batchv1.CronJob
+		key := types.NamespacedName{Name: name, Namespace: testNamespace}
+		Expect(k8sClient.Get(ctx, key, &cronJob)).To(Succeed())
+		return cronJob
+	}
+
+	suspendedOf := func(name string) bool {
+		return *cronJobOf(name).Spec.Suspend
 	}
 
 	statusOf := func(name string) reactorv1alpha1.AutomationStatus {
@@ -788,6 +862,167 @@ var _ = Describe("Automation Controller", func() {
 			Expect(replicasOf(target)).To(Equal(int32(0)),
 				"the WAN automation's claim counts even when the UPS one is doing the reconciling")
 			Expect(annotationsOf(target)).To(HaveKeyWithValue(annotationClaimedBy, testNamespace+"/"+wanned))
+		})
+	})
+
+	// Scaling goes through the scale subresource, so nothing here is Deployment
+	// code with a second kind bolted on: the same executor holds a StatefulSet
+	// at a replica count without knowing where a StatefulSet keeps one.
+	Context("with a StatefulSet", func() {
+		It("scales it and restores its baseline through the scale subresource", func() {
+			const target = "postgres"
+			createStatefulSet(target, 2)
+			createAutomation(target, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyUPS: upsOnBattery},
+				},
+				Actions: []reactorv1alpha1.Action{scaleKindTo(kindStatefulSet, target, 0)},
+			})
+
+			observe(map[string]string{keyUPS: upsOnBattery})
+			reconcileOnce(target)
+			Expect(*statefulSetOf(target).Spec.Replicas).To(Equal(int32(0)))
+
+			By("recording the baseline on the StatefulSet itself, under the same annotation a count always uses")
+			Expect(statefulSetOf(target).Annotations).To(HaveKeyWithValue(annotationBaselineReplicas, "2"))
+
+			status := statusOf(target)
+			Expect(status.Targets[0].Ref).To(Equal("StatefulSet/" + testNamespace + "/" + target))
+			Expect(status.Targets[0].Level).To(Equal("0 replicas"))
+
+			By("restoring it when the condition ends")
+			observe(map[string]string{keyUPS: upsOnline})
+			reconcileOnce(target)
+			Expect(*statefulSetOf(target).Spec.Replicas).To(Equal(int32(2)))
+			Expect(statefulSetOf(target).Annotations).NotTo(HaveKey(annotationBaselineReplicas))
+		})
+
+		It("arbitrates a StatefulSet against a Deployment claim independently", func() {
+			const (
+				set        = "shared-set"
+				deployment = "shared-deploy"
+				automation = "mixed-kinds"
+			)
+			createStatefulSet(set, 3)
+			createDeployment(deployment, 1)
+			createAutomation(automation, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
+				},
+				Actions: []reactorv1alpha1.Action{
+					scaleKindTo(kindStatefulSet, set, 1),
+					scaleKindTo(kindDeployment, deployment, 0),
+				},
+			})
+
+			observe(map[string]string{keyWAN: wanBackup})
+			reconcileOnce(automation)
+			Expect(*statefulSetOf(set).Spec.Replicas).To(Equal(int32(1)))
+			Expect(replicasOf(deployment)).To(Equal(int32(0)))
+
+			targets := statusOf(automation).Targets
+			refs := make([]string, 0, len(targets))
+			for _, target := range targets {
+				refs = append(refs, target.Ref)
+			}
+			Expect(refs).To(ConsistOf(
+				"Deployment/"+testNamespace+"/"+deployment,
+				"StatefulSet/"+testNamespace+"/"+set,
+			), "each kind is its own target, arbitrated on its own")
+		})
+	})
+
+	// A CronJob's level is a switch, not a count, and the point of these is that
+	// nothing about arbitration, the baseline or the release had to learn a
+	// second kind of value to hold one.
+	Context("with a CronJob whose level is a switch", func() {
+		It("suspends on entering the state and unsuspends on leaving it", func() {
+			const target = "backup-nightly"
+			createCronJob(target, false)
+			createAutomation(target, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyUPS: upsOnBattery},
+				},
+				Actions: []reactorv1alpha1.Action{suspendCronJob(target, nil)},
+			})
+
+			By("suspending it, and recording the baseline under its own annotation")
+			observe(map[string]string{keyUPS: upsOnBattery})
+			reconcileOnce(target)
+			Expect(suspendedOf(target)).To(BeTrue())
+			annotations := cronJobOf(target).Annotations
+			Expect(annotations).To(HaveKeyWithValue(annotationBaselineSuspend, "false"))
+			Expect(annotations).NotTo(HaveKey(annotationBaselineReplicas),
+				"baseline-replicas is a promise about replica counts and must not be overloaded")
+
+			By("keeping the baseline across a steady-state reconcile")
+			reconcileOnce(target)
+			Expect(cronJobOf(target).Annotations).To(HaveKeyWithValue(annotationBaselineSuspend, "false"))
+
+			By("reporting the level in words as well as in the number the arbiter ordered")
+			status := statusOf(target)
+			Expect(status.Targets).To(HaveLen(1))
+			Expect(status.Targets[0].Ref).To(Equal("CronJob/" + testNamespace + "/" + target))
+			Expect(*status.Targets[0].Effective).To(Equal(int32(0)))
+			Expect(status.Targets[0].Level).To(Equal("suspended"))
+
+			By("unsuspending it on leaving the state, with no onExit written")
+			observe(map[string]string{keyUPS: upsOnline})
+			reconcileOnce(target)
+			Expect(suspendedOf(target)).To(BeFalse())
+			Expect(cronJobOf(target).Annotations).NotTo(HaveKey(annotationBaselineSuspend))
+		})
+
+		It("leaves a CronJob suspended when it was already suspended before the claim", func() {
+			const target = "already-off"
+			createCronJob(target, true)
+			createAutomation(target, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyUPS: upsOnBattery},
+				},
+				Actions: []reactorv1alpha1.Action{suspendCronJob(target, nil)},
+			})
+
+			observe(map[string]string{keyUPS: upsOnBattery})
+			reconcileOnce(target)
+			Expect(cronJobOf(target).Annotations).To(HaveKeyWithValue(annotationBaselineSuspend, "true"))
+
+			By("restoring the operator's own choice rather than turning it back on")
+			observe(map[string]string{keyUPS: upsOnline})
+			reconcileOnce(target)
+			Expect(suspendedOf(target)).To(BeTrue())
+		})
+
+		It("resolves suspended against running in favour of suspended", func() {
+			const (
+				target  = "contested-cron"
+				sheds   = "cron-sheds"
+				resumes = "cron-resumes"
+			)
+			createCronJob(target, false)
+			createAutomation(sheds, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyUPS: upsOnBattery},
+				},
+				Actions: []reactorv1alpha1.Action{suspendCronJob(target, nil)},
+			})
+			running := false
+			createAutomation(resumes, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
+				},
+				Actions: []reactorv1alpha1.Action{suspendCronJob(target, &running)},
+			})
+
+			observe(map[string]string{keyUPS: upsOnBattery, keyWAN: wanBackup})
+			reconcileOnce(resumes)
+			Expect(suspendedOf(target)).To(BeTrue(),
+				"the meet of a switch is the restrictive answer, exactly as it is for replicas")
+
+			status := statusOf(resumes)
+			Expect(*status.Targets[0].Desired).To(Equal(int32(1)))
+			Expect(*status.Targets[0].Effective).To(Equal(int32(0)))
+			Expect(status.Targets[0].DeferredBy).To(Equal([]string{testNamespace + "/" + sheds}))
 		})
 	})
 })

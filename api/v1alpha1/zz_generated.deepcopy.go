@@ -38,6 +38,11 @@ func (in *Action) DeepCopyInto(out *Action) {
 		*out = new(int32)
 		**out = **in
 	}
+	if in.Suspended != nil {
+		in, out := &in.Suspended, &out.Suspended
+		*out = new(bool)
+		**out = **in
+	}
 	if in.Request != nil {
 		in, out := &in.Request, &out.Request
 		*out = new(HTTPRequest)

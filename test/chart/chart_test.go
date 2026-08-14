@@ -48,7 +48,15 @@ const (
 	// tokenReviews is how the metrics endpoint's authn/authz filter appears in
 	// the rendered RBAC.
 	tokenReviews = "tokenreviews"
+	// clusterWide and namespaced are the two RBAC modes. Anything the operator
+	// is granted has to be checked in both, because they render as different
+	// object kinds from the same rule list.
+	clusterWide    = "rbac.clusterWide=true"
+	namespacedRBAC = "rbac.clusterWide=false"
 )
+
+// rbacModes is both RBAC modes, for the rules that must travel with either.
+var rbacModes = []string{clusterWide, namespacedRBAC}
 
 func chartDir() string { return filepath.Join("..", "..", "charts", "reactor") }
 
@@ -178,7 +186,7 @@ func TestCredentialsAreMountedForRotation(t *testing.T) {
 // at every list and reconciles nothing — while its health probes, which only
 // ping, keep reporting it ready.
 func TestNamespacedRBACScopesTheWatch(t *testing.T) {
-	scoped := render(t, unifiURL, "rbac.clusterWide=false")
+	scoped := render(t, unifiURL, namespacedRBAC)
 	if !strings.Contains(scoped, "name: WATCH_NAMESPACE") {
 		t.Fatal("namespace-scoped RBAC did not tell the operator which namespace it may watch")
 	}
@@ -198,7 +206,7 @@ func TestNamespacedRBACScopesTheWatch(t *testing.T) {
 func TestSecretAccessFollowsTheGrantedScope(t *testing.T) {
 	const destination = "actions.allowedDestinations={https://ntfy.example.com}"
 
-	namespaced := render(t, unifiURL, "rbac.clusterWide=false", destination)
+	namespaced := render(t, unifiURL, namespacedRBAC, destination)
 	if strings.Contains(namespaced, "kind: ClusterRole") {
 		t.Fatal("allowing a destination widened a namespaced install to cluster-scoped RBAC")
 	}
@@ -211,7 +219,7 @@ func TestSecretAccessFollowsTheGrantedScope(t *testing.T) {
 	}
 
 	// The same switch, off, in the mode the outbound-action tests do not cover.
-	if off := render(t, unifiURL, "rbac.clusterWide=false"); strings.Contains(off, secretsRule) {
+	if off := render(t, unifiURL, namespacedRBAC); strings.Contains(off, secretsRule) {
 		t.Error("a namespaced install that allows no destination was still granted read access to Secrets")
 	}
 
@@ -528,7 +536,7 @@ func TestDashboardCarriesNothingSiteSpecific(t *testing.T) {
 func TestEventsAreGrantedOnTheRightAPIGroup(t *testing.T) {
 	// Both RBAC modes: the manager's rules render as a ClusterRole in one and a
 	// Role in the other, and the events rule travels with them either way.
-	for _, mode := range []string{"rbac.clusterWide=true", "rbac.clusterWide=false"} {
+	for _, mode := range rbacModes {
 		t.Run(mode, func(t *testing.T) {
 			manifests := render(t, unifiURL, mode)
 			if !strings.Contains(manifests, `apiGroups: ["events.k8s.io"]`) {
@@ -543,6 +551,35 @@ func TestEventsAreGrantedOnTheRightAPIGroup(t *testing.T) {
 	}
 }
 
+// TestTargetKindsAreGrantedInBothRBACModes checks the rule that turns a
+// supported action into one that works.
+//
+// Every desired-state action targets a kind, and a kind the operator has not
+// been granted fails at the write rather than at admission — during the outage
+// the automation existed for. The verbs are asserted too, because targets are
+// read uncached: get to read and patch to write is the whole grant, and a
+// widening back to list or watch would put an informer over every object of
+// that kind in the operator's memory.
+func TestTargetKindsAreGrantedInBothRBACModes(t *testing.T) {
+	// The object a target is read from and its annotations written to, then the
+	// scale subresource a replica count is read from and written through.
+	rules := map[string]string{
+		`resources: \["deployments", "statefulsets"\]`:             `verbs: \["get", "patch"\]`,
+		`resources: \["deployments/scale", "statefulsets/scale"\]`: `verbs: \["get", "update"\]`,
+		`resources: \["cronjobs"\]`:                                `verbs: \["get", "patch"\]`,
+	}
+	for _, mode := range rbacModes {
+		t.Run(mode, func(t *testing.T) {
+			manifests := render(t, unifiURL, mode)
+			for resources, verbs := range rules {
+				if !regexp.MustCompile(resources + `\n\s+` + verbs).MatchString(manifests) {
+					t.Errorf("%s is not granted exactly %s", resources, verbs)
+				}
+			}
+		})
+	}
+}
+
 // TestNamespacedInstallsStayNamespacedWithoutSecureMetrics states the one place
 // rbac.clusterWide=false still produces cluster-scoped RBAC, and the escape
 // hatch from it.
@@ -552,7 +589,7 @@ func TestEventsAreGrantedOnTheRightAPIGroup(t *testing.T) {
 // a real consequence of asking for a protected endpoint, and it should be a
 // stated behaviour rather than something an operator discovers in an audit.
 func TestNamespacedInstallsStayNamespacedWithoutSecureMetrics(t *testing.T) {
-	namespaced := []string{unifiURL, "rbac.clusterWide=false"}
+	namespaced := []string{unifiURL, namespacedRBAC}
 
 	if got := strings.Count(render(t, namespaced...), "\nkind: Cluster"); got != 0 {
 		t.Errorf("a namespace-scoped install created %d cluster-scoped RBAC objects", got)

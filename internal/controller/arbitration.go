@@ -19,14 +19,14 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -34,21 +34,6 @@ import (
 	reactorv1alpha1 "github.com/robbeverhelst/unifi-reactor/api/v1alpha1"
 	"github.com/robbeverhelst/unifi-reactor/internal/engine"
 	"github.com/robbeverhelst/unifi-reactor/internal/metrics"
-)
-
-const (
-	// annotationBaselineReplicas records what a target was set to before
-	// Reactor first claimed it. It lives on the target rather than in an
-	// Automation's status because it has to outlive both the Automation and
-	// Reactor itself: it is the only thing that can answer "what was this
-	// before?" after the operator is uninstalled.
-	annotationBaselineReplicas = "reactor.robbeverhelst.com/baseline-replicas"
-	// annotationClaimedBy names the Automations currently holding the target.
-	// Advisory: refreshed on every claim, never read back as truth. It exists
-	// so that describing a Deployment explains why it is scaled to zero.
-	annotationClaimedBy = "reactor.robbeverhelst.com/claimed-by"
-	// annotationClaimedAt records when the current claim began.
-	annotationClaimedAt = "reactor.robbeverhelst.com/claimed-at"
 )
 
 // targetKey identifies a target workload across every Automation referencing
@@ -60,6 +45,9 @@ type targetKey struct {
 }
 
 func (k targetKey) String() string {
+	if k.Namespace == "" {
+		return k.Kind + "/" + k.Name
+	}
 	return k.Kind + "/" + k.Namespace + "/" + k.Name
 }
 
@@ -110,13 +98,15 @@ func references(automation *reactorv1alpha1.Automation, key targetKey) bool {
 // levelFor returns the level a set of actions asks for on one target.
 func levelFor(automation *reactorv1alpha1.Automation, actions []reactorv1alpha1.Action, key targetKey) (int64, bool) {
 	for _, action := range actions {
-		if !isDesiredState(action.Type) || action.Replicas == nil {
+		if !isDesiredState(action.Type) {
 			continue
 		}
 		if k, ok := targetKeyFor(automation, action); !ok || k != key {
 			continue
 		}
-		return int64(*action.Replicas), true
+		if level, ok := levelOfAction(action); ok {
+			return level, true
+		}
 	}
 	return 0, false
 }
@@ -163,17 +153,20 @@ func reversalFor(
 	}
 }
 
-// baselineOf reads the recorded pre-claim value off a target. recorded reports
+// baselineOf reads the recorded pre-claim level off a target. recorded reports
 // whether Reactor has ever claimed this target, which is what distinguishes
 // "release it back to where it was" from "never touched it, leave it alone".
 // A value that cannot be parsed still counts as recorded: the target is
 // released, it simply cannot contribute a baseline reversal.
-func baselineOf(deployment *appsv1.Deployment) (level *int64, recorded bool) {
-	raw, ok := deployment.Annotations[annotationBaselineReplicas]
+//
+// Which annotation holds it is the handler's business, because the level is
+// only a replica count for the kinds whose level is a count.
+func baselineOf(handler targetHandler, obj *unstructured.Unstructured) (level *int64, recorded bool) {
+	raw, ok := obj.GetAnnotations()[handler.baseline]
 	if !ok {
 		return nil, false
 	}
-	parsed, err := strconv.ParseInt(raw, 10, 32)
+	parsed, err := handler.parse(raw)
 	if err != nil {
 		return nil, true
 	}
@@ -202,6 +195,9 @@ type targetOutcome struct {
 	// effective is what arbitration resolved across every claimant, or nil
 	// while nothing claims the target.
 	effective *int32
+	// level says effective in the units of the action that set it, because a
+	// bare number stops explaining itself once a level is a switch.
+	level string
 	// deferredBy names the claimants holding the target away from desired.
 	deferredBy []string
 	// changed reports whether this reconcile actually wrote to the target.
@@ -227,14 +223,19 @@ func (r *AutomationReconciler) reconcileTarget(
 	ctx, cancel := context.WithTimeout(ctx, timeoutFor(self, key, selfMatching))
 	defer cancel()
 
+	handler, err := handlerFor(key.Kind)
+	if err != nil {
+		return outcome, err
+	}
+
 	peers, err := r.referencingAutomations(ctx, key, self)
 	if err != nil {
 		return outcome, err
 	}
 
-	var deployment appsv1.Deployment
+	target := newTarget(handler)
 	name := types.NamespacedName{Namespace: key.Namespace, Name: key.Name}
-	if err := r.Get(ctx, name, &deployment); err != nil {
+	if err := r.Get(ctx, name, target); err != nil {
 		if outOfScope(err) {
 			return outcome, fmt.Errorf(
 				"target %s not reachable with current RBAC (cross-namespace targets need cluster-wide permissions): %w",
@@ -242,7 +243,7 @@ func (r *AutomationReconciler) reconcileTarget(
 		}
 		return outcome, fmt.Errorf("getting target %s: %w", key, err)
 	}
-	baseline, recorded := baselineOf(&deployment)
+	baseline, recorded := baselineOf(handler, target)
 
 	var claims, reversals []engine.Intent
 	for _, peer := range peers {
@@ -277,35 +278,44 @@ func (r *AutomationReconciler) reconcileTarget(
 	case claimed:
 		value := int32(resolution.Level)
 		outcome.effective = &value
+		outcome.level = handler.describe(resolution.Level)
 		if outcome.desired != nil && *outcome.desired != value {
 			outcome.deferredBy = withoutClaimant(resolution.Winners, claimantOf(self))
 		}
 		metrics.ArbitrationResolved(outcomeOf(outcome))
-		changed, err := claimTarget(ctx, r.Client, &deployment, resolution, claims)
+		changed, err := claimTarget(ctx, r.Client, handler, target, resolution, claims)
 		outcome.changed = changed
 		return outcome, err
 
 	case recorded:
 		// Claimed before, claimed by nobody now: apply the agreed reversal and
 		// stop asserting a value for this target at all.
-		var level *int32
+		var level *int64
 		if release, ok := engine.Resolve(reversals); ok {
-			value := int32(release.Level)
-			level = &value
+			level = &release.Level
 		}
 		metrics.ArbitrationResolved(metrics.OutcomeReleased)
-		changed, err := releaseTarget(ctx, r.Client, &deployment, level)
+		changed, err := releaseTarget(ctx, r.Client, handler, target, level)
 		outcome.changed = changed
 		if changed {
-			log.Info("released target", "target", key.String(), "replicas", level)
+			log.Info("released target", "target", key.String(), "level", describeLevel(handler, level))
 		}
 		return outcome, err
 
 	default:
-		// Never claimed. Reactor asserts nothing, so the user is free to scale
+		// Never claimed. Reactor asserts nothing, so the user is free to change
 		// this workload by hand.
 		return outcome, nil
 	}
+}
+
+// describeLevel renders a level that may be absent, which is what a release
+// with every claimant on reversal None looks like.
+func describeLevel(handler targetHandler, level *int64) string {
+	if level == nil {
+		return "left as found"
+	}
+	return handler.describe(*level)
 }
 
 // timeoutFor bounds one attempt at a target, taken from the action this
@@ -335,7 +345,12 @@ func actionTypeFor(self *reactorv1alpha1.Automation, key targetKey, matching boo
 		}
 	}
 	// Reached only through a target this Automation names on the other side of
-	// the transition, e.g. a reversal to baseline with no onExit entry.
+	// the transition, e.g. a reversal to baseline with no onExit entry. The
+	// kind decides it, because a kind has exactly one desired-state action that
+	// reaches it.
+	if handler, err := handlerFor(key.Kind); err == nil {
+		return handler.actionType
+	}
 	return actionKubernetesScale
 }
 
@@ -425,97 +440,147 @@ func (r *AutomationReconciler) matchingOf(automation *reactorv1alpha1.Automation
 	return assessment.matching
 }
 
-// claimTarget writes the resolved value and marks the target as claimed.
+// claimTarget marks the target as claimed and writes the resolved level.
+//
+// The annotations go first and in their own write. The baseline is the record
+// of what the target was before Reactor touched it, so capturing it has to be
+// durable before the value it describes is overwritten: a crash between the two
+// leaves a target still at its own value with the baseline already recorded,
+// which the next reconcile corrects. The other order loses the baseline
+// permanently.
 func claimTarget(
 	ctx context.Context,
 	c client.Client,
-	deployment *appsv1.Deployment,
+	handler targetHandler,
+	target *unstructured.Unstructured,
 	resolution engine.Resolution,
 	claims []engine.Intent,
 ) (bool, error) {
-	patch := client.MergeFrom(deployment.DeepCopy())
-	dirty := false
-
-	if _, recorded := deployment.Annotations[annotationBaselineReplicas]; !recorded {
-		// Recorded once, on the transition from unclaimed to claimed. Writing
-		// it again later would capture the value Reactor itself set — after a
-		// controller restart mid-outage that means recording 0 as the
-		// baseline, and the workload never comes back.
-		baseline := int32(0)
-		if deployment.Spec.Replicas != nil {
-			baseline = *deployment.Spec.Replicas
-		}
-		dirty = setAnnotation(deployment, annotationBaselineReplicas, strconv.Itoa(int(baseline))) || dirty
-		dirty = setAnnotation(deployment, annotationClaimedAt, metav1.Now().UTC().Format(time.RFC3339)) || dirty
-	}
-
 	claimants := make([]string, 0, len(claims))
 	for _, claim := range claims {
 		claimants = append(claimants, claim.Claimant)
 	}
 	slices.Sort(claimants)
-	dirty = setAnnotation(deployment, annotationClaimedBy, strings.Join(claimants, ",")) || dirty
 
-	replicas := int32(resolution.Level)
-	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != replicas {
-		deployment.Spec.Replicas = &replicas
-		dirty = true
+	annotations := map[string]string{annotationClaimedBy: strings.Join(claimants, ",")}
+	if _, recorded := target.GetAnnotations()[handler.baseline]; !recorded {
+		// Recorded once, on the transition from unclaimed to claimed. Writing
+		// it again later would capture the value Reactor itself set — after a
+		// controller restart mid-outage that means recording 0 as the
+		// baseline, and the workload never comes back.
+		found, err := handler.read(ctx, c, target)
+		if err != nil {
+			return false, err
+		}
+		annotations[handler.baseline] = handler.format(found)
+		annotations[annotationClaimedAt] = metav1.Now().UTC().Format(time.RFC3339)
 	}
-	if !dirty {
-		return false, nil
+	changed, err := setAnnotations(ctx, c, target, annotations)
+	if err != nil {
+		return changed, fmt.Errorf("recording the claim on %s: %w", describeObject(target), err)
 	}
 
-	if err := c.Patch(ctx, deployment, patch); err != nil {
-		return false, fmt.Errorf("claiming %s/%s at %d replicas: %w",
-			deployment.Namespace, deployment.Name, replicas, err)
+	written, err := handler.apply(ctx, c, target, resolution.Level)
+	if err != nil {
+		return changed, err
+	}
+	if !written {
+		return changed, nil
 	}
 	logf.FromContext(ctx).Info("claimed target",
-		"target", fmt.Sprintf("deployment/%s/%s", deployment.Namespace, deployment.Name),
-		"replicas", replicas, "claimedBy", claimants)
+		"target", describeObject(target),
+		"level", handler.describe(resolution.Level), "claimedBy", claimants)
 	return true, nil
 }
 
 // releaseTarget applies the agreed reversal, if any, and removes Reactor's
 // annotations so that nothing asserts a value for this target any more.
+//
+// The reverse order to claiming, for the same reason: the annotations are what
+// says the target is still held, so they come off only once the value they
+// describe has been restored.
 func releaseTarget(
 	ctx context.Context,
 	c client.Client,
-	deployment *appsv1.Deployment,
-	level *int32,
+	handler targetHandler,
+	target *unstructured.Unstructured,
+	level *int64,
 ) (bool, error) {
-	patch := client.MergeFrom(deployment.DeepCopy())
-	dirty := false
-
-	if level != nil && (deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != *level) {
-		value := *level
-		deployment.Spec.Replicas = &value
-		dirty = true
+	changed := false
+	if level != nil {
+		written, err := handler.apply(ctx, c, target, *level)
+		if err != nil {
+			return false, err
+		}
+		changed = written
 	}
-	for _, annotation := range []string{annotationBaselineReplicas, annotationClaimedBy, annotationClaimedAt} {
-		if _, present := deployment.Annotations[annotation]; present {
-			delete(deployment.Annotations, annotation)
+
+	cleared, err := clearAnnotations(ctx, c, target)
+	if err != nil {
+		return changed, fmt.Errorf("releasing %s: %w", describeObject(target), err)
+	}
+	return changed || cleared, nil
+}
+
+// setAnnotations adds or updates the annotations given and touches no other,
+// reporting whether that changed anything so callers can skip a write that
+// would produce an empty patch.
+//
+// Adding only. A claim refreshes claimed-by on every reconcile but passes the
+// baseline exactly once, on the reconcile that first took the target — so
+// anything that treated "not in this map" as "remove it" would erase the
+// baseline fifteen seconds after recording it, and the release would then find
+// nothing to restore.
+func setAnnotations(
+	ctx context.Context,
+	c client.Client,
+	target *unstructured.Unstructured,
+	want map[string]string,
+) (bool, error) {
+	current := target.GetAnnotations()
+	next := maps.Clone(current)
+	if next == nil {
+		next = map[string]string{}
+	}
+	dirty := false
+	for annotation, value := range want {
+		if current[annotation] != value {
+			next[annotation] = value
 			dirty = true
 		}
 	}
+	return patchAnnotations(ctx, c, target, next, dirty)
+}
+
+// clearAnnotations removes every annotation a claim writes, which is what stops
+// Reactor asserting anything about a target at all.
+func clearAnnotations(ctx context.Context, c client.Client, target *unstructured.Unstructured) (bool, error) {
+	current := target.GetAnnotations()
+	next := maps.Clone(current)
+	dirty := false
+	for _, annotation := range claimAnnotations {
+		if _, present := next[annotation]; present {
+			delete(next, annotation)
+			dirty = true
+		}
+	}
+	return patchAnnotations(ctx, c, target, next, dirty)
+}
+
+func patchAnnotations(
+	ctx context.Context,
+	c client.Client,
+	target *unstructured.Unstructured,
+	next map[string]string,
+	dirty bool,
+) (bool, error) {
 	if !dirty {
 		return false, nil
 	}
-
-	if err := c.Patch(ctx, deployment, patch); err != nil {
-		return false, fmt.Errorf("releasing %s/%s: %w", deployment.Namespace, deployment.Name, err)
+	patch := client.MergeFrom(target.DeepCopy())
+	target.SetAnnotations(next)
+	if err := c.Patch(ctx, target, patch); err != nil {
+		return false, err
 	}
 	return true, nil
-}
-
-// setAnnotation sets one annotation and reports whether that changed anything,
-// so callers can skip writes that would produce an empty patch.
-func setAnnotation(deployment *appsv1.Deployment, key, value string) bool {
-	if deployment.Annotations == nil {
-		deployment.Annotations = map[string]string{}
-	}
-	if deployment.Annotations[key] == value {
-		return false
-	}
-	deployment.Annotations[key] = value
-	return true
 }

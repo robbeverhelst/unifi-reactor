@@ -485,10 +485,24 @@ Initial Kubernetes actions:
 ```yaml
 - type: kubernetes.scale
   target:
-    kind: Deployment
+    kind: Deployment      # or StatefulSet
     name: qbittorrent
   replicas: 0
 ```
+
+Reads and writes go through the `scale` subresource rather than the kind's own
+`spec.replicas`. `/scale` is the interface that says "this object has a replica
+count" without saying where it is kept, so one executor serves every scalable
+kind: adding one is an entry in the handler registry, an entry in the CRD enum
+and an RBAC rule, and no new executor code.
+
+`target.kind` stays a **closed enum** anyway, which is the deliberate half of
+the trade-off. The gain from opening it would be imaginary: a kind is only
+reachable if the chart granted RBAC for it, and RBAC has to name resources
+explicitly, so an open field would accept a kind the operator cannot touch and
+report a typo as a `Forbidden` during the incident rather than as a rejected
+write at admission. The enum is the same decision as the chart's rule list,
+written where the API server can enforce it.
 
 #### Restart
 
@@ -503,14 +517,35 @@ Potential future action:
 
 #### Suspend CronJob
 
-Potential future action:
+Shipped. Desired-state, and the first action whose level is a switch rather
+than a count:
 
 ```yaml
 - type: kubernetes.cronjob.suspend
   target:
+    kind: CronJob
     name: large-backup
-  suspended: true
+  suspended: true          # optional; true is the default
 ```
+
+`engine.Resolve` was deliberately *not* generalised over an ordered type
+parameter to accommodate it. A switch is a two-element lattice, and embedding
+it in the integers as "suspended is 0, running is 1" is order-preserving, so
+the meet stays `min` and "most restrictive wins" stays "suspended wins" without
+the engine learning a second kind of value. A target has exactly one kind, so
+two levels in different units never meet in the first place — the generality
+would have had no case to serve.
+
+The baseline is recorded under `reactor.robbeverhelst.com/baseline-suspend`,
+not under `baseline-replicas`. That annotation is a compatibility promise about
+replica counts as of v1.0, and a reader — a person, or a script over `kubectl
+get -o custom-columns` — is entitled to keep reading `"1"` there as one
+replica. A kind whose level is not a count records it under its own name.
+
+Suspending does not stop a Job already running, and deliberately grants no
+permission over Jobs at all: declining to start more work is a categorically
+safer act than killing work in flight, and deleting in-flight Jobs is not
+something an outage should decide on the operator's behalf.
 
 #### Patch resource
 
@@ -701,11 +736,18 @@ The operator should follow least privilege.
 If the controller needs:
 
 ```text
-get/list/watch deployments
+get deployments
 patch deployments
 ```
 
 give it exactly those permissions.
+
+As shipped, a target kind costs `get` and `patch` and nothing else. Targets are
+read as unstructured objects through the manager's uncached client, so no
+target kind starts an informer — which is what would have made `list` and
+`watch` necessary, and would have held every object of that kind in the
+operator's memory to answer a question asked about one of them every fifteen
+seconds.
 
 Do not ship:
 

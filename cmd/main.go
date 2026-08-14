@@ -318,8 +318,16 @@ func main() {
 	}
 
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
-		Scheme:                 scheme,
-		Cache:                  cacheOptions,
+		Scheme: scheme,
+		Cache:  cacheOptions,
+		// Targets are read as unstructured objects so that no code path has to
+		// enumerate target kinds. Saying explicitly that unstructured reads are
+		// not cached is what lets the chart grant get and patch on those kinds
+		// and nothing else: a cached read would start an informer, which needs
+		// list and watch, and would hold every Deployment in the cluster in
+		// this process's memory to answer a question asked once every fifteen
+		// seconds about one of them.
+		Client:                 client.Options{Cache: &client.CacheOptions{Unstructured: false}},
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,

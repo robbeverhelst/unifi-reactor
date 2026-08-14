@@ -36,10 +36,16 @@ const (
 	// and the moment it stopped.
 	reasonStateEntered = "StateEntered"
 	reasonStateExited  = "StateExited"
-	// reasonTargetScaled and reasonTargetReleased record a write that actually
+	// reasonTargetHeld and reasonTargetReleased record a write that actually
 	// happened. Reconciling a target that is already where it should be is the
 	// common case and produces nothing.
-	reasonTargetScaled   = "TargetScaled"
+	//
+	// One reason covers every desired-state action rather than one per kind:
+	// what happened is that arbitration moved a target to its resolved level,
+	// and the note says in words which level that was. A per-kind reason would
+	// make `kubectl get events --field-selector reason=...` an incomplete
+	// question that silently stops matching each time a kind is added.
+	reasonTargetHeld     = "TargetHeld"
 	reasonTargetReleased = "TargetReleased"
 	// reasonDeferred is Normal on purpose. Being outvoted by a more restrictive
 	// claim is how two Automations sharing a workload are meant to behave, and
@@ -155,7 +161,7 @@ func (r *AutomationReconciler) eventsForTargets(automation *reactorv1alpha1.Auto
 				"%s released; no automation claims it any more", outcome.ref)
 			continue
 		}
-		r.event(automation, corev1.EventTypeNormal, reasonTargetScaled, actionExecute,
-			"%s set to %d replicas", outcome.ref, *outcome.effective)
+		r.event(automation, corev1.EventTypeNormal, reasonTargetHeld, actionExecute,
+			"%s held at %s", outcome.ref, outcome.level)
 	}
 }
