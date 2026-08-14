@@ -42,6 +42,22 @@ unifi:
     # Draw as a percentage of the UPS's power budget at or above which ups.load
     # reports "high".
     highLoadPercent: 80
+  devices:
+    # Publish a device.<name> key per adopted device, alongside the aggregate
+    # devices key that is always published.
+    #
+    # Off by default, and this is the one setting here that changes how MUCH
+    # Reactor publishes rather than what any of it means. Every other state key
+    # is bounded by what is compiled in; a per-device key's name comes from your
+    # network, so turning this on costs one state key, one transition series,
+    # and one more key an Automation can hold state for PER ADOPTED DEVICE.
+    # Forty devices is forty of each. The aggregate answers "is anything down"
+    # on one series whatever the fleet size.
+    #
+    # Names are slugified: "US 48" publishes device.us-48. Renaming a device on
+    # the console makes its old key vanish, which Reactor holds state through
+    # rather than treating as a recovery.
+    perDeviceKeys: false
   wan:
     # Thresholds for wan.quality, which buckets how well the *live* uplink is
     # performing into "good" or "degraded". Both numbers are averages the
@@ -82,6 +98,17 @@ unifi:
     # thresholds are set to leave headroom for exactly that delay. ups.load is
     # the only key derived from an instantaneous measurement that moves second
     # to second (a server spinning up shifts the draw), so it takes 3.
+    # devices and device.* take 2. A device's state is a switch position like
+    # wan, but it is the console's judgement about a heartbeat rather than a
+    # wire it can see, and one missed beat on a busy console must not page
+    # anyone. 60s at the default poll is nothing against the failure the key
+    # exists for — a device that has been dead for days.
+    #
+    # An entry may end in "*", which matches every key with that prefix. It is
+    # how a group whose key names come from your hardware gets settled at all:
+    # no list here could name them. Exact keys win over patterns, and the
+    # longest prefix wins between patterns, so `device.ap-attic: 5` pulls one
+    # device out of the group.
     keys:
       ups.battery: 2
       ups.runtime: 2
@@ -89,6 +116,8 @@ unifi:
       isp: 2
       internet: 3
       wan.quality: 3
+      devices: 2
+      device.*: 2
   # Name of an existing Secret containing the key UNIFI_API_KEY.
   # Create it with:
   #   kubectl -n <namespace> create secret generic unifi-reactor-credentials \

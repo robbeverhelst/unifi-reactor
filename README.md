@@ -729,6 +729,8 @@ Each key is published only when the matching hardware is adopted by your control
 | `ups.battery` | `normal`, `low`, `critical` | remaining charge against the configured thresholds |
 | `ups.runtime` | `ample`, `short`, `critical` | how long the UPS says it can carry its current load |
 | `ups.load` | `normal`, `high` | draw as a fraction of the UPS's power budget |
+| `devices` | `all-online`, `degraded` | whether every adopted device is reachable, or at least one is not |
+| `device.<name>` | `online`, `offline` | one adopted device, by slugified name. **Opt-in** — see below |
 
 `isp` is the one key whose values are not a closed set: it is the carrier name your console geolocated your public address to, lowercased with everything non-alphanumeric turned into a hyphen. Look it up before matching on it —
 
@@ -806,6 +808,60 @@ Both are separate keys for the same reason `ups.battery` is: they are independen
 
 > ⚠️ `timeToRemain`'s unit is **inferred** to be seconds, from a single observation on a UPS that was not discharging. Nothing in Reactor depended on it before this key existed. Confirm it against a real outage before letting `ups.runtime: critical` shut anything down — [#7](https://github.com/robbeverhelst/unifi-reactor/issues/7) has the procedure.
 
+### The fleet: `devices`, and why `device.<name>` is opt-in
+
+An access point can sit dead for days with nothing telling you. `devices` is the
+one-value answer to "is anything down": `all-online` while every adopted device
+is in contact with the console, `degraded` the moment one is not.
+
+```yaml
+  when:
+    provider: unifi
+    state:
+      devices: degraded    # something in the rack stopped answering
+```
+
+`device.<name>` is the same observation per device, keyed by the device's name
+lowercased with everything non-alphanumeric turned into a hyphen — `US 48`
+becomes `device.us-48`. **It is off by default**, and that is a deliberate
+asymmetry rather than caution:
+
+```yaml
+unifi:
+  devices:
+    perDeviceKeys: true    # one key, and one metric series, per adopted device
+```
+
+Every other key here is bounded by what is compiled in. `device.<name>` is the
+first whose *name* comes from your network, so turning it on means one state key,
+one `reactor_state_transitions_total` series, and one more thing an Automation
+can hold state for **per adopted device** — forty devices, forty of each. The
+aggregate costs one series whatever the fleet size, so it ships on and the
+per-device keys are something you ask for. Reactor logs at startup when they are
+on, and `unifi.devices.perDeviceKeys` is the only setting on this page that
+changes how *much* Reactor publishes rather than what it means.
+
+Per-device keys are also never labelled by value in Prometheus, for the same
+reason `isp` is not — see [Cardinality](#what-is-measured). Which device is down
+is in the Automation's `status.observedState`, in an Event, and in a `V(1)` log
+line naming the device and the console's own disconnection reason.
+
+Three things are excluded on purpose. **Unadopted and pending devices**: the
+console can see your neighbour's AP, and it is not your fleet. **A device
+reporting a state this provider does not recognise** — UniFi documents
+provisioning, upgrading and heartbeat-missed states that no capture has ever
+shown — because reading an unfamiliar state as `offline` would report a firmware
+upgrade as a fleet outage. **A device reporting no state at all**, which is
+absence, not zero.
+
+Renaming a device on the console makes its old key *vanish* rather than report
+`offline`, which Reactor treats as lost visibility: the last known state is held
+and `Ready=False` reports `StateKeyUnavailable`, so nothing fires `onExit`
+because you retitled a switch. The same is true of a device you remove. And two
+devices whose names slugify to the same key — `AP 1` and `ap-1` — publish
+*neither*, because picking one would be arbitrary and the arbitrary pick could be
+the one hiding the dead device. `devices` still counts both.
+
 If a provider stops reporting a key at all — the hardware dropped off the controller — Reactor holds the last known state and reports `Ready=False` with `StateKeyUnavailable` rather than treating lost visibility as a condition that ended ([what to do about it](docs/troubleshooting.md#2-statekeyunavailable-and-held-state)).
 
 ### Settling a noisy signal
@@ -823,6 +879,8 @@ unifi:
       isp: 2            # ...and let a re-geolocated carrier settle
       internet: 3       # ...and don't believe one bad probe round
       wan.quality: 3
+      devices: 2        # ...and don't believe one missed heartbeat
+      device.*: 2       # a trailing * covers keys named after your hardware
 ```
 
 Each extra sample costs one `pollInterval` of reaction time, so the default is `1`: a WAN failover and a power cut both deserve an immediate reaction, and neither flaps. `ups.battery` ships at `2` because it is a threshold crossing — a charge hovering at 30% would otherwise report `low`, `normal`, `low` — and because a battery drains over minutes, so spending one more poll to be sure costs nothing. At the default 30s poll that makes a battery-level escalation react in 60s worst case instead of 30s.
@@ -836,6 +894,10 @@ Each extra sample costs one `pollInterval` of reaction time, so the default is `
 `internet` and `wan.quality` ship at `3`, the highest in the chart, because they are the two keys derived from probes to the outside world rather than from anything on your desk. A single poll in which a probe target rate-limits or a resolver blips must not shed a cluster's load. At the default 30s poll that is 90 seconds before either an outage or a recovery is believed — deliberately symmetric, because a link flapping in and out is exactly when repeatedly scaling workloads up and down does the most damage.
 
 Debounce is also the whole of the flap control for `wan.quality`, and that is worth being explicit about, because bucketing a measurement is where a threshold usually needs hysteresis. It does not need it here: debounce promotes a value only after N *consecutive* identical observations, so a measurement hovering on a threshold produces `good`, `degraded`, `good` and is never promoted at all — the key simply holds what it had. A second, differently-shaped flap control in the provider would be a second thing to reason about for a problem the engine already solves for every key.
+
+`devices` and `device.*` ship at `2`. A device's state is a switch position like `wan`, but it is the *console's* judgement about a heartbeat rather than a wire it can see, and a busy console that misses one beat must not be a reason to page anyone. One extra sample is 60 seconds at the default poll, which is nothing against the failure this key exists for — an AP that has been dead for days.
+
+`device.*` is the one entry here that is a pattern rather than a key. Per-device key names come from your hardware, so no list written here could name them; a trailing `*` matches every key with that prefix. An exact key always wins over a pattern, and the longest matching prefix wins between patterns, so `device.ap-attic: 5` pulls one device out of the group it belongs to.
 
 Debouncing happens in the shared state store, so every automation sees the same settled value. Two automations can never disagree about the current state and fight over a workload they share.
 
@@ -884,6 +946,8 @@ Reconcile counts, queue depth and reconcile latency are controller-runtime's own
 `isp` is the first state key whose values are an **open set** — a carrier slug derived from whatever public address your gateway currently holds. So `reactor_state_info` is published only for keys whose provider declares a closed value set, and `isp` is deliberately not one of them. The transition counter is not labelled by `from`/`to` for the same reason. What a key currently holds is always in `status.observedState` and in an `Event`; what Prometheus keeps is bounded at compile time.
 
 Declaring the vocabulary is also what lets the gauge report `0` for the values a key does *not* hold. Without that, the series for a value it used to hold goes stale at `1` rather than dropping, and every graph built on it lies. All values `0` means the key is not currently observable — the metric side of [`StateKeyUnavailable`](docs/troubleshooting.md#2-statekeyunavailable-and-held-state).
+
+`device.<name>` is the other side of the same coin, and the reason [it is opt-in](#the-fleet-devices-and-why-devicename-is-opt-in). Its *values* are closed — two of them — but its **key name** comes from your network, so the set of keys is open. It is therefore never in `reactor_state_info` at all, and turning the keys on adds one `reactor_state_transitions_total` series per adopted device: a bounded number, chosen by you, rather than one this repository can promise. `devices` is one series regardless of fleet size, which is why it is the one that ships on.
 
 ### Alerts and the dashboard
 

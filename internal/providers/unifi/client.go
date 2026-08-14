@@ -114,6 +114,14 @@ type Client struct {
 	MinAvailabilityPercent float64
 	MaxLatencyMs           float64
 
+	// PerDeviceKeys publishes a device.<name> key per adopted device alongside
+	// the aggregate devices key. It defaults off because it is the one setting
+	// here that changes how many things Reactor publishes rather than what they
+	// mean: a fleet of forty devices is forty more state keys, forty more
+	// transition series, and forty more keys an Automation could hold state for.
+	// The aggregate answers "is anything down" on one series.
+	PerDeviceKeys bool
+
 	// mu guards previous only.
 	mu sync.Mutex
 	// previous remembers the last WAN signals so that a change in one can be
@@ -177,6 +185,11 @@ type deviceRecord struct {
 	// including the UPS keys — down with it.
 	LastWANStatus map[string]any `json:"last_wan_status"`
 	VBMS          *vbmsTable     `json:"vbms_table"`
+
+	// The fleet-wide fields, embedded so each group lives in the file holding
+	// the parser that reads it. Embedded struct fields decode from the same
+	// flat object, so this is a grouping for readers and nothing more.
+	deviceHealthFields
 }
 
 type wanPort struct {
@@ -240,6 +253,8 @@ type vbmsTable struct {
 //	ups.battery  normal  | low | critical
 //	ups.runtime  ample   | short | critical
 //	ups.load     normal  | high
+//	devices      all-online | degraded   (the adopted fleet in one value)
+//	device.<name>  online | offline      (opt-in; see Client.PerDeviceKeys)
 //
 // ups and ups.battery are deliberately independent: a `when: {ups: on-battery}`
 // automation must stay matched for the whole outage, including as the battery
@@ -325,8 +340,19 @@ func (c *Client) get(ctx context.Context, endpoint string, out any) error {
 func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse) (map[string]string, error) {
 	state := map[string]string{}
 	gatewaySeen := false
+	fleet := newDeviceTally()
 
 	for _, d := range parsed.Data {
+		// The fleet keys are about devices the console manages, so an unadopted
+		// or pending one is skipped here while the gateway and UPS halves below
+		// are unchanged: they are about specific hardware being present, which
+		// is a different question from whether it has been adopted.
+		if d.adopted() {
+			fleet.observe(ctx, d)
+		} else {
+			logf.FromContext(ctx).WithName("unifi-devices").V(1).Info(
+				"Skipping a device that is not adopted", "model", d.Model, "type", d.Type)
+		}
 		if !gatewaySeen && (d.WAN1 != nil || d.WAN2 != nil) {
 			gatewaySeen = true
 			if wan := c.wanFrom(ctx, d); wan != "" {
@@ -353,10 +379,12 @@ func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse
 			}
 		}
 	}
+	fleet.publish(ctx, state, c.PerDeviceKeys)
 
 	if len(state) == 0 {
 		return nil, fmt.Errorf(
-			"no gateway reporting WAN ports and no UPS found in the device list; "+
+			"no gateway reporting WAN ports, no UPS, and no adopted device reporting a state "+
+				"were found in the device list; "+
 				"the fields this provider reads were verified on UniFi Network %s (%s), "+
 				"and another version or console model may report them differently "+
 				"— see the compatibility matrix in the README",

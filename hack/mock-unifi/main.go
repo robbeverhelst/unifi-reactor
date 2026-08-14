@@ -67,6 +67,18 @@ limitations under the License.
 //	curl -X POST 'http://localhost:9443/ups?output=850'           # a heavy load on the same budget
 //	curl -X POST 'http://localhost:9443/ups?output=310&budget=1000'  # back to the capture
 //
+// Rehearse a device dying, which is the case #8 exists for: an AP can sit dead
+// for days with nothing surfacing it. GET /device lists what the capture holds
+// and the key each device would publish under:
+//
+//	curl http://localhost:9443/device
+//	curl -X POST 'http://localhost:9443/device?name=ups-2u&state=offline'
+//	curl -X POST 'http://localhost:9443/device?name=ups-2u&state=5'        # an unrecognised state
+//	curl -X POST 'http://localhost:9443/device?name=ups-2u&adopted=false'  # not our fleet
+//	curl -X POST 'http://localhost:9443/device?name=ups-2u&rename=Rack+UPS'
+//	curl -X POST 'http://localhost:9443/device?name=ups-2u&present=false'  # gone from the list
+//	curl -X POST 'http://localhost:9443/device?reset=true'
+//
 // Rehearse the UPS dropping off the console entirely — the ups keys vanish
 // from the state rather than reporting a value, which is what an Automation
 // holding its last known state has to cope with:
@@ -198,6 +210,12 @@ const (
 	// Reactor does with them; it does not confirm a console ever sends them.
 	statusHealthOK = "ok"
 
+	// What a field says when nothing overrides the capture, and the key the
+	// fleet listing answers under. The caveat sentence every dev endpoint
+	// carries is keyNote above.
+	valueCaptured = "captured"
+	fieldDevices  = "devices"
+
 	// What a variant says wan1/wan2 is_uplink do when the backup takes over.
 	uplinkMoves   = "moves"
 	uplinkPinned  = "pinned"
@@ -247,6 +265,45 @@ var failoverVariants = map[string]failoverVariant{
 }
 
 func variantNames() []string { return slices.Sorted(maps.Keys(failoverVariants)) }
+
+// deviceOverride is what /device rewrites on one captured device. Every field
+// is a pointer or a zero value meaning "leave the capture alone", so a request
+// that sets one thing does not silently assert the others.
+type deviceOverride struct {
+	// state replaces the console's own state field. It is an int rather than a
+	// bool so that a state nobody has captured — provisioning, upgrading — can
+	// be served too: the provider is supposed to publish nothing for those.
+	state *int
+	// adopted turns a device into one the console sees but does not manage.
+	adopted *bool
+	// rename is the case #8 raises: the old key vanishes rather than reporting
+	// offline, and nothing may treat that as a recovery.
+	rename string
+	// absent removes the device from the list entirely.
+	absent bool
+}
+
+// slugifyName is the mock's copy of the provider's slug rule, so /device can be
+// addressed by the same name a state key is spelled with. It is duplicated
+// rather than shared because the provider's is deliberately unexported: the key
+// vocabulary lives in one file and nothing outside that package spells it.
+func slugifyName(name string) string {
+	var b strings.Builder
+	pendingHyphen := false
+	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			if pendingHyphen && b.Len() > 0 {
+				b.WriteByte('-')
+			}
+			pendingHyphen = false
+			b.WriteRune(r)
+		default:
+			pendingHyphen = true
+		}
+	}
+	return b.String()
+}
 
 type mock struct {
 	mu sync.Mutex
@@ -299,6 +356,12 @@ type mock struct {
 	switchDevice map[string]any
 	cycles       []string
 
+	// deviceOverrides rewrites the fleet fields of individual captured devices,
+	// keyed by the slug of the name they were captured under — which is the
+	// same slug the device.<name> state key uses, so what is addressed here and
+	// what appears in an Automation are spelled the same way.
+	deviceOverrides map[string]*deviceOverride
+
 	// delivery is the synthetic body /alarm-fire posts. It is a stand-in, not
 	// a capture: no real Alarm Manager delivery has been recorded yet.
 	delivery []byte
@@ -317,15 +380,15 @@ func main() {
 	flag.Parse()
 
 	m := &mock{
-		battLvl:   100,
-		link:      linkPrimary,
-		variant:   defaultVariant,
-		backupISP: defaultBackupISP,
-		wwwStatus: statusHealthOK,
-		rules:     map[string]map[string]any{},
-		wlans:     mockWLANs(),
-
-		switchDevice: mockSwitch(),
+		battLvl:         100,
+		link:            linkPrimary,
+		variant:         defaultVariant,
+		backupISP:       defaultBackupISP,
+		wwwStatus:       statusHealthOK,
+		rules:           map[string]map[string]any{},
+		wlans:           mockWLANs(),
+		switchDevice:    mockSwitch(),
+		deviceOverrides: map[string]*deviceOverride{},
 	}
 	if raw, err := os.ReadFile(*deliveryFile); err == nil {
 		m.delivery = raw
@@ -383,6 +446,8 @@ func main() {
 	mux.HandleFunc("POST /ups", m.setUPS)
 	mux.HandleFunc("POST /internet", m.setInternet)
 	mux.HandleFunc("POST /quality", m.setQuality)
+	mux.HandleFunc("GET /device", m.describeFleet)
+	mux.HandleFunc("POST /device", m.setDevice)
 
 	// The write path: the Network application under /proxy/network, but
 	// authenticated the UniFi OS way — a session cookie plus the csrf header.
@@ -426,6 +491,9 @@ func (m *mock) devices() []any {
 		if _, isUPS := device["vbms_table"]; isUPS && m.noUPS {
 			continue
 		}
+		if !m.rewriteFleet(device) {
+			continue
+		}
 		visible = append(visible, d)
 		if _, isGateway := device["wan1"]; isGateway && m.link == linkBackup {
 			m.failover(device)
@@ -459,6 +527,29 @@ func cloneJSON(value map[string]any) map[string]any {
 		return nil
 	}
 	return clone
+}
+
+// rewriteFleet applies one device's overrides and reports whether it should
+// still appear in the list at all.
+func (m *mock) rewriteFleet(device map[string]any) bool {
+	name, _ := device["name"].(string)
+	override := m.deviceOverrides[slugifyName(name)]
+	if override == nil {
+		return true
+	}
+	if override.absent {
+		return false
+	}
+	if override.state != nil {
+		device["state"] = *override.state
+	}
+	if override.adopted != nil {
+		device["adopted"] = *override.adopted
+	}
+	if override.rename != "" {
+		device["name"] = override.rename
+	}
+	return true
 }
 
 // rewriteBattPool applies the runtime and load overrides. A runtime of exactly
@@ -673,7 +764,7 @@ func (m *mock) setQuality(w http.ResponseWriter, r *http.Request) {
 
 func describeFloat(value *float64) string {
 	if value == nil {
-		return "captured"
+		return valueCaptured
 	}
 	return strconv.FormatFloat(*value, 'f', -1, 64)
 }
@@ -845,9 +936,149 @@ func (m *mock) setUPS(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// setDevice drives one device's fleet fields, which is what the devices and
+// device.<name> keys are derived from.
+//
+// A device is addressed by the slug of the name it was CAPTURED under, even
+// after a rename: every response is rebuilt from the capture, so the original
+// name is the stable handle and reset=true undoes everything.
+func (m *mock) setDevice(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if raw := query.Get("reset"); raw != "" {
+		m.deviceOverrides = map[string]*deviceOverride{}
+		log.Print("device overrides cleared")
+		writeJSON(w, map[string]any{fieldDevices: m.describeDevices()})
+		return
+	}
+
+	slug := slugifyName(query.Get("name"))
+	if slug == "" {
+		http.Error(w, "name is required; GET /device lists what the capture holds", http.StatusBadRequest)
+		return
+	}
+	if !slices.Contains(m.capturedSlugs(), slug) {
+		http.Error(w, fmt.Sprintf("no captured device named %q; try one of: %s\n",
+			slug, strings.Join(m.capturedSlugs(), ", ")), http.StatusBadRequest)
+		return
+	}
+	override := m.deviceOverrides[slug]
+	if override == nil {
+		override = &deviceOverride{}
+		m.deviceOverrides[slug] = override
+	}
+
+	// state accepts the two values the provider recognises by name, and any
+	// integer besides, so a state nobody has captured can be rehearsed too.
+	if raw := query.Get("state"); raw != "" {
+		state := 0
+		switch raw {
+		case "online":
+			state = 1
+		case "offline":
+			state = 0
+		default:
+			parsed, err := strconv.Atoi(raw)
+			if err != nil {
+				http.Error(w, `state must be "online", "offline", or an integer`, http.StatusBadRequest)
+				return
+			}
+			state = parsed
+		}
+		override.state = &state
+	}
+	if raw := query.Get("adopted"); raw != "" {
+		adopted, err := strconv.ParseBool(raw)
+		if err != nil {
+			http.Error(w, "adopted must be a boolean", http.StatusBadRequest)
+			return
+		}
+		override.adopted = &adopted
+	}
+	if raw := query.Get("rename"); raw != "" {
+		override.rename = raw
+	}
+	if raw := query.Get("present"); raw != "" {
+		present, err := strconv.ParseBool(raw)
+		if err != nil {
+			http.Error(w, "present must be a boolean", http.StatusBadRequest)
+			return
+		}
+		override.absent = !present
+	}
+
+	log.Printf("device %s: state=%s adopted=%s rename=%q present=%v",
+		slug, describeInt(override.state), describeBool(override.adopted), override.rename, !override.absent)
+	writeJSON(w, map[string]any{fieldDevices: m.describeDevices()})
+}
+
+// describeDevices reports each captured device, the key it publishes under, and
+// what is currently being served for it.
+func (m *mock) describeDevices() []any {
+	var described []any
+	for _, d := range m.devices() {
+		device, ok := d.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := device["name"].(string)
+		described = append(described, map[string]any{
+			"name":  name,
+			"key":   "device." + slugifyName(name),
+			"state": device["state"],
+			// The handle to address it by, which does not move when it is
+			// renamed: every response is rebuilt from the capture.
+			"adopted": device["adopted"],
+		})
+	}
+	return described
+}
+
+// capturedSlugs are the handles /device accepts, taken from the capture rather
+// than from the current response so a renamed device is still addressable.
+func (m *mock) capturedSlugs() []string {
+	var devices []any
+	if err := json.Unmarshal(m.pristine, &devices); err != nil {
+		return nil
+	}
+	var slugs []string
+	for _, d := range devices {
+		device, ok := d.(map[string]any)
+		if !ok {
+			continue
+		}
+		if name, ok := device["name"].(string); ok {
+			slugs = append(slugs, slugifyName(name))
+		}
+	}
+	slices.Sort(slugs)
+	return slugs
+}
+
+func (m *mock) describeFleet(w http.ResponseWriter, _ *http.Request) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	writeJSON(w, map[string]any{
+		fieldDevices: m.describeDevices(),
+		"handles":    m.capturedSlugs(),
+		"note":       "address a device by the slug of the name it was captured under, even after a rename",
+		"perKeys":    "device.<name> keys are opt-in in Reactor (unifi.devices.perDeviceKeys)",
+		"aggregate":  "devices is published either way",
+	})
+}
+
+func describeBool(value *bool) string {
+	if value == nil {
+		return valueCaptured
+	}
+	return strconv.FormatBool(*value)
+}
+
 func describeInt(value *int) string {
 	if value == nil {
-		return "captured"
+		return valueCaptured
 	}
 	return strconv.Itoa(*value)
 }

@@ -50,6 +50,7 @@ const (
 	envHighLoad           = "UNIFI_UPS_HIGH_LOAD_PERCENT"
 	envMinAvailability    = "UNIFI_WAN_QUALITY_MIN_AVAILABILITY_PERCENT"
 	envMaxLatency         = "UNIFI_WAN_QUALITY_MAX_LATENCY_MS"
+	envPerDeviceKeys      = "UNIFI_PER_DEVICE_KEYS"
 
 	envWebhookEnabled     = "UNIFI_WEBHOOK_ENABLED"
 	envWebhookBindAddress = "UNIFI_WEBHOOK_BIND_ADDRESS"
@@ -84,7 +85,11 @@ type Config struct {
 	HighLoadPercent        float64
 	MinAvailabilityPercent float64
 	MaxLatencyMs           float64
-	Webhook                WebhookConfig
+	// PerDeviceKeys opts into a device.<name> key per adopted device. Off by
+	// default: it is the only setting that changes how many series an install
+	// publishes rather than what any of them mean.
+	PerDeviceKeys bool
+	Webhook       WebhookConfig
 	// Actions is what this install allows Reactor to write to the console.
 	// Empty by default, which refuses every console write action. See
 	// write.go: the console is the one thing Reactor touches that is not a
@@ -151,6 +156,7 @@ func ConfigFromEnv(lookup func(string) string) (Config, bool, error) {
 		HighLoadPercent:        DefaultHighLoadPercent,
 		MinAvailabilityPercent: DefaultMinAvailabilityPercent,
 		MaxLatencyMs:           DefaultMaxLatencyMs,
+		PerDeviceKeys:          lookup(envPerDeviceKeys) == envTrue,
 		Webhook: WebhookConfig{
 			Enabled:            lookup(envWebhookEnabled) == envTrue,
 			BindAddress:        DefaultWebhookBindAddress,

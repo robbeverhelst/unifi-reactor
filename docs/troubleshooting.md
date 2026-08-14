@@ -618,6 +618,39 @@ kubectl -n reactor-system logs deploy/reactor | grep 'state observed'   # needs 
 
 ---
 
+## 10b. `devices` or a `device.<name>` key is missing or unexpected
+
+`device.<name>` keys are **off by default**. If none of them appear, that is the
+default doing its job — one key per adopted device is one metric series per
+adopted device, so you have to ask:
+
+```sh
+helm upgrade ... --set unifi.devices.perDeviceKeys=true
+kubectl -n reactor-system logs deploy/reactor | grep 'Per-device state keys are on'
+```
+
+The aggregate `devices` key is published either way. With `log.level=debug` one
+line per poll says what the fleet looks like and names the devices behind it:
+
+```sh
+kubectl -n reactor-system logs deploy/reactor | grep 'device fleet'
+# device fleet devices=degraded adopted=6 offline=1 offlineDevices=ap-attic=inactive perDeviceKeys=false
+```
+
+| What you see | What it means |
+| --- | --- |
+| No `devices` key at all | Nothing in the device list is adopted *and* reporting a recognisable state. `No adopted device reported a recognisable state` at debug level confirms it |
+| A device you own is not in `offlineDevices` and has no key | `Skipping a device that is not adopted`, or `An adopted device reports no state`. An absent `state` is never read as offline |
+| `A device reports a state this provider does not recognise` | Provisioning, upgrading or heartbeat-missed. It counts towards neither key on purpose — a firmware upgrade is not a fleet outage. **Please report the number**, it is what would extend the mapping |
+| `Two or more devices share one key after slugifying their names` | `AP 1` and `ap-1` both want `device.ap-1`, so neither is published. Rename one on the console. `devices` still counts both |
+| A key vanished and `Ready=False`/`StateKeyUnavailable` | The device was renamed, removed or unadopted. Reactor holds the last known state rather than firing `onExit`, which is why retitling a switch does not scale a workload back up. Update the Automation to the new slug |
+
+A `device.<name>` key has no `reactor_state_info` series and never will — its key
+name comes from your network, so it is not a metric label. Use
+`status.observedState` on the Automation, or the debug line above.
+
+---
+
 ## 11. Reactor warns about your UniFi Network version
 
 ```text

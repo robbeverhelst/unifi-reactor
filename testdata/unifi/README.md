@@ -18,8 +18,8 @@ The allowlist matters more than it looks. `stat/device` returns entire device re
 
 | File | Endpoint | What it documents |
 | --- | --- | --- |
-| `api/stat-device-gateway.json` | `GET /proxy/network/api/s/<site>/stat/device` (gateway) | `wan1`/`wan2` (`is_uplink`, `up`, `ifname`, `speed`), `uplink`, `last_wan_status`, `isp` (allowlisted from `active_geo_info.WAN.isp_name`) |
-| `api/stat-device-ups.json` | same call, UPS record | `vbms_table` battery state, `outlet_table` |
+| `api/stat-device-gateway.json` | `GET /proxy/network/api/s/<site>/stat/device` (gateway) | `wan1`/`wan2` (`is_uplink`, `up`, `ifname`, `speed`), `uplink`, `last_wan_status`, `isp` (allowlisted from `active_geo_info.WAN.isp_name`), `state`/`adopted`/`name` (the `devices` key) |
+| `api/stat-device-ups.json` | same call, UPS record | `vbms_table` battery state, `outlet_table`, `state`/`adopted`/`name` |
 | `api/stat-health.json` | `GET /proxy/network/api/s/<site>/stat/health` | per-subsystem `status` (the `internet` key), WAN `uptime_stats` monitors (the `wan.quality` key), ISP |
 | `api/integration-info.json` | `GET /proxy/network/integration/v1/info` | controller version, for the compatibility guard |
 | `api/integration-sites.json` | `GET /proxy/network/integration/v1/sites` | site listing |
@@ -216,6 +216,38 @@ UNIFI_URL=$UNIFI_URL UNIFI_API_KEY=$UNIFI_API_KEY ./hack/capture-unifi.sh
 That script writes `testdata/unifi/api/` through the allowlist. **Do not hand-edit `/tmp/failover/*.json` into a fixture** — those files are whole device records containing `x_authkey`, syslog keys and adoption identifiers. That exact shortcut put a live credential in this repository's history once. Capturing the backup-live stage means running the script *while the failover is in progress* and saving its output under a new name, e.g. `stat-device-gateway-on-backup.json`, then adding a row to the file table above.
 
 Post the comparison output on [#34](https://github.com/robbeverhelst/unifi-reactor/issues/34) even if you cannot commit fixtures. The five numbers per stage are the finding; the fixture is only how it gets tested.
+
+## Fleet health (`state`, `adopted`)
+
+Both committed device records carry `"state": 1` and `"adopted": true`, so the
+`devices` key is derived entirely from fields that are already here — the only
+key in this batch that needed nothing new.
+
+| Field | In the captures | What the provider does with it |
+| --- | --- | --- |
+| `state` | `1` on both records | `1` → `online`, `0` → `offline`, **anything else → no value at all** |
+| `adopted` | `true` on both records | gates the fleet keys: an unadopted device is not your fleet |
+| `name` | `Dream Machine Pro`, `UPS 2U` | slugified into the `device.<name>` key |
+| `disconnection_reason` | **absent** — both devices were connected | never derived from; a `V(1)` diagnostic naming why the console lost a device |
+
+`state` is decoded as a **pointer**, for the reason the whole of this file keeps
+repeating: `0` is a real value here and means offline, so an absent `state` read
+as `0` would report one truncated record as a dead device and take the fleet to
+`degraded`. `adopted` is a pointer too, and `nil` is read as "not known to be
+adopted" — the direction that publishes fewer keys rather than more.
+
+> ⚠️ **Only states 0 and 1 have been observed**, both of them `1`. UniFi
+> documents others — pending adoption, provisioning, upgrading, heartbeat missed,
+> isolated — and none has been captured, so none is mapped. A device in one of
+> them counts towards neither key and logs a line asking for a report, because
+> reading "upgrading" as `offline` would turn a firmware update into a fleet
+> outage. `disconnection_reason`'s field name comes from UniFi's own API rather
+> than from a capture; it is diagnostics only, so a wrong name costs a log field
+> and nothing else.
+
+The two captured names are the console's defaults for that hardware, which is
+what makes them safe to use as documentation examples. Anything derived from a
+device name in a fixture or a doc example must be a placeholder of that kind.
 
 ## UPS state (`vbms_table`)
 

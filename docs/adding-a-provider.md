@@ -245,6 +245,33 @@ numbers stay in a debug log line, where they are diagnostics rather than API.
 Decide the bucket boundaries with the user's automation in mind — two levels
 they can act on beats five they have to reason about.
 
+**A key whose NAME is open is opt-in.** The rule above is about values; this one
+is about the other half of the label pair, and it is the harder case. `devices`
+and `device.<name>` are the worked example: the aggregate is one key with two
+values, while the per-device form derives its *key name* from a device name, so
+the set of keys only exists at runtime and grows with someone's rack. That cannot
+be enumerated in `StateVocabulary()` — the map is returned once at startup — and
+enumerating it would be the wrong thing to want, because one series per device
+is a cost the operator has to choose rather than discover.
+
+So: publish the aggregate by default, put the per-entity keys behind a config
+flag that defaults off, leave them out of `StateVocabulary()` entirely, and log a
+line at startup when they are on. The aggregate is nearly always the key people
+should be matching on anyway — "is anything down" is the question; "which one" is
+answered by `status.observedState`, an Event, and a `V(1)` log line. Do the same
+for `client.<name>` when it lands.
+
+Two details fall out of it. Give the derived name a **slug rule** (the UniFi
+provider reuses `isp`'s) so the key is always writable in YAML, and decide what a
+**collision** does: two devices whose names slugify alike publish neither key and
+count a disagreement, because picking one is arbitrary and the arbitrary pick can
+be the one that hides the failure.
+
+The other detail is debounce, and it needs the engine rather than the provider:
+a `PerKey` entry may end in `*`, so `device.*: 2` settles a group whose members
+are not known when the chart is written. The engine still learns nothing — it
+matches a string against a pattern it was handed as data.
+
 **Key names are a compatibility promise.** They appear in user YAML. Renaming one breaks every Automation using it. Choose as if you cannot rename — because you cannot.
 
 ## Fixtures: capture, allowlist, commit
@@ -259,7 +286,7 @@ For a new provider, add a `hack/capture-<provider>.sh` in the same shape as `hac
 
 **Write a `testdata/<provider>/README.md`** recording what hardware and what software version produced the captures, which fields each file documents, and which mappings are *inferred* rather than observed. The UniFi one flags that the `wan` mapping has never seen a real failover, and that honesty is worth more than the fixture.
 
-**Consider a mock.** `hack/mock-unifi/` serves the captured payloads over HTTP and exposes endpoints to drive transitions by hand (`POST /flip`, `POST /ups?mode=battery&level=80`, `POST /internet?status=error`, `POST /quality?availability=97`). It is what makes `make dev-mock` work without hardware, and the e2e suites drive the same endpoints, so a key that cannot be rehearsed by hand also cannot be rehearsed in CI. Do it for any provider whose hardware is not on every contributor's desk.
+**Consider a mock.** `hack/mock-unifi/` serves the captured payloads over HTTP and exposes endpoints to drive transitions by hand (`POST /flip`, `POST /ups?mode=battery&level=80`, `POST /internet?status=error`, `POST /quality?availability=97`, `POST /device?name=…&state=offline`). It is what makes `make dev-mock` work without hardware, and the e2e suites drive the same endpoints, so a key that cannot be rehearsed by hand also cannot be rehearsed in CI. Do it for any provider whose hardware is not on every contributor's desk.
 
 ## Tests
 
@@ -288,7 +315,7 @@ Three layers, all runnable with `make test` and none needing hardware:
 
 Some things genuinely belong in the core, and the test is whether the engine would have to learn a provider's vocabulary:
 
-- **Debounce** — requiring N consecutive identical observations before a value is reported. This lives in `StateStore.Observe`, not in your provider, so that every Automation reads the same value. Configuration arrives from the provider as an opaque key → sample-count map; the engine never learns that `ups` should react fast. Supply yours with `engine.WithDebounce(ProviderName, ...)`, and if you also have an inbound trigger, see the `Proving` note above.
+- **Debounce** — requiring N consecutive identical observations before a value is reported. This lives in `StateStore.Observe`, not in your provider, so that every Automation reads the same value. Configuration arrives from the provider as an opaque key → sample-count map; the engine never learns that `ups` should react fast. Supply yours with `engine.WithDebounce(ProviderName, ...)`, and if you also have an inbound trigger, see the `Proving` note above. An entry may end in `*` to cover a group of keys whose names are only known at runtime (`device.*`); exact entries win over patterns, and the longest prefix wins between patterns. That was the one engine change the per-device keys needed, and it is still opaque data — a string matched against a pattern, with no idea what either means.
 - **A webhook fast path** — a receiver that triggers an immediate re-observation. It never executes actions and never bypasses the poller; it just makes the next observation happen sooner. This one turned out **not** to need the engine at all: `internal/providers/unifi/receiver.go` is an HTTP `Runnable` that authenticates a delivery, discards its body without reading it, and sends on the poller's `Nudge` channel. Because no state is derived from a payload, a dropped, duplicated, replayed or forged delivery costs at most one extra observation. If your upstream can push, copy that shape rather than parsing what it pushes.
 
 And some things are a different extension point entirely. **Action types are not providers.** A provider observes; an action acts. Adding `kubernetes.restart` or an HTTP action means extending the action side of the reconciler and the `Action` type's enum, and touches none of the above.

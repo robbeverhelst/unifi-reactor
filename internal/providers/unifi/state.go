@@ -30,6 +30,13 @@ const (
 	stateKeyUPSBattery = "ups.battery"
 	stateKeyUPSRuntime = "ups.runtime"
 	stateKeyUPSLoad    = "ups.load"
+	stateKeyDevices    = "devices"
+
+	// stateKeyDevicePrefix is what a per-device key is published under:
+	// device.<slugified name>. It is the first key on this list whose NAME is
+	// open rather than whose values are, and that is why publishing them is
+	// opt-in — see the note on StateVocabulary below.
+	stateKeyDevicePrefix = "device."
 
 	wanPrimary = "primary"
 	wanBackup  = "backup"
@@ -110,6 +117,18 @@ const (
 	// could never be a metric label.
 	upsLoadNormal = "normal"
 	upsLoadHigh   = "high"
+
+	// device.<name> is whether the console is in contact with one adopted
+	// device. It is a switch position, not a measurement — the console either
+	// has a heartbeat from a device or it does not.
+	deviceOnline  = "online"
+	deviceOffline = "offline"
+
+	// devices is the fleet in one value, and it is the key most installs should
+	// match on: it says nothing about which device is missing, and it costs one
+	// series regardless of how many devices are adopted.
+	devicesAllOnline = "all-online"
+	devicesDegraded  = "degraded"
 )
 
 // The comparisons this provider makes between two independent signals for the
@@ -123,6 +142,7 @@ const (
 	signalWANMovedWithoutISP = "wan-moved-without-isp"
 	signalISPMovedWithoutWAN = "isp-moved-without-wan"
 	signalWANHealthDisagrees = "wan-health-disagrees"
+	signalDeviceNameShared   = "device-name-shared"
 )
 
 // StateVocabulary is the closed value set of every key this provider publishes
@@ -147,6 +167,18 @@ const (
 // distinct latency reading is the same cardinality failure isp would have
 // been. Bucketing into two named levels is what makes it a state key at all —
 // a number is not something spec.when can match either.
+//
+// device.<name> is absent for a third reason, and it is the reason this map is
+// keyed at all rather than being a list of values. Its VALUES are closed —
+// online and offline, two of them — but its key NAME is derived from a device
+// name, so the set of keys is open and only known at runtime. This map is
+// returned once at startup and cannot enumerate them, and enumerating them
+// would be the wrong thing to want: an install with forty adopted devices would
+// silently multiply its series count. So the per-device keys are opt-in
+// (Client.PerDeviceKeys), they are never labelled by value, and the aggregate
+// devices key — one series, whatever the fleet size — is what ships on by
+// default. What any single device currently is stays in the Automation's status
+// and in a Kubernetes Event, exactly as isp's value does.
 func StateVocabulary() map[string][]string {
 	return map[string][]string{
 		stateKeyWAN:        {wanPrimary, wanBackup},
@@ -156,5 +188,6 @@ func StateVocabulary() map[string][]string {
 		stateKeyUPSBattery: {batteryNormal, batteryLow, batteryCritical},
 		stateKeyUPSRuntime: {upsRuntimeAmple, upsRuntimeShort, upsRuntimeCritical},
 		stateKeyUPSLoad:    {upsLoadNormal, upsLoadHigh},
+		stateKeyDevices:    {devicesAllOnline, devicesDegraded},
 	}
 }
