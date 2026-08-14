@@ -1,0 +1,88 @@
+{{- if .Values.metrics.enabled }}
+{{- $portName := ternary "https" "http" .Values.metrics.secure }}
+# The metrics endpoint, and the permissions that guard it.
+#
+# Reactor publishes what it observed, what matched, what it did and how fast —
+# the decision layer. Raw UniFi telemetry is deliberately not re-exported.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "reactor.fullname" . }}-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reactor.labels" . | nindent 4 }}
+  {{- with .Values.metrics.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "reactor.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: {{ $portName }}
+      port: {{ .Values.metrics.service.port }}
+      targetPort: {{ $portName }}
+      protocol: TCP
+{{- if .Values.metrics.secure }}
+---
+# The authn/authz filter in front of the endpoint asks the API server to
+# authenticate the scraper's bearer token and to authorize it.
+#
+# Both reviews are cluster-scoped resources with no namespaced form, so this is
+# a ClusterRole even under rbac.clusterWide: false — the one place a
+# namespace-scoped install still creates cluster-scoped RBAC. It is worth
+# knowing rather than hiding: an install that must create nothing cluster-scoped
+# can set metrics.secure: false and restrict who can reach the port some other
+# way. What is granted here is delegation — the right to ask the API server
+# whether a caller is allowed in — not access to anything the caller holds.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "reactor.fullname" . }}-metrics-auth
+  labels:
+    {{- include "reactor.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "reactor.fullname" . }}-metrics-auth
+  labels:
+    {{- include "reactor.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "reactor.fullname" . }}-metrics-auth
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "reactor.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- if .Values.metrics.reader.create }}
+---
+# Deliberately unbound: this grants nothing until you bind it to whatever
+# ServiceAccount your Prometheus scrapes with. Creating the binding here would
+# mean guessing that name, and guessing wrong opens the endpoint to nobody
+# while looking like it works.
+#
+#   kubectl create clusterrolebinding reactor-metrics-reader \
+#     --clusterrole={{ include "reactor.fullname" . }}-metrics-reader \
+#     --serviceaccount=<prometheus namespace>:<prometheus service account>
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "reactor.fullname" . }}-metrics-reader
+  labels:
+    {{- include "reactor.labels" . | nindent 4 }}
+rules:
+  - nonResourceURLs: ["/metrics"]
+    verbs: ["get"]
+{{- end }}
+{{- end }}
+{{- end }}

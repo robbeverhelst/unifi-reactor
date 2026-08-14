@@ -28,6 +28,8 @@ import (
 	"time"
 
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/robbeverhelst/unifi-reactor/internal/metrics"
 )
 
 // Default battery thresholds, as percentages of remaining charge.
@@ -318,6 +320,7 @@ func (c *Client) wanFrom(ctx context.Context, d deviceRecord) string {
 	var wan string
 	switch {
 	case claimed.value != "" && named.value != "" && claimed.value != named.value:
+		metrics.SignalsDisagreed(ProviderName, signalWANUplinkDisagrees)
 		log.Info("The gateway's WAN signals disagree about which uplink is live; "+
 			"trusting is_uplink, which is the signal this mapping has always used",
 			"byIsUplink", claimed.value, "byUplinkName", named.value, "uplink", d.Uplink.Name)
@@ -325,6 +328,7 @@ func (c *Client) wanFrom(ctx context.Context, d deviceRecord) string {
 	case claimed.value != "":
 		wan = claimed.value
 	case named.value != "":
+		metrics.SignalsDisagreed(ProviderName, signalWANUplinkUnclaimed)
 		log.Info("is_uplink does not name a single live WAN port; "+
 			"deriving the live uplink from the gateway's uplink interface instead",
 			"byUplinkName", named.value, "uplink", d.Uplink.Name, "bothPortsClaimedUplink", claimed.ambiguous)
@@ -333,6 +337,7 @@ func (c *Client) wanFrom(ctx context.Context, d deviceRecord) string {
 		// Both ports claim the uplink and nothing resolves it. Reporting the
 		// backup is what this provider has always done here; it is a guess,
 		// and saying so is the only honest thing available.
+		metrics.SignalsDisagreed(ProviderName, signalWANUplinkAmbiguous)
 		log.Info("Both WAN ports report is_uplink and nothing resolves which is live; "+
 			"reporting the backup uplink, which may be wrong",
 			"wan", wanBackup)
@@ -363,6 +368,7 @@ func (c *Client) checkLastWANStatus(ctx context.Context, d deviceRecord, wan str
 	if !ok || status == wanStatusOnline {
 		return
 	}
+	metrics.SignalsDisagreed(ProviderName, signalWANNotOnline)
 	logf.FromContext(ctx).WithName("unifi-wan").Info(
 		"The uplink believed to be live does not report itself as online",
 		"wan", wan, "statusKey", key, "status", status, "lastWANStatus", fmt.Sprint(d.LastWANStatus))
@@ -396,11 +402,13 @@ func (c *Client) crossCheckOverTime(ctx context.Context, wan, isp string) {
 	}
 	log := logf.FromContext(ctx).WithName("unifi-wan")
 	if wanMoved {
+		metrics.SignalsDisagreed(ProviderName, signalWANMovedWithoutISP)
 		log.Info("The gateway changed uplink but the ISP behind it did not change; "+
 			"one of the two signals is wrong and the wan mapping is the unverified one",
 			"wanFrom", was.wan, "wanTo", wan, "isp", isp)
 		return
 	}
+	metrics.SignalsDisagreed(ProviderName, signalISPMovedWithoutWAN)
 	log.Info("The ISP behind the uplink changed but the gateway still reports the same uplink; "+
 		"if this was a failover, the wan mapping missed it",
 		"wan", wan, "ispFrom", was.isp, "ispTo", isp)

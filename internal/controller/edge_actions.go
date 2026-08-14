@@ -32,6 +32,7 @@ import (
 
 	reactorv1alpha1 "github.com/robbeverhelst/unifi-reactor/api/v1alpha1"
 	"github.com/robbeverhelst/unifi-reactor/internal/actions"
+	"github.com/robbeverhelst/unifi-reactor/internal/metrics"
 )
 
 const (
@@ -116,8 +117,14 @@ func (r *AutomationReconciler) runEdgeActions(
 		if ctx.Err() != nil {
 			entry.Status = executionSkipped
 			entry.Reason = "ran out of time for the remaining actions on this transition"
+			metrics.ActionSkipped(action.Type, metrics.KindEdge, !matching)
 		} else {
+			started := time.Now()
 			result, err := r.runEdgeAction(ctx, automation, action, data)
+			// Counted as an edge action, which is what keeps a failure here from
+			// reading as an Automation that could not do its job: this did not
+			// happen, and the desired-state action beside it still did.
+			metrics.ActionExecuted(action.Type, metrics.KindEdge, !matching, err, time.Since(started))
 			entry.Destination = result.Origin
 			entry.Attempts = result.Attempts
 			entry.Status = executionSuccess
@@ -145,28 +152,17 @@ func (r *AutomationReconciler) reportEdgeAction(
 	case executionSuccess:
 		log.Info("edge action sent", "automation", claimantOf(automation),
 			"action", entry.Type, "destination", entry.Destination, "attempts", entry.Attempts)
-		r.event(automation, corev1.EventTypeNormal, reasonEdgeActionSent,
+		r.event(automation, corev1.EventTypeNormal, reasonEdgeActionSent, actionEdge,
 			"%s delivered to %s after %d attempt(s)", entry.Type, entry.Destination, entry.Attempts)
 	case executionFailed:
 		log.Info("edge action failed", "automation", claimantOf(automation),
 			"action", entry.Type, "destination", entry.Destination, "reason", entry.Reason)
-		r.event(automation, corev1.EventTypeWarning, reasonEdgeActionFailed,
+		r.event(automation, corev1.EventTypeWarning, reasonEdgeActionFailed, actionEdge,
 			"%s was not delivered: %s", entry.Type, entry.Reason)
 	default:
-		r.event(automation, corev1.EventTypeWarning, reasonEdgeActionSkipped,
+		r.event(automation, corev1.EventTypeWarning, reasonEdgeActionSkipped, actionEdge,
 			"%s did not run: %s", entry.Type, entry.Reason)
 	}
-}
-
-func (r *AutomationReconciler) event(
-	automation *reactorv1alpha1.Automation,
-	eventType, reason, note string,
-	args ...any,
-) {
-	if r.Recorder == nil {
-		return
-	}
-	r.Recorder.Eventf(automation, nil, eventType, reason, "EdgeAction", note, args...)
 }
 
 // runEdgeAction resolves one action into a request and sends it.

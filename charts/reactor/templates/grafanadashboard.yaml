@@ -1,0 +1,29 @@
+{{- if .Values.metrics.dashboard.enabled }}
+{{- if not .Values.metrics.enabled }}
+{{- fail "metrics.dashboard.enabled needs metrics.enabled: every panel would query series nothing is publishing" }}
+{{- end }}
+# Needs grafana-operator's GrafanaDashboard CRD.
+#
+# The JSON is a chart file rather than an inline blob, so it can be linted,
+# diffed and imported by hand: charts/reactor/dashboards/reactor.json. It pins
+# no datasource — the dashboard carries a `datasource` variable you pick on
+# open — and carries no organisation-specific tag or folder, so importing it
+# into any Grafana works without editing it first.
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: {{ include "reactor.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reactor.labels" . | nindent 4 }}
+spec:
+  instanceSelector:
+    {{- toYaml .Values.metrics.dashboard.instanceSelector | nindent 4 }}
+  allowCrossNamespaceImport: {{ .Values.metrics.dashboard.allowCrossNamespaceImport }}
+  resyncPeriod: {{ .Values.metrics.dashboard.resyncPeriod | quote }}
+  {{- with .Values.metrics.dashboard.folder }}
+  folder: {{ . | quote }}
+  {{- end }}
+  json: |
+{{ .Files.Get "dashboards/reactor.json" | indent 4 }}
+{{- end }}

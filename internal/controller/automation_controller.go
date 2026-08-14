@@ -39,6 +39,7 @@ import (
 	reactorv1alpha1 "github.com/robbeverhelst/unifi-reactor/api/v1alpha1"
 	"github.com/robbeverhelst/unifi-reactor/internal/actions"
 	"github.com/robbeverhelst/unifi-reactor/internal/engine"
+	"github.com/robbeverhelst/unifi-reactor/internal/metrics"
 	"github.com/robbeverhelst/unifi-reactor/internal/providers/unifi"
 )
 
@@ -172,7 +173,11 @@ type AutomationReconciler struct {
 // +kubebuilder:rbac:groups=reactor.robbeverhelst.com,resources=automations/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=reactor.robbeverhelst.com,resources=automations/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// mgr.GetEventRecorder returns the events.k8s.io/v1 recorder, not the deprecated
+// core/v1 one. They share storage but are separate API groups for authorization,
+// and a rule naming only "" fails every emission with a Forbidden the broadcaster
+// logs and nothing else surfaces — the Automation just has no Events.
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 
 // evaluation is one Automation's condition assessed against current state.
@@ -186,6 +191,10 @@ type evaluation struct {
 	missing []string
 	// known is false when the provider has never reported anything.
 	known bool
+	// observedAt is when the state this assessment was made against was
+	// observed, so a reaction can be measured from the observation that caused
+	// it rather than from the reconcile that noticed.
+	observedAt time.Time
 }
 
 // evaluate assesses an Automation's condition against the current observation.
@@ -202,6 +211,7 @@ func (r *AutomationReconciler) evaluate(automation *reactorv1alpha1.Automation) 
 		return assessment
 	}
 	assessment.known = true
+	assessment.observedAt = observation.ObservedAt
 
 	for key, want := range automation.Spec.When.State {
 		got, present := observation.State[key]
@@ -233,7 +243,12 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	var automation reactorv1alpha1.Automation
 	if err := r.Get(ctx, req.NamespacedName, &automation); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		if err = client.IgnoreNotFound(err); err == nil {
+			// Gone for good: drop its series rather than leave a deleted policy
+			// reporting a condition it no longer has.
+			metrics.ForgetAutomation(req.Namespace, req.Name)
+		}
+		return ctrl.Result{}, err
 	}
 
 	if !automation.DeletionTimestamp.IsZero() {
@@ -252,10 +267,8 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		// error-backoff loop nobody can act on.
 		log.Info("automation has no spec.when and will never act; spec.trigger was removed from v1alpha1, delete it",
 			"automation", claimantOf(&automation))
-		if r.Recorder != nil {
-			r.Recorder.Eventf(&automation, nil, corev1.EventTypeWarning, reasonTriggerRemoved, "Reconcile",
-				"spec.trigger was removed from v1alpha1 and was never implemented; this automation does nothing, delete it")
-		}
+		r.event(&automation, corev1.EventTypeWarning, reasonTriggerRemoved, actionReconcile,
+			"spec.trigger was removed from v1alpha1 and was never implemented; this automation does nothing, delete it")
 		return ctrl.Result{}, nil
 	}
 
@@ -278,7 +291,7 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if inForce && !assessment.known {
 		r.setCondition(&automation, conditionReady, metav1.ConditionFalse, "ProviderStateUnavailable",
 			fmt.Sprintf("no state observed yet for provider %q", automation.Spec.When.Provider))
-		if err := r.Status().Update(ctx, &automation); err != nil {
+		if err := r.updateStatus(ctx, &automation); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: reevaluateInterval}, nil
@@ -291,10 +304,14 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// failure. Hold the current matching state instead and say so in status.
 	if inForce && len(assessment.missing) > 0 {
 		automation.Status.ObservedState = assessment.observed
-		r.setCondition(&automation, conditionReady, metav1.ConditionFalse, "StateKeyUnavailable",
+		r.eventOnNewReason(&automation, conditionReady, corev1.EventTypeWarning,
+			reasonStateKeyUnavailable, actionEvaluate,
+			"provider %q stopped reporting %s; holding the last known state rather than treating lost sight of it as the condition ending",
+			automation.Spec.When.Provider, strings.Join(assessment.missing, ", "))
+		r.setCondition(&automation, conditionReady, metav1.ConditionFalse, reasonStateKeyUnavailable,
 			fmt.Sprintf("provider %q is not reporting %s; holding last known state",
 				automation.Spec.When.Provider, strings.Join(assessment.missing, ", ")))
-		if err := r.Status().Update(ctx, &automation); err != nil {
+		if err := r.updateStatus(ctx, &automation); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: reevaluateInterval}, nil
@@ -329,7 +346,12 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		automation.Status.LastExecution = &reactorv1alpha1.ExecutionStatus{
 			Time: metav1.Now(), OnExit: !claiming, Status: executionSuccess,
 		}
+		metrics.ReactionCompleted(automation.Spec.When.Provider, assessment.observedAt)
 	}
+	// Raised before the failure branch below, because reconcileTargets stops at
+	// the first failure and the targets it wrote before that one were still
+	// written.
+	r.eventsForTargets(&automation, outcomes)
 	if readable {
 		automation.Status.ObservedState = assessment.observed
 	}
@@ -338,6 +360,11 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if applyErr != nil {
 		return r.recordApplyFailure(ctx, &automation, applyErr, claiming)
 	}
+	// After the failure branch: a transition whose targets could not be written
+	// is not committed, so announcing it here would report a failover that has
+	// not happened yet. It is announced on the retry that succeeds — the same
+	// ordering rule the edge actions below follow.
+	r.reportTransition(&automation, matching != wasMatching, matching)
 
 	if inForce {
 		r.setCondition(&automation, conditionReady, metav1.ConditionTrue, "Reconciled",
@@ -353,7 +380,7 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		r.setCondition(&automation, conditionApplied, metav1.ConditionFalse, reasonSuspended,
 			"suspended, so this automation's targets are arbitrated as if it did not exist")
 	}
-	if err := r.Status().Update(ctx, &automation); err != nil {
+	if err := r.updateStatus(ctx, &automation); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -368,7 +395,7 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if matching != wasMatching && inForce {
 		if results := r.runEdgeActions(ctx, &automation, matching); len(results) > 0 {
 			automation.Status.EdgeActions = results
-			if err := r.Status().Update(ctx, &automation); err != nil {
+			if err := r.updateStatus(ctx, &automation); err != nil {
 				// Logged rather than returned: the actions have already been
 				// sent, and requeueing would re-send them on the next pass.
 				log.Error(err, "recording edge action results failed",
@@ -399,25 +426,37 @@ func (r *AutomationReconciler) recordApplyFailure(
 		Time: metav1.Now(), OnExit: !claiming, Status: executionFailed,
 		Reason: applyErr.Error(), Attempts: attempts,
 	}
+	// Bounded by the retry budget rather than raised every pass: past it,
+	// Reactor has stopped trying and has nothing new to report until the state
+	// changes, so a fifteen-second heartbeat would be noise on top of silence.
+	if attempts <= maxActionAttempts {
+		r.eventOnNewReason(automation, conditionReady, corev1.EventTypeWarning,
+			reasonActionFailed, actionExecute,
+			"attempt %d of %d failed: %v", attempts, maxActionAttempts, applyErr)
+	}
 	r.setCondition(automation, conditionReady, metav1.ConditionFalse, reasonActionFailed, applyErr.Error())
 
 	// Retry is bounded here rather than by returning the error and inheriting
 	// controller-runtime's requeue, so that giving up is a decision with a
 	// visible reason instead of an unbounded backoff nobody can see the end of.
 	if attempts >= maxActionAttempts {
-		r.setCondition(automation, conditionApplied, metav1.ConditionFalse, "RetryBudgetExhausted",
+		r.eventOnNewReason(automation, conditionApplied, corev1.EventTypeWarning,
+			reasonRetryBudgetExhausted, actionExecute,
+			"gave up after %d attempts; waiting for the next state change rather than retrying forever: %v",
+			attempts, applyErr)
+		r.setCondition(automation, conditionApplied, metav1.ConditionFalse, reasonRetryBudgetExhausted,
 			fmt.Sprintf("giving up after %d attempts, will try again on the next state change: %v",
 				attempts, applyErr))
 		log.Error(applyErr, "giving up on target after repeated failures",
 			"automation", automation.Name, "attempts", attempts)
-		if err := r.Status().Update(ctx, automation); err != nil {
+		if err := r.updateStatus(ctx, automation); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: reevaluateInterval}, nil
 	}
 
 	r.setCondition(automation, conditionApplied, metav1.ConditionFalse, reasonActionFailed, applyErr.Error())
-	if err := r.Status().Update(ctx, automation); err != nil {
+	if err := r.updateStatus(ctx, automation); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: retryBackoff(attempts)}, nil
@@ -445,8 +484,8 @@ func (r *AutomationReconciler) finalize(
 		attempts := automation.Status.ReleaseAttempts + 1
 		if attempts < maxReleaseAttempts {
 			automation.Status.ReleaseAttempts = attempts
-			r.setCondition(automation, conditionApplied, metav1.ConditionFalse, "ReleaseFailed", err.Error())
-			if statusErr := r.Status().Update(ctx, automation); statusErr != nil {
+			r.setCondition(automation, conditionApplied, metav1.ConditionFalse, reasonReleaseFailed, err.Error())
+			if statusErr := r.updateStatus(ctx, automation); statusErr != nil {
 				return ctrl.Result{}, statusErr
 			}
 			return ctrl.Result{RequeueAfter: time.Duration(attempts) * releaseRetryInterval}, nil
@@ -456,10 +495,8 @@ func (r *AutomationReconciler) finalize(
 		// was before — but a resource stuck terminating forever is not.
 		log.Error(err, "giving up releasing targets, removing finalizer anyway",
 			"automation", claimantOf(automation), "attempts", attempts)
-		if r.Recorder != nil {
-			r.Recorder.Eventf(automation, nil, corev1.EventTypeWarning, "ReleaseFailed", "Release",
-				"could not hand targets back after %d attempts, deleting anyway: %v", attempts, err)
-		}
+		r.event(automation, corev1.EventTypeWarning, reasonReleaseFailed, actionRelease,
+			"could not hand targets back after %d attempts, deleting anyway: %v", attempts, err)
 	}
 
 	controllerutil.RemoveFinalizer(automation, finalizerReleaseClaims)
@@ -476,7 +513,10 @@ func (r *AutomationReconciler) reconcileTargets(
 ) ([]targetOutcome, error) {
 	var outcomes []targetOutcome
 	for _, key := range targetsOf(automation) {
+		started := time.Now()
 		outcome, err := r.reconcileTarget(ctx, key, automation, matching)
+		metrics.ActionExecuted(actionTypeFor(automation, key, matching), metrics.KindDesiredState,
+			!matching, err, time.Since(started))
 		outcomes = append(outcomes, outcome)
 		if err != nil {
 			return outcomes, err
@@ -526,7 +566,10 @@ func (r *AutomationReconciler) setAppliedCondition(
 		}
 	}
 	if len(deferred) > 0 {
-		r.setCondition(automation, conditionApplied, metav1.ConditionFalse, "DeferredToOtherAutomation",
+		r.eventOnNewReason(automation, conditionApplied, corev1.EventTypeNormal,
+			reasonDeferred, actionExecute,
+			"a more restrictive claim is in effect: %s", strings.Join(deferred, "; "))
+		r.setCondition(automation, conditionApplied, metav1.ConditionFalse, reasonDeferred,
 			strings.Join(deferred, "; "))
 		return
 	}

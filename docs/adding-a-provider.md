@@ -225,6 +225,15 @@ The UniFi provider breaks this rule exactly once, and the shape of the exception
 
 **Omit unobservable keys entirely**, as described above.
 
+**Declare the closed value sets, and leave the open ones out.** `StateVocabulary()`
+in `state.go` returns key → values for every key whose values you can enumerate.
+It is what lets `reactor_state_info` report `0` for the values a key does not
+currently hold instead of leaving a stale series at `1`, and — more importantly —
+it is what keeps a key with an *open* value set from ever becoming a metric
+label. The UniFi provider leaves `isp` out for exactly that reason: one time
+series per carrier ever geolocated is how a Prometheus instance gets hurt. If
+you break the closed-set rule for a key, break it here too.
+
 **Key names are a compatibility promise.** They appear in user YAML. Renaming one breaks every Automation using it. Choose as if you cannot rename — because you cannot.
 
 ## Fixtures: capture, allowlist, commit
@@ -251,14 +260,14 @@ Three layers, all runnable with `make test` and none needing hardware:
 
 ## Checklist
 
-- [ ] `internal/providers/<name>/state.go` — `ProviderName` plus unexported key and value constants
+- [ ] `internal/providers/<name>/state.go` — `ProviderName`, unexported key and value constants, and `StateVocabulary()` for the keys whose values are a closed set
 - [ ] `internal/providers/<name>/client.go` — `Observe(ctx) (map[string]string, error)`, transport split from derivation
 - [ ] `internal/providers/<name>/config.go` — `ConfigFromEnv(lookup)`, so the environment mapping is tested rather than reviewed
 - [ ] `hack/capture-<name>.sh` — allowlist-first capture, placeholders for anything identifying
 - [ ] `testdata/<name>/` fixtures plus a README recording hardware, version, and inferred mappings
 - [ ] `hack/verify-testdata.sh` extended with the new provider's secret-bearing fields
 - [ ] `internal/controller/<name>_poller.go` — `Runnable`, `NeedLeaderElection() true`, non-blocking wake
-- [ ] `cmd/main.go` — construct only when configured, log clearly when disabled, share `store` and `wake`; anything optional fails soft while the poller is added regardless
+- [ ] `cmd/main.go` — construct only when configured, log clearly when disabled, share `store` and `wake`, call `metrics.SetVocabulary`; anything optional fails soft while the poller is added regardless
 - [ ] `charts/reactor/values.yaml` and `templates/deployment.yaml` — config values and env, credentials mounted as a directory and pointed at by a `*_FILE` variable
 - [ ] Tests at all three layers
 - [ ] Docs: the state-key table in `README.md` and `charts/reactor/README.md`

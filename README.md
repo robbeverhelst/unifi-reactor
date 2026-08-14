@@ -404,6 +404,100 @@ Each extra sample costs one `pollInterval` of reaction time, so the default is `
 
 Debouncing happens in the shared state store, so every automation sees the same settled value. Two automations can never disagree about the current state and fight over a workload they share.
 
+## Knowing it is working
+
+Reactor's worst failure is **silent and fails open**. If it stops observing — an expired API key, a rebooted console, a network partition — every automation quietly stops reacting. Nothing in the cluster notices, and the next real outage simply does not get handled. There is no error to find, because nothing errored.
+
+One metric answers that, and it is the reason the rest exist:
+
+```promql
+time() - reactor_last_observation_timestamp_seconds
+```
+
+Metrics are **off by default** and register on the endpoint controller-runtime already serves — there is no second server and no second auth posture:
+
+```sh
+helm upgrade reactor ... \
+  --set metrics.enabled=true \
+  --set metrics.serviceMonitor.enabled=true \
+  --set metrics.rules.enabled=true \
+  --set metrics.dashboard.enabled=true
+```
+
+| Metric | Type | Answers |
+| --- | --- | --- |
+| `reactor_last_observation_timestamp_seconds` | gauge | is Reactor still seeing anything |
+| `reactor_observations_total` | counter | how often polling succeeds and fails |
+| `reactor_state_info` | gauge 0/1 | what each state key holds right now |
+| `reactor_state_transitions_total` | counter | how often failover actually happens |
+| `reactor_automation_matching` / `_ready` | gauge 0/1 | which policies are in force, and which are broken |
+| `reactor_arbitrations_total` | counter | claimed, deferred to a peer, or released |
+| `reactor_actions_total` | counter | action outcomes, by type and **kind** |
+| `reactor_action_duration_seconds` | histogram | slow or hanging actions |
+| `reactor_reaction_latency_seconds` | histogram | observation → action, end to end |
+| `reactor_webhook_deliveries_total` | counter | fast-path deliveries accepted, coalesced, refused |
+| `reactor_provider_signal_disagreements_total` | counter | two independent signals for one fact disagreeing |
+
+Reconcile counts, queue depth and reconcile latency are controller-runtime's own `controller_runtime_*` series on the same endpoint. Reactor does not reimplement them. It also deliberately **does not re-export UniFi telemetry** — a UniFi exporter covers that better, and Reactor's unique vantage point is the decision layer.
+
+`kind` on `reactor_actions_total` is `desired_state` or `edge`, and no alert should be written without it. A failed `kubernetes.scale` means the cluster is not in the state you asked for. A failed notification means nobody was told — [the workload was still scaled](#when-a-notification-fails), and the automation is still `Ready`. The shipped rules alert on those separately for exactly that reason.
+
+### Cardinality, on purpose
+
+`isp` is the first state key whose values are an **open set** — a carrier slug derived from whatever public address your gateway currently holds. So `reactor_state_info` is published only for keys whose provider declares a closed value set, and `isp` is deliberately not one of them. The transition counter is not labelled by `from`/`to` for the same reason. What a key currently holds is always in `status.observedState` and in an `Event`; what Prometheus keeps is bounded at compile time.
+
+Declaring the vocabulary is also what lets the gauge report `0` for the values a key does *not* hold. Without that, the series for a value it used to hold goes stale at `1` rather than dropping, and every graph built on it lies. All values `0` means the key is not currently observable — the metric side of [`StateKeyUnavailable`](docs/troubleshooting.md#2-statekeyunavailable-and-held-state).
+
+### Alerts and the dashboard
+
+`metrics.rules.enabled` ships a `PrometheusRule` — `ReactorObservationStale` first, then failing observations, failing actions, edge actions failing separately, automations stuck not-ready, and reactions getting slow. `ReactorUPSOnBattery` and `ReactorWANOnBackup` are informational: they let your existing alerting learn what your network already knows.
+
+`metrics.dashboard.enabled` ships a grafana-operator `GrafanaDashboard`. It pins no datasource — you pick one from a variable when you open it — so the same JSON works in any Grafana, and it is a plain file at [`charts/reactor/dashboards/reactor.json`](charts/reactor/dashboards/reactor.json) if you would rather import it by hand.
+
+Both need their operator's CRDs, and both refuse to render without `metrics.enabled` rather than quietly querying series nothing is publishing.
+
+### The other direction: `kubectl describe`
+
+Metrics answer *how often*, across everything. Events answer *what happened*, to this one resource — and they need no Prometheus, no port, and no cluster-admin log access:
+
+```sh
+kubectl -n media describe automation pause-downloads-on-backup-wan
+```
+```text
+Type     Reason                     Age    From        Message
+----     ------                     ----   ----        -------
+Normal   StateEntered               3m12s  automation  wan moved from "primary" to "backup", so the condition started holding
+Normal   TargetScaled               3m12s  automation  Deployment/media/qbittorrent set to 0 replicas
+Normal   EdgeActionSent             3m11s  automation  notification.ntfy delivered to https://ntfy.example.com:443 after 1 attempt(s)
+Normal   DeferredToOtherAutomation  2m40s  automation  a more restrictive claim is in effect: Deployment/media/qbittorrent held by power/shed-on-battery
+Warning  StateKeyUnavailable        1m02s  automation  provider "unifi" stopped reporting ups; holding the last known state rather than treating lost sight of it as the condition ending
+Normal   StateExited                18s    automation  wan moved from "backup" to "primary", so the condition stopped holding
+Normal   TargetReleased             18s    automation  Deployment/media/qbittorrent released; no automation claims it any more
+```
+
+That is the whole failover, in order, including the part where it deliberately did nothing.
+
+`Normal` and `Warning` are used deliberately rather than as a severity dial. Entering a state, scaling a target, releasing one, and **being outvoted by a more restrictive claim** are all `Normal` — the last one especially, because it is how two automations sharing a workload are meant to behave, and reporting it as a fault would train you to ignore Warnings here. `Warning` is reserved for something you have to act on: a held state, a failed action, a retry budget spent, a notification that did not go out.
+
+Volume is bounded by the same rule everywhere: **Events fire on edges, not on states.** A reconcile happens at least every 15s, so anything raised from a steady condition would be an API write every 15 seconds per automation, forever. A target already at the right value produces nothing. A condition that keeps reporting the same reason produces nothing after the first. `ActionFailed` stops at the retry budget, and `RetryBudgetExhausted` replaces it exactly once.
+
+| Reason | Type | Raised when |
+| --- | --- | --- |
+| `StateEntered` / `StateExited` | Normal | the condition started or stopped holding, naming the key that moved |
+| `TargetScaled` / `TargetReleased` | Normal | a write to a target actually happened |
+| `DeferredToOtherAutomation` | Normal | a peer's more restrictive claim is the one in effect |
+| `EdgeActionSent` | Normal | a notification or HTTP request was delivered |
+| `StateKeyUnavailable` | Warning | a provider stopped reporting a key, so state is being held |
+| `ActionFailed` | Warning | a desired-state action could not be applied |
+| `RetryBudgetExhausted` | Warning | Reactor stopped retrying and is waiting for the next state change |
+| `EdgeActionFailed` / `EdgeActionSkipped` | Warning | a notification or HTTP request did not go out |
+| `ReleaseFailed` | Warning | deletion could not hand a target back and let the object go anyway |
+| `EventTriggerRemoved` | Warning | a leftover `spec.trigger` automation that does nothing; delete it |
+
+Events are where a state key with an **open value set** is reported: `isp` is not a metric label, so `isp moved from "carrier-a" to "carrier-b"` lives here and in `status.observedState`. The two halves are complementary on purpose — Prometheus keeps what is bounded, Kubernetes keeps what is specific.
+
+> Events are written to the `events.k8s.io/v1` API and expire on your cluster's retention (an hour by default). They are for the incident you are in, not the audit trail — `status` is the durable record.
+
 ## Compatibility
 
 Everything here was built against one setup, and this table says which one. "Verified" means a real capture or a real cluster; "expected" means the code path is version-independent as far as anyone can tell, which is not the same thing.
@@ -445,6 +539,10 @@ Chart values ([full reference](charts/reactor/README.md)):
 | `unifi.ups.criticalBatteryPercent` | `10` | charge at or below this reports `ups.battery: critical` |
 | `unifi.webhook.enabled` | `false` | webhook fast path (below) |
 | `actions.allowedDestinations` | `[]` | where outbound actions may go. Empty refuses all of them, and withholds the operator's read access to Secrets ([why](#telling-you-what-happened)) |
+| `metrics.enabled` | `false` | serve `/metrics` on `:8443` over HTTPS behind the API server's authn/authz filter ([above](#knowing-it-is-working)) |
+| `metrics.serviceMonitor.enabled` | `false` | scrape it with the Prometheus Operator |
+| `metrics.rules.enabled` | `false` | ship the alert rules, `ReactorObservationStale` first |
+| `metrics.dashboard.enabled` | `false` | ship the overview dashboard as a grafana-operator `GrafanaDashboard` |
 | `rbac.clusterWide` | `true` | when `false`, restricts the operator to its own namespace |
 
 `Automation` resources are namespaced. An action targets its own namespace by default; naming a different one in `target.namespace` requires `rbac.clusterWide: true`.
@@ -494,7 +592,7 @@ And the webhook fast path has been exercised against the mock console, not a rea
 
 - Event triggers for genuinely point-in-time things, like a client connecting — returning as `spec.trigger` in `v1alpha2`, once a real delivery payload has been captured and there is an edge action to run ([why it is not in `v1alpha1`](#stability))
 - More actions: `restart`, CronJob suspend, and the UniFi write actions
-- Prometheus metrics and richer status conditions
+- Richer status conditions, and debounce made visible in status rather than only in the log
 - More providers, driven by demand: NUT, Proxmox, Prometheus alerts, Home Assistant
 
 Non-goals: replacing UniFi Network or UniFi OS, becoming a general-purpose workflow engine like n8n or Argo Workflows, replacing Home Assistant, or executing arbitrary shell commands.

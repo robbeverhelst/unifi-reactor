@@ -52,6 +52,7 @@ import (
 	"github.com/robbeverhelst/unifi-reactor/internal/actions"
 	"github.com/robbeverhelst/unifi-reactor/internal/controller"
 	"github.com/robbeverhelst/unifi-reactor/internal/engine"
+	"github.com/robbeverhelst/unifi-reactor/internal/metrics"
 	"github.com/robbeverhelst/unifi-reactor/internal/providers/unifi"
 	// +kubebuilder:scaffold:imports
 )
@@ -427,6 +428,12 @@ func setupUniFi(mgr ctrl.Manager, cfg unifi.Config, store *engine.StateStore, wa
 	unifiClient := unifi.NewClient(cfg.URL, cfg.APIKey, cfg.Site, cfg.InsecureSkipVerify)
 	unifiClient.LowBatteryPercent = cfg.LowBatteryPercent
 	unifiClient.CriticalBatteryPercent = cfg.CriticalBatteryPercent
+
+	// What this provider's keys can hold, so reactor_state_info can report 0 for
+	// the values a key does not currently have instead of leaving a stale series
+	// at 1. Handed over as opaque data: the metrics package never learns what any
+	// of it means, only how many series there can be.
+	metrics.SetVocabulary(unifi.ProviderName, unifi.StateVocabulary())
 
 	// What the console is running, logged once at startup. It is added before
 	// the poller so that when a moved field makes an observation come back
