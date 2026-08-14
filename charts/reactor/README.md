@@ -166,6 +166,8 @@ hardware is adopted by the controller.
 | `internet` | `ok`, `degraded`, `down` | the console's own `www` health subsystem |
 | `ups` | `online`, `on-battery` | whether a UniFi UPS is on mains or battery |
 | `ups.battery` | `normal`, `low`, `critical` | remaining charge vs. the configured thresholds |
+| `ups.runtime` | `ample`, `short`, `critical` | `timeToRemain` vs. the configured thresholds |
+| `ups.load` | `normal`, `high` | output as a share of the UPS's power budget |
 
 `isp` is the only key with an open value set — it is your carrier's name, lowercased with
 non-alphanumerics turned into hyphens. Read it off a state transition line before matching on it.
@@ -185,6 +187,33 @@ escalation:
       ups: on-battery
       ups.battery: critical    # all keys must match
 ```
+
+### `ups.runtime` and `ups.load`
+
+Charge ignores load, and load is most of the answer: 30% at 300W and 30% at
+900W are very different situations. `ups.runtime` is the UPS's own estimate of
+how long it can carry what is plugged into it right now, and it is what a
+shutdown automation should match on rather than `ups.battery`.
+
+| Value | Default | Description |
+| --- | --- | --- |
+| `unifi.ups.shortRuntimeSeconds` | `600` | remaining runtime at or below this reports `short` |
+| `unifi.ups.criticalRuntimeSeconds` | `180` | remaining runtime at or below this reports `critical` |
+| `unifi.ups.highLoadPercent` | `80` | draw at or above this share of the budget reports `high` |
+
+The runtime pair is set against the debounce `ups.runtime` ships with, not in
+isolation. Two samples is 60 seconds at the default `pollInterval`, so a
+`critical` threshold of 180 seconds leaves two minutes between Reactor
+believing the reading and the UPS running out. Lower one without the other and
+that headroom goes with it.
+
+`ups.load` is published on mains as well as on battery, deliberately: a UPS
+already running at 85% of its budget has no headroom to give you when the power
+goes, and that is worth knowing while the lights are still on.
+
+> ⚠️ `timeToRemain`'s unit is **inferred** to be seconds, from a single
+> observation on a UPS that was not discharging. Confirm it against a real
+> outage before letting `ups.runtime: critical` shut anything down.
 
 ### `internet` and `wan.quality`
 
@@ -567,15 +596,16 @@ was told, while the workload was still scaled and the Automation is still
 
 `reactor_state_info{provider,key,value}` is published **only for state keys
 whose value set the provider declares closed** — `wan`, `wan.quality`,
-`internet`, `ups`, `ups.battery`. `isp` is not one of them: its values are
+`internet`, `ups`, `ups.battery`, `ups.runtime`, `ups.load`. `isp` is not one of them: its values are
 carrier slugs derived from whatever public address your gateway holds, so
 labelling by them would add one permanent time series per carrier ever seen.
 `reactor_state_transitions_total` is not labelled by `from`/`to` for the same
 reason.
 
-`wan.quality` is in that list only because it was bucketed. The availability
-and latency behind it are continuous, and publishing them as values would have
-been the same cardinality failure — one series per distinct reading.
+`wan.quality` and `ups.load` are in that list only because they were bucketed.
+The availability, latency and wattage behind them are continuous, and
+publishing those as values would have been the same cardinality failure — one
+series per distinct reading.
 
 Nothing is lost: what a key currently holds is in the Automation's
 `status.observedState` and in an Event on the resource. Prometheus keeps the
@@ -664,10 +694,13 @@ publishing — which fails as silence rather than as an error.
 | `podAnnotations` | `{}` | annotations on the pod |
 | `unifi.ups.lowBatteryPercent` | `30` | charge at or below this reports `ups.battery: low` |
 | `unifi.ups.criticalBatteryPercent` | `10` | charge at or below this reports `ups.battery: critical` |
+| `unifi.ups.shortRuntimeSeconds` | `600` | remaining runtime at or below this reports `ups.runtime: short` |
+| `unifi.ups.criticalRuntimeSeconds` | `180` | remaining runtime at or below this reports `ups.runtime: critical` |
+| `unifi.ups.highLoadPercent` | `80` | draw at or above this share of the power budget reports `ups.load: high` |
 | `unifi.wan.quality.minAvailabilityPercent` | `99` | availability below this reports `wan.quality: degraded` |
 | `unifi.wan.quality.maxLatencyMs` | `150` | average latency above this reports `wan.quality: degraded` |
 | `unifi.debounce.default` | `1` | consecutive observations a changed value needs before Reactor acts; each extra sample costs one `pollInterval` of reaction time |
-| `unifi.debounce.keys` | `{ups.battery: 2, isp: 2, internet: 3, wan.quality: 3}` | per-key overrides for signals that settle rather than switch |
+| `unifi.debounce.keys` | `{ups.battery: 2, ups.runtime: 2, ups.load: 3, isp: 2, internet: 3, wan.quality: 3}` | per-key overrides for signals that settle rather than switch |
 | `unifi.webhook.enabled` | `false` | Run the webhook receiver; a delivery triggers a poll, never a state change |
 | `unifi.webhook.port` | `9090` | Port the receiver listens on inside the pod |
 | `unifi.webhook.path` | `/webhooks/unifi` | URL path deliveries are accepted on |

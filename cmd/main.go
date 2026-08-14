@@ -436,6 +436,9 @@ func setupUniFi(mgr ctrl.Manager, cfg unifi.Config, store *engine.StateStore, wa
 	unifiClient := unifi.NewClient(cfg.URL, cfg.APIKey, cfg.Site, cfg.InsecureSkipVerify)
 	unifiClient.LowBatteryPercent = cfg.LowBatteryPercent
 	unifiClient.CriticalBatteryPercent = cfg.CriticalBatteryPercent
+	unifiClient.ShortRuntimeSeconds = cfg.ShortRuntimeSeconds
+	unifiClient.CriticalRuntimeSeconds = cfg.CriticalRuntimeSeconds
+	unifiClient.HighLoadPercent = cfg.HighLoadPercent
 	unifiClient.MinAvailabilityPercent = cfg.MinAvailabilityPercent
 	unifiClient.MaxLatencyMs = cfg.MaxLatencyMs
 

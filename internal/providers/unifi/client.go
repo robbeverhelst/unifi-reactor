@@ -40,6 +40,25 @@ const (
 	DefaultCriticalBatteryPercent = 10
 )
 
+// Default UPS runtime and load thresholds.
+//
+// The runtime pair is chosen against the debounce it ships with rather than in
+// isolation. ups.runtime settles over 2 samples — 60 seconds at the default
+// poll — so a critical threshold of 180 seconds leaves two minutes of headroom
+// between Reactor believing the reading and the UPS running out. Moving one of
+// these without the other is how that headroom disappears.
+const (
+	// DefaultShortRuntimeSeconds is remaining runtime at or below which
+	// ups.runtime reports "short": start winding down.
+	DefaultShortRuntimeSeconds = 600
+	// DefaultCriticalRuntimeSeconds is where it reports "critical": stop.
+	DefaultCriticalRuntimeSeconds = 180
+	// DefaultHighLoadPercent is the draw, as a percentage of the UPS's power
+	// budget, at or above which ups.load reports "high". The capture was taken
+	// at 310W of a 1000W budget.
+	DefaultHighLoadPercent = 80.0
+)
+
 // APIKey supplies the key sent with a request. It is resolved per request
 // rather than held from startup so that rotating the credential does not
 // require restarting the operator.
@@ -83,6 +102,12 @@ type Client struct {
 	LowBatteryPercent      int
 	CriticalBatteryPercent int
 
+	// ShortRuntimeSeconds and CriticalRuntimeSeconds bound the ups.runtime
+	// state key, and HighLoadPercent bounds ups.load.
+	ShortRuntimeSeconds    int
+	CriticalRuntimeSeconds int
+	HighLoadPercent        float64
+
 	// MinAvailabilityPercent and MaxLatencyMs bound the wan.quality state key.
 	// The live uplink is good while it is at least this available and no
 	// slower than this on average, over the console's own uptime window.
@@ -114,6 +139,9 @@ func NewClient(baseURL string, apiKey APIKey, site string, insecureSkipVerify bo
 		site:                   site,
 		LowBatteryPercent:      DefaultLowBatteryPercent,
 		CriticalBatteryPercent: DefaultCriticalBatteryPercent,
+		ShortRuntimeSeconds:    DefaultShortRuntimeSeconds,
+		CriticalRuntimeSeconds: DefaultCriticalRuntimeSeconds,
+		HighLoadPercent:        DefaultHighLoadPercent,
 		MinAvailabilityPercent: DefaultMinAvailabilityPercent,
 		MaxLatencyMs:           DefaultMaxLatencyMs,
 		http: &http.Client{
@@ -184,8 +212,20 @@ type vbmsTable struct {
 	BattPool      struct {
 		BatteryLevel int  `json:"batteryLevel"`
 		IsCharging   bool `json:"ischarging"`
-		TimeToRemain int  `json:"timeToRemain"`
 		AvailableCnt int  `json:"batt_available_cnt"`
+		// TimeToRemain is seconds of runtime at the current load — inferred
+		// from one observation (1043 on a UPS 2U drawing 310W), never yet
+		// checked against a real outage. Zero and negative both mean "no
+		// estimate": the same block uses -1 that way for battery_avr_time, and
+		// an absent field decodes to 0, which is not a runtime anyone should
+		// act on either.
+		TimeToRemain int `json:"timeToRemain"`
+		// TotalPowerOutput and TotalPowerBudget are watts drawn and watts
+		// available. Pointers for the same reason the health numbers are: an
+		// absent output would decode as 0W and report a fully loaded UPS as
+		// idle, which is the wrong direction to be wrong in.
+		TotalPowerOutput *float64 `json:"device_total_power_output"`
+		TotalPowerBudget *float64 `json:"device_total_power_budget"`
 	} `json:"battpool"`
 }
 
@@ -301,6 +341,16 @@ func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse
 				state[stateKeyUPS] = upsOnBattery
 			}
 			state[stateKeyUPSBattery] = c.batteryLevel(d.VBMS.BattPool.BatteryLevel)
+			// Runtime and load are each published only when the UPS reports
+			// the numbers behind them. A UPS that reports charge but no
+			// runtime estimate is a real thing to be, and inventing one is
+			// worse than omitting the key.
+			if runtime := c.runtimeLevel(d.VBMS.BattPool.TimeToRemain); runtime != "" {
+				state[stateKeyUPSRuntime] = runtime
+			}
+			if load := c.loadLevel(d.VBMS.BattPool.TotalPowerOutput, d.VBMS.BattPool.TotalPowerBudget); load != "" {
+				state[stateKeyUPSLoad] = load
+			}
 		}
 	}
 
@@ -499,6 +549,51 @@ func slugify(name string) string {
 		}
 	}
 	return b.String()
+}
+
+// runtimeLevel buckets the UPS's own estimate of how long it can carry the
+// current load. An empty result means the UPS offered no estimate.
+//
+// This is a better shutdown trigger than charge, and that is the whole point of
+// the key: charge ignores load, and timeToRemain does not. It is published on
+// mains as well as on battery, because "could we even survive an outage right
+// now" is worth being able to ask before one starts.
+func (c *Client) runtimeLevel(seconds int) string {
+	if seconds <= 0 {
+		return ""
+	}
+	short, critical := c.ShortRuntimeSeconds, c.CriticalRuntimeSeconds
+	if short <= 0 {
+		short = DefaultShortRuntimeSeconds
+	}
+	if critical <= 0 {
+		critical = DefaultCriticalRuntimeSeconds
+	}
+	switch {
+	case seconds <= critical:
+		return upsRuntimeCritical
+	case seconds <= short:
+		return upsRuntimeShort
+	default:
+		return upsRuntimeAmple
+	}
+}
+
+// loadLevel buckets the draw as a fraction of the UPS's budget. An empty result
+// means the UPS reported no usable pair of numbers — a missing output, or a
+// budget of zero, which no fraction can be taken against.
+func (c *Client) loadLevel(output, budget *float64) string {
+	if output == nil || budget == nil || *budget <= 0 {
+		return ""
+	}
+	high := c.HighLoadPercent
+	if high <= 0 {
+		high = DefaultHighLoadPercent
+	}
+	if (*output / *budget * 100) >= high {
+		return upsLoadHigh
+	}
+	return upsLoadNormal
 }
 
 func (c *Client) batteryLevel(percent int) string {

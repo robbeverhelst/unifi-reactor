@@ -75,11 +75,17 @@ const (
 	keyWAN             = "wan"
 	keyWANQuality      = "wan.quality"
 	keyUPS             = "ups"
+	keyUPSRuntime      = "ups.runtime"
+	keyUPSLoad         = "ups.load"
 	keyInternet        = "internet"
 	wanPrimary         = "primary"
 	wanBackup          = "backup"
 	wanQualityDegraded = "degraded"
 	upsOnBattery       = "on-battery"
+	upsRuntimeAmple    = "ample"
+	upsRuntimeCritical = "critical"
+	upsLoadNormal      = "normal"
+	upsLoadHigh        = "high"
 	internetOK         = "ok"
 	internetDown       = "down"
 
@@ -177,7 +183,10 @@ var _ = AfterSuite(func() {
 // before it rehearsed.
 func resetConsole() {
 	Expect(mock.WAN(wanPrimary)).To(Succeed())
-	Expect(mock.UPS("mode=mains&level=100&present=true")).To(Succeed())
+	// runtime and output are put back to the captured figures explicitly: the
+	// mock holds an override until it is told otherwise, and a spec that
+	// inherited "850W" from the one before it would be testing the wrong thing.
+	Expect(mock.UPS("mode=mains&level=100&present=true&runtime=1043&output=310&budget=1000")).To(Succeed())
 	Expect(mock.Internet("present=true&status=ok")).To(Succeed())
 	Expect(mock.Quality("reset=true")).To(Succeed())
 }

@@ -228,7 +228,22 @@ A UniFi UPS is reported as a switch-type device (`USWDA26`) carrying:
 }
 ```
 
-`is_battery_mode` is the authoritative mains-vs-battery signal and `batteryLevel` the remaining charge. `timeToRemain` appears to be seconds of runtime at the current load, but that is inferred from observation and nothing depends on it yet.
+`is_battery_mode` is the authoritative mains-vs-battery signal and `batteryLevel` the remaining charge.
+
+Two more keys come from the same block. `battpool` is captured whole — it is pure battery telemetry with no identifiers — so every field below was already committed before any of this was parsed.
+
+| Field | In the capture | What the provider does with it |
+| --- | --- | --- |
+| `timeToRemain` | `1043` | bucketed into `ups.runtime`: `ample` / `short` / `critical` |
+| `device_total_power_output` | `310` | `ups.load`, as a share of the budget |
+| `device_total_power_budget` | `1000` | the denominator of that share |
+| `battery_avr_time` | `-1` | never read — but it is the evidence that `-1` is this block's "unknown" |
+
+> ⚠️ **`timeToRemain`'s unit is inferred.** Seconds is the only reading consistent with 1043 on a UPS 2U drawing 310W of a 1000W budget, but the capture was taken on mains with the battery charging, so the value has never been watched actually count down. Confirm it during a real outage before anything is allowed to shut down on `ups.runtime: critical`. See [#7](https://github.com/robbeverhelst/unifi-reactor/issues/7).
+
+Zero and negative both mean "no estimate" and publish no `ups.runtime` key: `battery_avr_time: -1` in this same block is what says `-1` is used that way, and an absent field decodes to `0`, which is not a runtime anything should act on either. The two power figures decode into pointers for the same reason the health numbers do — an absent output read as `0W` would report a fully loaded UPS as idle.
+
+UniFi also has a `network:ups_overload_detected` alarm trigger, which corroborates `ups.load` but is not read: nothing derives state from a delivery payload.
 
 ## Webhooks
 

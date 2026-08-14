@@ -45,6 +45,9 @@ const (
 	envPollInterval       = "UNIFI_POLL_INTERVAL"
 	envLowBattery         = "UNIFI_UPS_LOW_BATTERY_PERCENT"
 	envCriticalBattery    = "UNIFI_UPS_CRITICAL_BATTERY_PERCENT"
+	envShortRuntime       = "UNIFI_UPS_SHORT_RUNTIME_SECONDS"
+	envCriticalRuntime    = "UNIFI_UPS_CRITICAL_RUNTIME_SECONDS"
+	envHighLoad           = "UNIFI_UPS_HIGH_LOAD_PERCENT"
 	envMinAvailability    = "UNIFI_WAN_QUALITY_MIN_AVAILABILITY_PERCENT"
 	envMaxLatency         = "UNIFI_WAN_QUALITY_MAX_LATENCY_MS"
 
@@ -73,6 +76,9 @@ type Config struct {
 	PollInterval           time.Duration
 	LowBatteryPercent      int
 	CriticalBatteryPercent int
+	ShortRuntimeSeconds    int
+	CriticalRuntimeSeconds int
+	HighLoadPercent        float64
 	MinAvailabilityPercent float64
 	MaxLatencyMs           float64
 	Webhook                WebhookConfig
@@ -120,6 +126,9 @@ func ConfigFromEnv(lookup func(string) string) (Config, bool, error) {
 		PollInterval:           DefaultPollInterval,
 		LowBatteryPercent:      DefaultLowBatteryPercent,
 		CriticalBatteryPercent: DefaultCriticalBatteryPercent,
+		ShortRuntimeSeconds:    DefaultShortRuntimeSeconds,
+		CriticalRuntimeSeconds: DefaultCriticalRuntimeSeconds,
+		HighLoadPercent:        DefaultHighLoadPercent,
 		MinAvailabilityPercent: DefaultMinAvailabilityPercent,
 		MaxLatencyMs:           DefaultMaxLatencyMs,
 		Webhook: WebhookConfig{
@@ -172,6 +181,8 @@ func ConfigFromEnv(lookup func(string) string) (Config, bool, error) {
 	}{
 		{envLowBattery, &cfg.LowBatteryPercent},
 		{envCriticalBattery, &cfg.CriticalBatteryPercent},
+		{envShortRuntime, &cfg.ShortRuntimeSeconds},
+		{envCriticalRuntime, &cfg.CriticalRuntimeSeconds},
 	} {
 		raw := lookup(field.env)
 		if raw == "" {
@@ -193,6 +204,7 @@ func ConfigFromEnv(lookup func(string) string) (Config, bool, error) {
 	}{
 		{envMinAvailability, &cfg.MinAvailabilityPercent},
 		{envMaxLatency, &cfg.MaxLatencyMs},
+		{envHighLoad, &cfg.HighLoadPercent},
 	} {
 		raw := lookup(field.env)
 		if raw == "" {

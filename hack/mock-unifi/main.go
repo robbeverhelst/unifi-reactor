@@ -59,6 +59,14 @@ limitations under the License.
 //	curl -X POST 'http://localhost:9443/ups?level=5'     # drains to critical
 //	curl -X POST 'http://localhost:9443/ups?mode=mains'  # power restored
 //
+// Runtime and load are the other two axes, and the reason charge alone is a
+// poor shutdown trigger — 30% at 300W and 30% at 900W are different situations:
+//
+//	curl -X POST 'http://localhost:9443/ups?runtime=150'          # minutes become seconds
+//	curl -X POST 'http://localhost:9443/ups?runtime=-1'           # the UPS offers no estimate
+//	curl -X POST 'http://localhost:9443/ups?output=850'           # a heavy load on the same budget
+//	curl -X POST 'http://localhost:9443/ups?output=310&budget=1000'  # back to the capture
+//
 // Rehearse the UPS dropping off the console entirely — the ups keys vanish
 // from the state rather than reporting a value, which is what an Automation
 // holding its last known state has to cope with:
@@ -133,6 +141,11 @@ const (
 	fieldLatency      = "latency_average"
 	paramAvailability = "availability"
 	paramLatency      = "latency"
+
+	// The battpool fields ups.runtime and ups.load are derived from.
+	fieldTimeToRemain = "timeToRemain"
+	fieldPowerOutput  = "device_total_power_output"
+	fieldPowerBudget  = "device_total_power_budget"
 
 	// statusHealthOK is what the capture's www subsystem reports. The other
 	// values this mock will happily serve — "warning", "error" — are the ones
@@ -209,6 +222,11 @@ type mock struct {
 	networkVersion string
 	onBatt         bool
 	battLvl        int
+	// runtime, output and budget override the battpool numbers ups.runtime and
+	// ups.load are derived from. Nil means "serve whatever the capture has".
+	runtime *int
+	output  *float64
+	budget  *float64
 
 	// wwwStatus is what the www subsystem reports, and noWWW drops the
 	// subsystem entirely — the case where the internet key vanishes rather
@@ -349,10 +367,31 @@ func (m *mock) devices() []any {
 			if pool, ok := vbms["battpool"].(map[string]any); ok {
 				pool["batteryLevel"] = m.battLvl
 				pool["ischarging"] = !m.onBatt
+				m.rewriteBattPool(pool)
 			}
 		}
 	}
 	return visible
+}
+
+// rewriteBattPool applies the runtime and load overrides. A runtime of exactly
+// zero deletes the field rather than serving 0, because "the UPS reports no
+// estimate" is a distinct case from "the UPS reports none left" and the
+// provider treats it as one.
+func (m *mock) rewriteBattPool(pool map[string]any) {
+	if m.runtime != nil {
+		if *m.runtime == 0 {
+			delete(pool, fieldTimeToRemain)
+		} else {
+			pool[fieldTimeToRemain] = *m.runtime
+		}
+	}
+	if m.output != nil {
+		pool[fieldPowerOutput] = *m.output
+	}
+	if m.budget != nil {
+		pool[fieldPowerBudget] = *m.budget
+	}
 }
 
 // failover rewrites a captured gateway record the way the current variant says
@@ -678,12 +717,52 @@ func (m *mock) setUPS(w http.ResponseWriter, r *http.Request) {
 		}
 		m.noUPS = !present
 	}
+	// runtime is seconds, and 0 means "the UPS reports no estimate at all"
+	// rather than "no time left" — the case the provider omits the key for.
+	if raw := r.URL.Query().Get("runtime"); raw != "" {
+		seconds, err := strconv.Atoi(raw)
+		if err != nil {
+			http.Error(w, "runtime must be an integer number of seconds", http.StatusBadRequest)
+			return
+		}
+		m.runtime = &seconds
+	}
+	for _, field := range []struct {
+		name   string
+		target **float64
+	}{
+		{"output", &m.output},
+		{"budget", &m.budget},
+	} {
+		raw := r.URL.Query().Get(field.name)
+		if raw == "" {
+			continue
+		}
+		watts, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			http.Error(w, field.name+" must be a number of watts", http.StatusBadRequest)
+			return
+		}
+		*field.target = &watts
+	}
+
 	state := map[bool]string{false: "online", true: "on-battery"}[m.onBatt]
 	if m.noUPS {
 		state = "absent"
 	}
-	log.Printf("ups is now %s at %d%%", state, m.battLvl)
-	_, _ = fmt.Fprintf(w, `{"ups":%q,"battery":%d}`+"\n", state, m.battLvl)
+	log.Printf("ups is now %s at %d%% (runtime=%s output=%s budget=%s)",
+		state, m.battLvl, describeInt(m.runtime), describeFloat(m.output), describeFloat(m.budget))
+	writeJSON(w, map[string]any{
+		"ups": state, "battery": m.battLvl,
+		"runtime": m.runtime, "output": m.output, "budget": m.budget,
+	})
+}
+
+func describeInt(value *int) string {
+	if value == nil {
+		return "captured"
+	}
+	return strconv.Itoa(*value)
 }
 
 // --- Alarm Manager (UniFi OS layer) -----------------------------------------

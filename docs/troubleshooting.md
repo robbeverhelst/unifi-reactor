@@ -593,6 +593,22 @@ kubectl -n reactor-system logs deploy/reactor | grep -E 'unifi-health|unifi-obse
 | `The live uplink's health entry reports no availability` (at `log.level=debug`) | The console reported the uplink but no numbers for it, so `wan.quality` is withheld rather than guessed at zero |
 | Neither key ever appears, and no line above | `wan` itself is not derivable, which withholds `wan.quality` too — `internet` should still be there. Start at [§13](#13-reactor-is-running-but-nothing-is-reacting) |
 
+The same granularity applies to the UPS keys. `ups.runtime` is published only
+when the UPS reports a `timeToRemain` above zero, and `ups.load` only when it
+reports both an output and a non-zero budget — so a UPS that reports charge but
+no runtime estimate publishes `ups` and `ups.battery` and withholds
+`ups.runtime` alone. An Automation matching the withheld key goes
+`StateKeyUnavailable` and **holds its claim**, which during a power failure is
+the only safe answer: losing the estimate is not the outage ending.
+
+If `ups.runtime` is missing while the UPS is plainly reporting everything else,
+check `timeToRemain` in the device record directly. `0` and `-1` are both this
+firmware's way of saying "no estimate", and both are treated as one:
+
+```sh
+kubectl -n reactor-system logs deploy/reactor | grep 'state observed'   # needs log.level=debug
+```
+
 ---
 
 ## 11. Reactor warns about your UniFi Network version

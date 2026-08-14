@@ -28,6 +28,8 @@ const (
 	stateKeyInternet   = "internet"
 	stateKeyUPS        = "ups"
 	stateKeyUPSBattery = "ups.battery"
+	stateKeyUPSRuntime = "ups.runtime"
+	stateKeyUPSLoad    = "ups.load"
 
 	wanPrimary = "primary"
 	wanBackup  = "backup"
@@ -91,6 +93,23 @@ const (
 	batteryNormal   = "normal"
 	batteryLow      = "low"
 	batteryCritical = "critical"
+
+	// ups.runtime is how long the UPS says it can carry its current load, and
+	// it is a better shutdown trigger than charge alone: 30% at 300W and 30% at
+	// 900W are very different situations, and timeToRemain already accounts for
+	// the difference. It is a separate key from ups.battery for the same reason
+	// ups.battery is separate from ups — an Automation matching one must not
+	// stop matching because the other moved.
+	upsRuntimeAmple    = "ample"
+	upsRuntimeShort    = "short"
+	upsRuntimeCritical = "critical"
+
+	// ups.load is the output drawn as a fraction of the budget. Like
+	// wan.quality it is a bucketed measurement rather than a switch position,
+	// and for the same reasons: a fraction cannot be matched by spec.when and
+	// could never be a metric label.
+	upsLoadNormal = "normal"
+	upsLoadHigh   = "high"
 )
 
 // The comparisons this provider makes between two independent signals for the
@@ -135,5 +154,7 @@ func StateVocabulary() map[string][]string {
 		stateKeyInternet:   {internetOK, internetDegraded, internetDown},
 		stateKeyUPS:        {upsOnline, upsOnBattery},
 		stateKeyUPSBattery: {batteryNormal, batteryLow, batteryCritical},
+		stateKeyUPSRuntime: {upsRuntimeAmple, upsRuntimeShort, upsRuntimeCritical},
+		stateKeyUPSLoad:    {upsLoadNormal, upsLoadHigh},
 	}
 }

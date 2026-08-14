@@ -105,6 +105,10 @@ func TestObserveAgainstCapturedGatewayAndUPS(t *testing.T) {
 		stateKeyInternet:   internetOK,
 		stateKeyUPS:        upsOnline,
 		stateKeyUPSBattery: batteryNormal,
+		// The captured UPS reports 1043s of runtime and 310W of a 1000W
+		// budget, so both derived keys read the healthy value.
+		stateKeyUPSRuntime: upsRuntimeAmple,
+		stateKeyUPSLoad:    upsLoadNormal,
 	} {
 		if state[key] != want {
 			t.Errorf("state[%q] = %q, want %q", key, state[key], want)
@@ -128,7 +132,7 @@ func TestObserveWithoutUPSOmitsUPSKeys(t *testing.T) {
 	if state[stateKeyISP] != capturedISP {
 		t.Errorf("state[isp] = %q, want %q", state[stateKeyISP], capturedISP)
 	}
-	for _, key := range []string{stateKeyUPS, stateKeyUPSBattery} {
+	for _, key := range []string{stateKeyUPS, stateKeyUPSBattery, stateKeyUPSRuntime, stateKeyUPSLoad} {
 		if _, present := state[key]; present {
 			t.Errorf("%s should be absent when no UPS is visible to the controller", key)
 		}
@@ -222,6 +226,157 @@ func TestUPSStaysOnBatteryAcrossBatteryLevels(t *testing.T) {
 		if state[stateKeyUPS] != upsOnBattery {
 			t.Fatalf("at %d%%: state[ups] = %q, want %q", level, state[stateKeyUPS], upsOnBattery)
 		}
+	}
+}
+
+// ups.runtime is why battery percentage is a poor shutdown trigger: 30% at
+// 300W and 30% at 900W are very different situations, and timeToRemain already
+// accounts for the difference. These cases fix the mapping and the thresholds.
+func TestUPSRuntimeLevels(t *testing.T) {
+	tests := []struct {
+		name    string
+		seconds int
+		want    string
+	}{
+		{"the capture: 17 minutes at 310W", 1043, upsRuntimeAmple},
+		{"just above the short threshold", 601, upsRuntimeAmple},
+		{"at the short threshold", 600, upsRuntimeShort},
+		{"just above critical", 181, upsRuntimeShort},
+		{"at the critical threshold", 180, upsRuntimeCritical},
+		{"nearly out", 20, upsRuntimeCritical},
+	}
+	c := NewClient("", nil, "", false)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var vbms vbmsTable
+			vbms.BattPool.TimeToRemain = tc.seconds
+
+			state, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
+			if err != nil {
+				t.Fatalf("stateFromDevices: %v", err)
+			}
+			if state[stateKeyUPSRuntime] != tc.want {
+				t.Errorf("state[ups.runtime] = %q, want %q", state[stateKeyUPSRuntime], tc.want)
+			}
+		})
+	}
+}
+
+// A UPS reporting no runtime estimate publishes no runtime key. The same
+// battpool block uses -1 for "unknown" on battery_avr_time, and an absent
+// field decodes to 0 — neither is a runtime anything should act on, and
+// inventing "critical" from one would shut a cluster down on a parse gap.
+func TestUnknownRuntimeOmitsTheKey(t *testing.T) {
+	c := NewClient("", nil, "", false)
+	for _, seconds := range []int{0, -1} {
+		var vbms vbmsTable
+		vbms.BattPool.TimeToRemain = seconds
+
+		state, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
+		if err != nil {
+			t.Fatalf("stateFromDevices: %v", err)
+		}
+		if got, present := state[stateKeyUPSRuntime]; present {
+			t.Errorf("timeToRemain %d should publish no ups.runtime, got %q", seconds, got)
+		}
+		// ...and it must not take the rest of the UPS keys with it.
+		if state[stateKeyUPS] != upsOnline {
+			t.Errorf("state[ups] = %q, want %q", state[stateKeyUPS], upsOnline)
+		}
+	}
+}
+
+func TestUPSLoadLevels(t *testing.T) {
+	watts := func(v float64) *float64 { return &v }
+	tests := []struct {
+		name           string
+		output, budget *float64
+		want           string
+	}{
+		{"the capture: 310W of 1000W", watts(310), watts(1000), upsLoadNormal},
+		{"just under the threshold", watts(799), watts(1000), upsLoadNormal},
+		{"at the threshold", watts(800), watts(1000), upsLoadHigh},
+		{"overloaded", watts(1100), watts(1000), upsLoadHigh},
+		// Absent is not zero: a missing output would otherwise report a fully
+		// loaded UPS as idle, which is the wrong direction to be wrong in.
+		{"no output reported", nil, watts(1000), ""},
+		{"no budget reported", watts(310), nil, ""},
+		{"a budget of zero is no fraction at all", watts(310), watts(0), ""},
+	}
+	c := NewClient("", nil, "", false)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var vbms vbmsTable
+			vbms.BattPool.TotalPowerOutput, vbms.BattPool.TotalPowerBudget = tc.output, tc.budget
+
+			state, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
+			if err != nil {
+				t.Fatalf("stateFromDevices: %v", err)
+			}
+			got, present := state[stateKeyUPSLoad]
+			if tc.want == "" && present {
+				t.Fatalf("ups.load should be absent, got %q", got)
+			}
+			if tc.want != "" && got != tc.want {
+				t.Errorf("state[ups.load] = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The same rule that keeps ups and ups.battery apart. An Automation matching
+// ups.runtime: critical must not stop matching because the load moved, and one
+// matching ups.load: high must not stop matching because the battery drained —
+// each of those would fire onExit and scale workloads back up mid-outage.
+func TestUPSKeysAreIndependentAxes(t *testing.T) {
+	c := NewClient("", nil, "", false)
+	watts := func(v float64) *float64 { return &v }
+
+	for _, level := range []int{100, 40, 5} {
+		for _, output := range []float64{100, 850} {
+			var vbms vbmsTable
+			vbms.IsBatteryMode = true
+			vbms.BattPool.BatteryLevel = level
+			vbms.BattPool.TimeToRemain = 120
+			vbms.BattPool.TotalPowerOutput, vbms.BattPool.TotalPowerBudget = watts(output), watts(1000)
+
+			state, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
+			if err != nil {
+				t.Fatalf("stateFromDevices: %v", err)
+			}
+			if state[stateKeyUPSRuntime] != upsRuntimeCritical {
+				t.Errorf("at %d%% and %.0fW: state[ups.runtime] = %q, want %q",
+					level, output, state[stateKeyUPSRuntime], upsRuntimeCritical)
+			}
+			if state[stateKeyUPS] != upsOnBattery {
+				t.Errorf("at %d%% and %.0fW: state[ups] = %q, want %q",
+					level, output, state[stateKeyUPS], upsOnBattery)
+			}
+		}
+	}
+}
+
+func TestCustomUPSRuntimeAndLoadThresholds(t *testing.T) {
+	c := NewClient("", nil, "", false)
+	c.ShortRuntimeSeconds, c.CriticalRuntimeSeconds = 3600, 1800
+	c.HighLoadPercent = 25
+
+	var vbms vbmsTable
+	vbms.BattPool.TimeToRemain = 1043
+	output, budget := 310.0, 1000.0
+	vbms.BattPool.TotalPowerOutput, vbms.BattPool.TotalPowerBudget = &output, &budget
+
+	state, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
+	if err != nil {
+		t.Fatalf("stateFromDevices: %v", err)
+	}
+	// The same capture that reads ample/normal by default reads critical/high
+	// against a site that needs an hour of runtime and runs a tight budget.
+	if state[stateKeyUPSRuntime] != upsRuntimeCritical {
+		t.Errorf("state[ups.runtime] = %q, want %q", state[stateKeyUPSRuntime], upsRuntimeCritical)
+	}
+	if state[stateKeyUPSLoad] != upsLoadHigh {
+		t.Errorf("state[ups.load] = %q, want %q", state[stateKeyUPSLoad], upsLoadHigh)
 	}
 }
 
