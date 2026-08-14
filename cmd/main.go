@@ -18,6 +18,7 @@ package main
 
 import (
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -379,13 +380,18 @@ func main() {
 
 	// The UniFi provider is configured at the controller level (Helm values /
 	// env), not per-Automation: one UniFi console per Reactor install.
+	//
+	// console stays nil when no console is configured, which is what makes an
+	// Automation asking for a console write report that there is nothing to
+	// write to, rather than failing somewhere less legible.
+	var console controller.ConsoleWriter
 	unifiConfig, unifiEnabled, err := unifi.ConfigFromEnv(os.Getenv)
 	if err != nil {
 		setupLog.Error(err, "Failed to configure the UniFi provider")
 		os.Exit(1)
 	}
 	if unifiEnabled {
-		if err := setupUniFi(mgr, unifiConfig, store, wake); err != nil {
+		if console, err = setupUniFi(mgr, unifiConfig, store, wake); err != nil {
 			setupLog.Error(err, "Failed to set up the UniFi provider")
 			os.Exit(1)
 		}
@@ -427,6 +433,7 @@ func main() {
 		DetectHPA: detectHPA,
 		Recorder:  mgr.GetEventRecorder("automation"),
 		Outbound:  actions.NewClient(destinations),
+		Console:   console,
 		// Uncached on purpose: a cached Get on a Secret would start an informer
 		// and keep every Secret in the cluster in this process's memory.
 		SecretReader: mgr.GetAPIReader(),
@@ -459,7 +466,12 @@ func main() {
 // is reported and skipped, and the poller is added regardless. Reactor with a
 // broken optimization reacts on the poll interval; Reactor without a poller
 // does not react at all.
-func setupUniFi(mgr ctrl.Manager, cfg unifi.Config, store *engine.StateStore, wake chan event.GenericEvent) error {
+func setupUniFi(
+	mgr ctrl.Manager,
+	cfg unifi.Config,
+	store *engine.StateStore,
+	wake chan event.GenericEvent,
+) (controller.ConsoleWriter, error) {
 	unifiClient := unifi.NewClient(cfg.URL, cfg.APIKey, cfg.Site, cfg.InsecureSkipVerify)
 	unifiClient.LowBatteryPercent = cfg.LowBatteryPercent
 	unifiClient.CriticalBatteryPercent = cfg.CriticalBatteryPercent
@@ -479,7 +491,7 @@ func setupUniFi(mgr ctrl.Manager, cfg unifi.Config, store *engine.StateStore, wa
 	// the poller so that when a moved field makes an observation come back
 	// empty, the line saying which version is talking is already above it.
 	if err := mgr.Add(&unifi.VersionGuard{Client: unifiClient}); err != nil {
-		return err
+		return nil, err
 	}
 
 	poller := &controller.UniFiPoller{
@@ -498,7 +510,7 @@ func setupUniFi(mgr ctrl.Manager, cfg unifi.Config, store *engine.StateStore, wa
 		receiver := unifi.NewReceiver(cfg.Webhook)
 		poller.Nudge = receiver.Requests()
 		if err := mgr.Add(receiver); err != nil {
-			return err
+			return nil, err
 		}
 		setupLog.Info("Webhook fast path enabled",
 			"address", cfg.Webhook.BindAddress, "path", cfg.Webhook.Path,
@@ -506,10 +518,10 @@ func setupUniFi(mgr ctrl.Manager, cfg unifi.Config, store *engine.StateStore, wa
 		if cfg.Webhook.Register {
 			registrar, err := unifi.NewAlarmRegistrar(cfg)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			if err := mgr.Add(registrar); err != nil {
-				return err
+				return nil, err
 			}
 			setupLog.Info("Alarm Manager self-registration enabled",
 				"rule", cfg.Webhook.RuleTitle, "callbackURL", cfg.Webhook.PublicURL)
@@ -517,8 +529,34 @@ func setupUniFi(mgr ctrl.Manager, cfg unifi.Config, store *engine.StateStore, wa
 	}
 
 	if err := mgr.Add(poller); err != nil {
-		return err
+		return nil, err
 	}
 	setupLog.Info("UniFi provider enabled", "url", cfg.URL, "interval", cfg.PollInterval)
-	return nil
+
+	// The console write path. It is constructed even when it is allowed to
+	// change nothing, because a refusal that names the value to set beats an
+	// Automation reporting that there is no console at all — and because an
+	// allowlist that fails to parse is a configuration mistake worth finding at
+	// startup rather than during the outage the Automation was written for.
+	writer, err := unifi.NewWriter(cfg)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case !writer.Enabled():
+		setupLog.Info("UniFi console actions disabled (nothing is allowlisted); " +
+			"unifi.wlan.* and unifi.poe.cycle actions will be refused")
+	case !writer.Credentialed():
+		// Not fatal, on the same rule the webhook fast path follows: this is not
+		// the mechanism of record, and an operator whose poller works should not
+		// be unable to start because a write credential is missing.
+		setupLog.Error(errors.New("no UniFi OS console credentials"),
+			"UniFi console actions are allowlisted but cannot authenticate; "+
+				"set UNIFI_USERNAME and UNIFI_PASSWORD (the poller's API key does not write)")
+	default:
+		setupLog.Info("UniFi console actions enabled",
+			"allowedWlans", len(cfg.Actions.AllowedWLANs),
+			"allowedPoePorts", len(cfg.Actions.AllowedPoEPorts))
+	}
+	return writer, nil
 }

@@ -61,6 +61,9 @@ const (
 	envWebhookRuleTitle   = "UNIFI_WEBHOOK_RULE_TITLE"
 	envUsername           = "UNIFI_USERNAME"
 	envPassword           = "UNIFI_PASSWORD"
+
+	envActionsAllowedWLANs    = "UNIFI_ACTIONS_ALLOWED_WLANS"
+	envActionsAllowedPoEPorts = "UNIFI_ACTIONS_ALLOWED_POE_PORTS"
 )
 
 // Config is the UniFi provider's install-level configuration. There is one
@@ -82,6 +85,23 @@ type Config struct {
 	MinAvailabilityPercent float64
 	MaxLatencyMs           float64
 	Webhook                WebhookConfig
+	// Actions is what this install allows Reactor to write to the console.
+	// Empty by default, which refuses every console write action. See
+	// write.go: the console is the one thing Reactor touches that is not a
+	// Kubernetes object, so the decision about what may be changed on it is the
+	// operator's and is taken at install time.
+	Actions ActionsConfig
+}
+
+// ConsoleCredentials returns the UniFi OS local-account username and password.
+//
+// They live on WebhookConfig because Alarm Manager self-registration needed
+// them first, and they are named once here rather than read twice because the
+// write actions authenticate exactly the same way: same UniFi OS layer, same
+// cookie session, same csrfToken claim, same pair. The API key the poller reads
+// state with does not work for either.
+func (c Config) ConsoleCredentials() (username, password string) {
+	return c.Webhook.Username, c.Webhook.Password
 }
 
 // WebhookConfig configures the fast path. Every field here defaults off or to
@@ -142,6 +162,10 @@ func ConfigFromEnv(lookup func(string) string) (Config, bool, error) {
 			RuleTitle:          DefaultAlarmRuleTitle,
 			Username:           lookup(envUsername),
 			Password:           lookup(envPassword),
+		},
+		Actions: ActionsConfig{
+			AllowedWLANs:    splitList(lookup(envActionsAllowedWLANs)),
+			AllowedPoEPorts: splitList(lookup(envActionsAllowedPoEPorts)),
 		},
 	}
 

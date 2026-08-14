@@ -48,3 +48,21 @@ pre-delete hook so they agree on scope.
 {{- default "default" .Values.serviceAccount.name -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+The Secret holding UNIFI_USERNAME and UNIFI_PASSWORD, or empty when nothing on
+this install writes to the console.
+
+Two features need that pair — Alarm Manager self-registration and the unifi.*
+actions — and they are the same credential at the same layer, so this resolves
+it once rather than letting the deployment grow two env blocks that could
+disagree. The actions value wins when both are set, and setting both to
+different Secrets is a configuration mistake the chart cannot resolve for you.
+*/}}
+{{- define "reactor.consoleSecret" -}}
+{{- if or .Values.unifi.actions.allowedWlans .Values.unifi.actions.allowedPoePorts -}}
+{{- .Values.unifi.actions.existingSecret -}}
+{{- else if and .Values.unifi.webhook.enabled .Values.unifi.webhook.registration.enabled -}}
+{{- .Values.unifi.webhook.registration.existingSecret -}}
+{{- end -}}
+{{- end -}}
