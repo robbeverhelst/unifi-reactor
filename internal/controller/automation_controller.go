@@ -69,6 +69,15 @@ const (
 	// running alone: declining to start more work is a different and far safer
 	// act than killing work in flight.
 	actionCronJobSuspend = "kubernetes.cronjob.suspend"
+	// actionKubernetesRestart rolls a workload's pods, the way `kubectl rollout
+	// restart` does. It is an edge action: a restart is an occurrence, not a
+	// level — there is no value a target can be held at that means "restarted",
+	// and nothing to arbitrate with a peer over.
+	actionKubernetesRestart = "kubernetes.restart"
+	// actionPrefixKubernetes marks the actions that act on the cluster rather
+	// than leave it, which is what decides whether an edge action goes through
+	// the outbound client and its destination allowlist.
+	actionPrefixKubernetes = "kubernetes."
 	// reevaluateInterval bounds how stale a matching decision can get relative
 	// to the poller's StateStore when nothing else triggers a reconcile.
 	reevaluateInterval = 15 * time.Second
@@ -90,9 +99,18 @@ const (
 	// action fires on an occurrence that has already passed, so it is never
 	// retried across reconciles — a later reconcile has no new transition, and
 	// re-sending there would be a duplicate rather than a retry. Whether it may
-	// be repeated at all within its one reconcile is decided per type in
-	// retryable(): notifications are publishes and retry, an arbitrary POST or
-	// PATCH might not be and is attempted exactly once.
+	// be repeated at all within its one reconcile is decided per type:
+	//
+	//   - notification.*    retried. Every transport shipped is a publish, so a
+	//                       duplicate is noise on a phone and a miss is the
+	//                       failure the feature exists to prevent.
+	//   - http.request      retried only when the method is idempotent by RFC
+	//                       9110, or the author declares it so. See retryable().
+	//   - kubernetes.restart AT-MOST-ONCE, unconditionally. Every execution rolls
+	//                       the workload, so a retry after an ambiguous failure
+	//                       is a second outage rather than a correction — and
+	//                       the failures that matter here (a conflict, a
+	//                       Forbidden) are not the kind a retry fixes.
 	maxActionAttempts = 5
 	// retryBackoffBase and retryBackoffCap bound the exponential delay between
 	// those attempts.

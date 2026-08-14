@@ -506,14 +506,38 @@ written where the API server can enforce it.
 
 #### Restart
 
-Potential future action:
+Shipped, as an **edge** action. There is no value a workload can be held at
+that means "restarted", so it declares no level, participates in no
+arbitration, and fires on its own Automation's transition:
 
 ```yaml
 - type: kubernetes.restart
   target:
-    kind: Deployment
+    kind: Deployment      # or StatefulSet
     name: qbittorrent
 ```
+
+It stamps `kubectl.kubernetes.io/restartedAt` on the pod template — the same
+annotation `kubectl rollout restart` writes, so a workload Reactor restarted
+and one restarted by hand are indistinguishable afterwards, and the workload
+controller rolls the pods under the update strategy and disruption budget the
+workload already declares. Reactor never deletes a pod.
+
+**At-most-once, unconditionally.** This is the first non-idempotent action, and
+it is the reason #33's retry policy is per-type rather than global. Every
+execution rolls the workload, so retrying after an ambiguous failure is a
+second outage rather than a correction, and the failures that actually occur —
+a conflict, a Forbidden — are not ones a retry fixes. It is attempted once per
+transition, recorded in `status.edgeActions`, and never retried: not within the
+reconcile, and not across reconciles, because the transition is committed to
+status before the action runs and a later reconcile therefore sees no edge.
+
+**It is also what makes #30's debounce load-bearing.** The engine acts on
+transitions, so a steady condition never restarts twice — but a flapping key is
+a stream of transitions and each one is a real rollout. Scaling made flapping
+harmless; this does not. The default debounce of 1 was chosen for
+`kubernetes.scale`, and a key that drives a restart should be raised above it,
+at a cost of one poll interval of reaction time per extra sample.
 
 #### Suspend CronJob
 

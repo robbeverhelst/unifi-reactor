@@ -132,11 +132,43 @@ Scaling cannot express "do not start the nightly backup tonight" — that is `sp
 | | Declares | Arbitrated? | Types |
 | --- | --- | --- | --- |
 | **Desired-state** | a *level* — what a target should be | yes, continuously across every automation sharing the target | `kubernetes.scale`, `kubernetes.cronjob.suspend` |
-| **Edge** | an *occurrence* | no — fires on this automation's own transition and owns nothing | `http.request`, `notification.*` |
+| **Edge** | an *occurrence* | no — fires on this automation's own transition and owns nothing | `kubernetes.restart`, `http.request`, `notification.*` |
 
 `kubernetes.scale` works through the [scale subresource](https://kubernetes.io/docs/reference/using-api/api-concepts/#subresources), so `kind: Deployment` and `kind: StatefulSet` take the same path and Reactor never has to know where a kind keeps its replicas. `target.kind` is still a closed list, on purpose: a kind is only reachable if the chart granted RBAC for it, and RBAC has to name resources explicitly — so an open field would turn a typo into a `Forbidden` discovered *during* the outage, instead of a rejected write at admission.
 
 A level is ordered and nothing else: **lower is more restrictive, and a shared target resolves to the lowest anyone asked for.** For `kubernetes.scale` that is the replica count, so shedding wins. For `kubernetes.cronjob.suspend` it is a switch, ordered so that *suspended* is the restrictive answer — which means suspended wins over running for exactly the same reason 0 replicas wins over 3, and with no new rule to learn. `status.targets[].level` says which in words.
+
+### Restarting a workload
+
+The standard remedy for something wedged — a service that needs to re-resolve DNS or re-establish upstream connections once connectivity returns:
+
+```yaml
+  onExit:
+    - type: kubernetes.restart
+      target: { kind: Deployment, name: sonarr }
+```
+
+It stamps `kubectl.kubernetes.io/restartedAt` on the pod template, exactly as `kubectl rollout restart` does, so the workload controller rolls the pods under whatever update strategy and disruption budget the workload already declares. Reactor never deletes a pod.
+
+Restart is an **edge** action: there is no value a workload can be held at that means "restarted", so it owns nothing, arbitrates with nothing, and fires on this automation's own transition. Put it in `onExit` when you want it on recovery, as above, and in `actions` when you want it on the way in.
+
+> **It is at-most-once, and it has to be.** Every execution rolls the workload, so a retry after an ambiguous failure would be a second outage rather than a correction. Reactor attempts it exactly once per transition, records the outcome in `status.edgeActions`, and never tries again — the failures that actually happen here (a conflict, a `Forbidden`) are not ones a retry fixes. A restart that did not happen is reported as a `Warning` and leaves the automation `Ready`.
+
+#### Restart is why debounce matters
+
+Everything else Reactor does is safe to repeat: scaling to 0 twice is one scale, suspending a suspended CronJob is nothing. **A restart is not.** The engine only acts on transitions, so a steady condition never restarts anything twice — but a *flapping* state key is a stream of transitions, and each one is a real rollout. A `wan` key oscillating every poll would roll the workload every poll.
+
+The engine's answer is [debounce](#settling-a-noisy-signal), and with `kubernetes.restart` it stops being an optimization:
+
+```yaml
+unifi:
+  debounce:
+    default: 1
+    keys:
+      wan: 3      # if wan drives a restart, make it prove itself first
+```
+
+The shipped default is `1` — react on the first observation — because `wan` and `ups` are switch positions that do not flap, and a failover deserves an immediate reaction. That default is chosen for `kubernetes.scale`. **If a key drives a restart, raise its debounce**, and accept the cost: each extra sample is one `pollInterval` of extra reaction time. Before adding a restart to an automation, ask what the key does when the hardware behind it is halfway broken rather than cleanly up or down — that is the state a restart loop is born in.
 
 ## When two automations share a workload
 
@@ -247,7 +279,7 @@ kubectl patch automation <name> -n <namespace> \
 
 Everything above is invisible unless someone is reading controller logs — including the cases where Reactor deliberately did *nothing*, like holding state when the console went quiet. Two action types fix that by leaving the cluster: `notification.*` sends a message, `http.request` calls anything with an HTTP API.
 
-Both are **edge actions**. They fire on this automation's own transitions and own nothing — unlike the desired-state actions, which declare a level that is arbitrated across every automation sharing a target. An edge action in an `onExit` block still fires on this automation's own edge.
+Both are **edge actions**, like [`kubernetes.restart`](#restarting-a-workload). They fire on this automation's own transitions and own nothing — unlike the desired-state actions, which declare a level that is arbitrated across every automation sharing a target. An edge action in an `onExit` block still fires on this automation's own edge.
 
 ```yaml
 apiVersion: reactor.robbeverhelst.com/v1alpha1
@@ -428,6 +460,8 @@ Each extra sample costs one `pollInterval` of reaction time, so the default is `
 `isp` ships at `2` for a different reason: it is not a link state but the result of a geolocation lookup on whatever public address the gateway currently holds, so it can report `unknown` for a poll or two while a new address is being resolved — precisely during the failover you would be reacting to. One extra sample skips that window. Nothing else needs it: `wan` and `ups` are switch positions, and they do not flap.
 
 Debouncing happens in the shared state store, so every automation sees the same settled value. Two automations can never disagree about the current state and fight over a workload they share.
+
+This is the setting to revisit the moment you write a [`kubernetes.restart`](#restart-is-why-debounce-matters): scaling is idempotent and a flap costs nothing, while a restart under a flapping key is a rollout per poll.
 
 ## Knowing it is working
 

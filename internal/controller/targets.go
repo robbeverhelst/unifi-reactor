@@ -41,6 +41,11 @@ const (
 	kindCronJob     = "CronJob"
 )
 
+// fieldSpec is the top of every path below. Spelled once because a typo in it
+// reads as "the field is absent", which for a boolean level means "not
+// suspended" — a wrong answer rather than an error.
+const fieldSpec = "spec"
+
 // A level is an int64 the arbiter orders and never interprets: lower is more
 // restrictive, and a shared target resolves to the lowest anybody asked for.
 //
@@ -136,7 +141,7 @@ var handlers = map[string]targetHandler{
 	kindStatefulSet: replicaHandler(appsv1.SchemeGroupVersion.WithKind(kindStatefulSet)),
 	kindCronJob: switchHandler(
 		batchv1.SchemeGroupVersion.WithKind(kindCronJob),
-		[]string{"spec", "suspend"},
+		[]string{fieldSpec, "suspend"},
 		annotationBaselineSuspend,
 		actionCronJobSuspend,
 		"suspended", "running",
@@ -174,7 +179,7 @@ func newTarget(handler targetHandler) *unstructured.Unstructured {
 // kind with no scale subresource is refused by the API server rather than
 // half-written.
 func replicaHandler(gvk schema.GroupVersionKind) targetHandler {
-	path := []string{"spec", "replicas"}
+	path := []string{fieldSpec, "replicas"}
 	return targetHandler{
 		gvk:        gvk,
 		baseline:   annotationBaselineReplicas,

@@ -185,9 +185,9 @@ type Notification struct {
 //
 // Types divide into two kinds. A desired-state action (kubernetes.scale,
 // kubernetes.cronjob.suspend) declares a level and is arbitrated continuously
-// across every Automation sharing its target. An edge action (http.request,
-// notification.*) expresses an occurrence: it fires on this Automation's own
-// transitions, owns no target and arbitrates with nothing.
+// across every Automation sharing its target. An edge action (kubernetes.restart,
+// http.request, notification.*) expresses an occurrence: it fires on this
+// Automation's own transitions, owns no target and arbitrates with nothing.
 //
 // A desired-state action's level is an integer the arbiter orders and nothing
 // more, so a boolean level is carried as its own field — replicas for a count,
@@ -200,9 +200,10 @@ type Notification struct {
 // +kubebuilder:validation:XValidation:rule="self.type == 'kubernetes.cronjob.suspend' || !has(self.suspended)",message="spec.actions: suspended belongs to kubernetes.cronjob.suspend"
 // +kubebuilder:validation:XValidation:rule="!has(self.target) || self.type != 'kubernetes.scale' || self.target.kind in ['Deployment', 'StatefulSet']",message="spec.actions: kubernetes.scale targets a kind with a scale subresource: Deployment or StatefulSet"
 // +kubebuilder:validation:XValidation:rule="!has(self.target) || self.type != 'kubernetes.cronjob.suspend' || self.target.kind == 'CronJob'",message="spec.actions: kubernetes.cronjob.suspend targets a CronJob"
+// +kubebuilder:validation:XValidation:rule="!has(self.target) || self.type != 'kubernetes.restart' || self.target.kind in ['Deployment', 'StatefulSet']",message="spec.actions: kubernetes.restart targets a kind with a pod template: Deployment or StatefulSet"
 type Action struct {
 	// Type of the action, e.g. "kubernetes.scale".
-	// +kubebuilder:validation:Enum=kubernetes.scale;kubernetes.cronjob.suspend;http.request;notification.ntfy;notification.discord;notification.slack
+	// +kubebuilder:validation:Enum=kubernetes.scale;kubernetes.cronjob.suspend;kubernetes.restart;http.request;notification.ntfy;notification.discord;notification.slack
 	Type string `json:"type"`
 
 	// Target of a kubernetes.* action.

@@ -932,6 +932,98 @@ var _ = Describe("Automation Controller", func() {
 		})
 	})
 
+	// kubernetes.restart is the first edge action that acts on the cluster
+	// rather than leaving it, and the first non-idempotent action of any kind.
+	Context("with a restart", func() {
+		restart := func(kind, target string) reactorv1alpha1.Action {
+			return reactorv1alpha1.Action{
+				Type:   actionKubernetesRestart,
+				Target: &reactorv1alpha1.TargetRef{Kind: kind, Name: target},
+			}
+		}
+
+		restartedAt := func(name string) string {
+			var deployment appsv1.Deployment
+			key := types.NamespacedName{Name: name, Namespace: testNamespace}
+			Expect(k8sClient.Get(ctx, key, &deployment)).To(Succeed())
+			return deployment.Spec.Template.Annotations[annotationRestartedAt]
+		}
+
+		It("stamps the pod template on the transition and only on the transition", func() {
+			const target = "resolver"
+			createDeployment(target, 1)
+			createAutomation(target, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyWAN: wanPrimary},
+				},
+				Actions: []reactorv1alpha1.Action{restart(kindDeployment, target)},
+			})
+
+			By("not restarting anything before the condition holds")
+			observe(map[string]string{keyWAN: wanBackup})
+			reconcileOnce(target)
+			Expect(restartedAt(target)).To(BeEmpty())
+
+			By("restarting on the edge, with no outbound destination configured at all")
+			observe(map[string]string{keyWAN: wanPrimary})
+			reconcileOnce(target)
+			stamp := restartedAt(target)
+			Expect(stamp).NotTo(BeEmpty(), "the annotation kubectl rollout restart writes")
+			Expect(statusOf(target).EdgeActions).To(HaveLen(1))
+			Expect(statusOf(target).EdgeActions[0].Status).To(Equal(executionSuccess))
+			Expect(statusOf(target).EdgeActions[0].Destination).To(
+				Equal("Deployment/" + testNamespace + "/" + target))
+			Expect(statusOf(target).EdgeActions[0].Attempts).To(Equal(int32(1)),
+				"at-most-once: a restart is never repeated")
+
+			By("not restarting again while the same condition keeps holding")
+			for range 3 {
+				observe(map[string]string{keyWAN: wanPrimary})
+				reconcileOnce(target)
+			}
+			Expect(restartedAt(target)).To(Equal(stamp))
+		})
+
+		It("holds no target, so it is Applied without claiming anything", func() {
+			const target = "restart-only"
+			createDeployment(target, 2)
+			createAutomation(target, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
+				},
+				Actions: []reactorv1alpha1.Action{restart(kindDeployment, target)},
+			})
+
+			observe(map[string]string{keyWAN: wanBackup})
+			reconcileOnce(target)
+
+			Expect(replicasOf(target)).To(Equal(int32(2)), "an edge action owns no level")
+			Expect(annotationsOf(target)).NotTo(HaveKey(annotationBaselineReplicas),
+				"nothing claims a target it only restarts, so there is no baseline to record")
+			Expect(statusOf(target).Targets).To(BeEmpty())
+			Expect(conditionOf(statusOf(target), conditionApplied).Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("records a failure without making the automation unhealthy", func() {
+			const target = "restart-missing"
+			createAutomation(target, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
+				},
+				Actions: []reactorv1alpha1.Action{restart(kindDeployment, "no-such-workload")},
+			})
+
+			observe(map[string]string{keyWAN: wanBackup})
+			reconcileOnce(target)
+
+			status := statusOf(target)
+			Expect(status.EdgeActions).To(HaveLen(1))
+			Expect(status.EdgeActions[0].Status).To(Equal(executionFailed))
+			Expect(conditionOf(status, conditionReady).Status).To(Equal(metav1.ConditionTrue),
+				"a restart that did not happen did not stop this automation doing its job")
+		})
+	})
+
 	// A CronJob's level is a switch, not a count, and the point of these is that
 	// nothing about arbitration, the baseline or the release had to learn a
 	// second kind of value to hold one.
