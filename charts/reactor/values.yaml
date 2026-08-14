@@ -42,6 +42,49 @@ unifi:
     # Draw as a percentage of the UPS's power budget at or above which ups.load
     # reports "high".
     highLoadPercent: 80
+  devices:
+    # Publish a device.<name> key per adopted device, alongside the aggregate
+    # devices key that is always published.
+    #
+    # Off by default, and this is the one setting here that changes how MUCH
+    # Reactor publishes rather than what any of it means. Every other state key
+    # is bounded by what is compiled in; a per-device key's name comes from your
+    # network, so turning this on costs one state key, one transition series,
+    # and one more key an Automation can hold state for PER ADOPTED DEVICE.
+    # Forty devices is forty of each. The aggregate answers "is anything down"
+    # on one series whatever the fleet size.
+    #
+    # Names are slugified: "US 48" publishes device.us-48. Renaming a device on
+    # the console makes its old key vanish, which Reactor holds state through
+    # rather than treating as a recovery.
+    perDeviceKeys: false
+  temperature:
+    # Reading (°C) at or above which the hottest adopted device makes
+    # temperature report "high". The console's own overheating flag reports
+    # "high" regardless of this number: the firmware knows what a model
+    # tolerates and a default here does not.
+    #
+    # Set against the debounce temperature ships with, not in isolation. UniFi
+    # switches and APs normally sit at 40-60 °C, so 75 plus 3 samples means a
+    # reading that held for 90s at the default pollInterval rather than a fan
+    # spinning up late. Lower this towards the normal operating range and that
+    # hysteresis stops meaning anything.
+    #
+    # The per-device readings are in a debug log line — that is where to look
+    # before choosing your own number.
+    highCelsius: 75
+  poe:
+    # Share (%) of a switch's PoE budget at or above which poe reports
+    # "insufficient" — meaning the headroom is gone, not that a port has
+    # already been denied power. The worst switch in the fleet decides.
+    #
+    # Set against the debounce poe ships with. PoE draw is an instantaneous
+    # measurement like ups.load — an AP's radios coming up move it by tens of
+    # watts within one poll — so it settles over 3 samples, and 90% leaves
+    # roughly one powered device's worth of headroom during those 90s. Raise it
+    # towards 100 and there is no headroom left to react in; lower it and a
+    # switch with a full complement of APs reports insufficient forever.
+    maxUtilizationPercent: 90
   wan:
     # Thresholds for wan.quality, which buckets how well the *live* uplink is
     # performing into "good" or "degraded". Both numbers are averages the
@@ -82,6 +125,34 @@ unifi:
     # thresholds are set to leave headroom for exactly that delay. ups.load is
     # the only key derived from an instantaneous measurement that moves second
     # to second (a server spinning up shifts the draw), so it takes 3.
+    # devices and device.* take 2. A device's state is a switch position like
+    # wan, but it is the console's judgement about a heartbeat rather than a
+    # wire it can see, and one missed beat on a busy console must not page
+    # anyone. 60s at the default poll is nothing against the failure the key
+    # exists for — a device that has been dead for days.
+    #
+    # temperature takes 3 because it is a measurement that hovers: thermals
+    # move with the room, the fan and the load, and a reading sitting on the
+    # threshold would otherwise report high/normal/high. Its default threshold
+    # is set against these 3 samples.
+    #
+    # poe takes 3, the same argument as ups.load: an instantaneous measurement
+    # that moves when a radio or a camera heater comes up. Its threshold is set
+    # against these 3 samples.
+    #
+    # wifi takes 2 for the same reason devices does, and from the same
+    # underlying fact: an AP count is the console's judgement about heartbeats.
+    #
+    # firmware takes 3, and nothing is lost by it: the key comes from the
+    # console's lookup against Ubiquiti's release catalogue rather than from
+    # your hardware, and no firmware update needs reacting to within 30
+    # seconds. Extra samples are free when reaction time does not matter.
+    #
+    # An entry may end in "*", which matches every key with that prefix. It is
+    # how a group whose key names come from your hardware gets settled at all:
+    # no list here could name them. Exact keys win over patterns, and the
+    # longest prefix wins between patterns, so `device.ap-attic: 5` pulls one
+    # device out of the group.
     keys:
       ups.battery: 2
       ups.runtime: 2
@@ -89,6 +160,12 @@ unifi:
       isp: 2
       internet: 3
       wan.quality: 3
+      devices: 2
+      device.*: 2
+      firmware: 3
+      temperature: 3
+      wifi: 2
+      poe: 3
   # Name of an existing Secret containing the key UNIFI_API_KEY.
   # Create it with:
   #   kubectl -n <namespace> create secret generic unifi-reactor-credentials \

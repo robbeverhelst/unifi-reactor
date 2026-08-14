@@ -480,12 +480,23 @@ func setupUniFi(
 	unifiClient.HighLoadPercent = cfg.HighLoadPercent
 	unifiClient.MinAvailabilityPercent = cfg.MinAvailabilityPercent
 	unifiClient.MaxLatencyMs = cfg.MaxLatencyMs
+	unifiClient.HighTemperatureCelsius = cfg.HighTemperatureCelsius
+	unifiClient.MaxPoEUtilizationPercent = cfg.MaxPoEUtilizationPercent
+	unifiClient.PerDeviceKeys = cfg.PerDeviceKeys
 
 	// What this provider's keys can hold, so reactor_state_info can report 0 for
 	// the values a key does not currently have instead of leaving a stale series
 	// at 1. Handed over as opaque data: the metrics package never learns what any
 	// of it means, only how many series there can be.
 	metrics.SetVocabulary(unifi.ProviderName, unifi.StateVocabulary())
+
+	// The one setting that changes how much Reactor publishes rather than what
+	// it means, so it says so at startup: the key names are your device names,
+	// which means the series count is your fleet size.
+	if cfg.PerDeviceKeys {
+		setupLog.Info("Per-device state keys are on: expect one device.<name> key, and one transition " +
+			"series, per adopted device. The aggregate devices key is published either way")
+	}
 
 	// What the console is running, logged once at startup. It is added before
 	// the poller so that when a moved field makes an observation come back

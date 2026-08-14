@@ -29,6 +29,9 @@ const (
 	deviceOnline = "online"
 	keyWAN       = "wan"
 	keyBattery   = "ups.battery"
+	// keyDevice is a key whose name is only known at runtime, which is what the
+	// pattern entries below exist for.
+	keyDevice = "device.ap-1"
 )
 
 func observe(s *StateStore, state map[string]string) []Transition {
@@ -132,6 +135,47 @@ func TestStateStoreDebounceIsPerKey(t *testing.T) {
 	}
 	if got := observe(s, map[string]string{keyWAN: wanBackup, keyBattery: "low"}); len(got) != 1 {
 		t.Fatalf("second sample reported %+v, want the debounced key now", got)
+	}
+}
+
+// Some keys' names are only known at runtime — one per device in a fleet — so
+// there is no exact entry a chart could hold for them. A trailing "*" is how a
+// provider settles a group it cannot enumerate, and the engine still learns
+// nothing: it matches a string against a pattern it was handed.
+func TestStateStoreDebounceMatchesAKeyPattern(t *testing.T) {
+	s := debounced(1, map[string]int{"device.*": 2})
+	observe(s, map[string]string{keyWAN: wanPrimary, keyDevice: deviceOnline})
+
+	got := observe(s, map[string]string{keyWAN: wanBackup, keyDevice: "offline"})
+	if len(got) != 1 || got[0].Key != keyWAN {
+		t.Fatalf("transitions = %+v, want only the key the pattern does not cover", got)
+	}
+	if got := observe(s, map[string]string{keyWAN: wanBackup, keyDevice: "offline"}); len(got) != 1 {
+		t.Fatalf("second sample reported %+v, want the patterned key now", got)
+	}
+}
+
+// An exact entry wins over a pattern, and the longest prefix wins between
+// patterns, so one key can always be pulled out of the group it belongs to.
+func TestStateStoreDebouncePrefersTheMostSpecificEntry(t *testing.T) {
+	config := DebounceConfig{Default: 1, PerKey: map[string]int{
+		"device.*":        2,
+		"device.ap-*":     3,
+		"device.ap-attic": 4,
+		"devices":         5,
+	}}
+	s := NewStateStore(WithDebounce(testProvider, config))
+
+	for key, want := range map[string]int{
+		"device.switch-48": 2,
+		keyDevice:          3,
+		"device.ap-attic":  4,
+		"devices":          5,
+		keyWAN:             1,
+	} {
+		if got := s.samplesFor(testProvider, key); got != want {
+			t.Errorf("samplesFor(%q) = %d, want %d", key, got, want)
+		}
 	}
 }
 

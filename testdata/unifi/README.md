@@ -18,8 +18,8 @@ The allowlist matters more than it looks. `stat/device` returns entire device re
 
 | File | Endpoint | What it documents |
 | --- | --- | --- |
-| `api/stat-device-gateway.json` | `GET /proxy/network/api/s/<site>/stat/device` (gateway) | `wan1`/`wan2` (`is_uplink`, `up`, `ifname`, `speed`), `uplink`, `last_wan_status`, `isp` (allowlisted from `active_geo_info.WAN.isp_name`) |
-| `api/stat-device-ups.json` | same call, UPS record | `vbms_table` battery state, `outlet_table` |
+| `api/stat-device-gateway.json` | `GET /proxy/network/api/s/<site>/stat/device` (gateway) | `wan1`/`wan2` (`is_uplink`, `up`, `ifname`, `speed`), `uplink`, `last_wan_status`, `isp` (allowlisted from `active_geo_info.WAN.isp_name`), `state`/`adopted`/`name` (the `devices` key) |
+| `api/stat-device-ups.json` | same call, UPS record | `vbms_table` battery state, `outlet_table`, `state`/`adopted`/`name` |
 | `api/stat-health.json` | `GET /proxy/network/api/s/<site>/stat/health` | per-subsystem `status` (the `internet` key), WAN `uptime_stats` monitors (the `wan.quality` key), ISP |
 | `api/integration-info.json` | `GET /proxy/network/integration/v1/info` | controller version, for the compatibility guard |
 | `api/integration-sites.json` | `GET /proxy/network/integration/v1/sites` | site listing |
@@ -97,6 +97,30 @@ Whether that omission is the console suppressing zero values (a Go
 something about how a dead uplink is summarized is not settled by one capture,
 and the parser does not need it to be: a missing field is treated as missing
 either way.
+
+### WiFi health (`wlan` subsystem)
+
+The third key from this capture, and the only one in the `device.<name>`/
+`firmware`/`temperature`/`wifi`/`poe` batch that needed no new field at all:
+
+| Field | In the capture | What the provider does with it |
+| --- | --- | --- |
+| `num_adopted` | `3` | the denominator: how many APs this site owns |
+| `num_disconnected` | `1` | some → `warning`, all → `error`, none → `ok` |
+| `num_ap` | `2` | never derived from — logged, because `2 + 1 = 3` is the arithmetic that says `num_adopted` is the right denominator |
+| `status` | `warning` | never derived from either. Cross-checked against the counts, and a mismatch is counted as `wifi-status-disagrees` |
+
+`wifi` comes from the counts rather than from `status`, and issue
+[#9](https://github.com/robbeverhelst/unifi-reactor/issues/9) asked for that to be
+documented rather than left mysterious. The counts can be explained — "1 of 3
+access points is disconnected" — and they make `error` *derivable*, where mapping
+the vendor string through would have been inference: no capture has ever shown
+any subsystem saying `error`, on any subsystem. Here the two agree exactly, which
+is what makes the counts a sharpening of the console's verdict rather than a
+disagreement with it.
+
+Both counts decode into pointers. Zero adopted APs is a site with no WiFi and
+publishes no key; a subsystem that reports no counts is not a site with no APs.
 
 ### A third opinion on the `wan` mapping
 
@@ -217,6 +241,162 @@ That script writes `testdata/unifi/api/` through the allowlist. **Do not hand-ed
 
 Post the comparison output on [#34](https://github.com/robbeverhelst/unifi-reactor/issues/34) even if you cannot commit fixtures. The five numbers per stage are the finding; the fixture is only how it gets tested.
 
+## Fleet health (`state`, `adopted`)
+
+Both committed device records carry `"state": 1` and `"adopted": true`, so the
+`devices` key is derived entirely from fields that are already here — the only
+key in this batch that needed nothing new.
+
+| Field | In the captures | What the provider does with it |
+| --- | --- | --- |
+| `state` | `1` on both records | `1` → `online`, `0` → `offline`, **anything else → no value at all** |
+| `adopted` | `true` on both records | gates the fleet keys: an unadopted device is not your fleet |
+| `name` | `Dream Machine Pro`, `UPS 2U` | slugified into the `device.<name>` key |
+| `disconnection_reason` | **absent** — both devices were connected | never derived from; a `V(1)` diagnostic naming why the console lost a device |
+
+`state` is decoded as a **pointer**, for the reason the whole of this file keeps
+repeating: `0` is a real value here and means offline, so an absent `state` read
+as `0` would report one truncated record as a dead device and take the fleet to
+`degraded`. `adopted` is a pointer too, and `nil` is read as "not known to be
+adopted" — the direction that publishes fewer keys rather than more.
+
+> ⚠️ **Only states 0 and 1 have been observed**, both of them `1`. UniFi
+> documents others — pending adoption, provisioning, upgrading, heartbeat missed,
+> isolated — and none has been captured, so none is mapped. A device in one of
+> them counts towards neither key and logs a line asking for a report, because
+> reading "upgrading" as `offline` would turn a firmware update into a fleet
+> outage. `disconnection_reason`'s field name comes from UniFi's own API rather
+> than from a capture; it is diagnostics only, so a wrong name costs a log field
+> and nothing else.
+
+The two captured names are the console's defaults for that hardware, which is
+what makes them safe to use as documentation examples. Anything derived from a
+device name in a fixture or a doc example must be a placeholder of that kind.
+
+## Firmware (`upgradable`) — parsed, not captured
+
+The `firmware` key is derived from `upgradable`, and **no capture contains that
+field**. `version` and `displayable_version` are here; nothing about upgrades is.
+
+| Field | In the captures | What the provider does with it |
+| --- | --- | --- |
+| `version` | `5.1.26.33914`, `1.6.1.413` | diagnostics: the "from" in the log line |
+| `upgradable` | **absent** | the only field the key is derived from; a pointer, so absent publishes no key |
+| `upgrade_to_firmware` | **absent** | diagnostics: the "to" |
+| `required_version`, `safe_for_autoupgrade` | **absent** | diagnostics |
+| `model_in_eol`, `model_in_lts` | **absent** | counted in the log line; deliberately not keys — an inventory fact does not transition |
+
+All six are now in the allowlist in `hack/capture-unifi.sh`, so the next real
+capture settles them. Until then the parser is written to the shape UniFi's own
+API documents and to the field names issue [#12](https://github.com/robbeverhelst/unifi-reactor/issues/12)
+lists, and `internal/providers/unifi/firmware_test.go` asserts the decode of
+that documented shape **in code**. It is a hypothesis, and it lives in a test
+rather than in this directory for the reason the failover hypotheses do: a file
+here claims to have come off a console.
+
+> ⚠️ **Unverified.** If the field is named something else on your firmware, the
+> failure mode is that `firmware` never appears — not that it wrongly reports
+> `current`. That is the direction a pointer buys you, and it is why absent is
+> never read as "up to date".
+
+## Temperature — parsed, not captured
+
+**No committed capture carries a single thermal field.** The UPS 2U reports
+`has_fan: false` and no temperatures, and the gateway record was allowlisted
+before any of this was parsed, so the `temperature` key is written entirely to
+the shape UniFi's API documents and the field names issue
+[#11](https://github.com/robbeverhelst/unifi-reactor/issues/11) lists.
+
+| Field | In the captures | What the provider does with it |
+| --- | --- | --- |
+| `has_temperature` | **absent** | the device says it does thermal reporting; keeps the key alive when it publishes no number |
+| `overheating` | **absent** | the console's own verdict, trusted over the configured threshold |
+| `temperatures[]` (`name`, `type`, `value`) | **absent** | the hottest sensor's `value` is the device's reading |
+| `general_temperature` | **absent** | the single-value form, used when there is no table |
+| `has_fan` | **absent** | never derived from; a hot fanless device and a hot device with a dead fan are different problems |
+
+Every `value` is a pointer. A sensor reporting nothing is not a sensor at 0 °C,
+and reading it as one would make the rack look *coldest* exactly when a sensor
+stops answering — the wrong direction for the only key whose job is to notice
+heat.
+
+All of them are now in the allowlist in `hack/capture-unifi.sh`, and the script
+now also writes `stat-device-switch.json` and `stat-device-ap.json` — see
+[what is not captured yet](#what-is-not-captured-yet) — because a switch or an
+AP is the hardware that would settle this. `internal/providers/unifi/temperature_test.go`
+asserts the decode of both documented forms **in code**, as a hypothesis rather
+than as a fixture.
+
+> ⚠️ **Unverified, including the unit.** Nothing confirms these readings are
+> Celsius. If a firmware reported Fahrenheit, the 75 default would trip on a
+> perfectly cool switch — which is the one failure mode here that is loud rather
+> than silent, and the reason the debug line prints the raw number. Compare it
+> against what the UniFi UI shows for the same device before trusting the key.
+
+## PoE — parsed, not captured
+
+**No switch record exists in this repository at all.** The UPS 2U is reported as
+a switch-type device (`USWDA26`) and carries neither a `port_table` nor a PoE
+budget, so the `poe` key is written entirely to the shape UniFi's API documents
+and the field names issue [#14](https://github.com/robbeverhelst/unifi-reactor/issues/14)
+lists.
+
+| Field | In the captures | What the provider does with it |
+| --- | --- | --- |
+| `total_max_power` | **absent** | the switch's whole PoE budget in watts: the denominator |
+| `port_table[].poe_enable` | **absent** | whether the port is delivering power at all |
+| `port_table[].poe_power` | **absent** | the watts it is delivering, summed across powered ports |
+| `port_table[].poe_class` | **absent** | never derived from; names a port in the diagnostic line |
+| `port_table[].port_idx` | **absent** | never derived from; the same |
+
+Two decisions in the parser exist because of what is *not* known:
+
+`poe_power` is decoded by a type that accepts **a JSON number or a numeric
+string**. UniFi is documented to report it as `"3.90"` on several firmwares
+while other endpoints use a number, and committing to either would make an
+entire switch's draw unreadable on the half of the world that reports it the
+other way. Null, empty and unparseable all mean "no reading" — never 0 W.
+
+A port that is **powering something and reports no wattage makes the whole
+switch unreadable**, rather than contributing zero. This is "absent is not zero"
+at the one place on this key where it hides a failure: under-counting the draw
+reports headroom that is not there, which is exactly what #14 exists to catch.
+
+The whole `port_table` is projected down to those four fields in the capture
+script — a real one carries per-port names, MACs and client counts — and
+`internal/providers/unifi/poe_test.go` asserts the decode of the documented
+shape **in code**, as a hypothesis rather than as a fixture.
+
+> ⚠️ **Unverified.** A `stat-device-switch.json` from a US-8-60W or a US-48 is
+> the single capture that would settle this key, the PoE half of `temperature`,
+> and the firmware flags at once — **and the write path's PoE guard with them**,
+> which reads the same `port_table` for `is_uplink`, `port_poe` and a port name.
+> The allowlist projection carries both readers' fields for exactly that reason:
+> keeping only one set would make the first switch capture useless to the other
+> half, and look like evidence that its fields do not exist. Port names are
+> replaced with their index, because a port is usually named after the room or
+> the person on the end of it.
+
+## What is not captured yet
+
+`hack/capture-unifi.sh` writes two files that **do not exist in this
+repository**, because no capture has been taken since they were added:
+
+| File it would write | Why it matters |
+| --- | --- |
+| `api/stat-device-switch.json` | the ground truth for `poe` and for `temperature` on a switch, and the only device type carrying a `port_table` |
+| `api/stat-device-ap.json` | `temperature` on a fanless device, and the firmware flags on a second device type |
+
+Both are written with the device's `name` replaced by a placeholder, unlike the
+gateway and UPS records: those two kept the console's own default names for that
+hardware, while a switch or an AP is usually named after a room or a person. A
+device name is API-shaped — it *is* the `device.<name>` state key — so its shape
+belongs in a fixture; whose room it is does not.
+
+If the site has no such device adopted, the script says so and writes nothing.
+Run it and commit whatever it produces; every ⚠️ above and below is waiting on
+one of those two files.
+
 ## UPS state (`vbms_table`)
 
 A UniFi UPS is reported as a switch-type device (`USWDA26`) carrying:
@@ -249,7 +429,13 @@ UniFi also has a `network:ups_overload_detected` alarm trigger, which corroborat
 
 `unifi.wlan.*` and `unifi.poe.cycle` write to the console, and **no capture backs any of it**. There
 is no `rest/wlanconf` response here and no switch record — every device capture above is a gateway
-or a UPS — so the fields those actions read are inferred rather than observed. See
+or a UPS — so the fields those actions read are inferred rather than observed.
+
+> Since the state batch, `hack/capture-unifi.sh` writes a `stat-device-switch.json` when a switch is
+> adopted, and its `port_table` projection carries the write path's three fields (`is_uplink`,
+> `port_poe`, and a port name replaced by its index) alongside the `poe` state key's. One capture
+> would therefore give the PoE half of both paths its first ground truth at once. The WLAN half
+> still has none, and `wlanconf` is the record that carries pre-shared keys. See
 [docs/unifi-write-api.md](../../docs/unifi-write-api.md), which splits the two, and note that
 `hack/mock-unifi` builds its WLAN table and its PoE switch **in code**, clearly labelled, precisely
 so nothing in `testdata/` claims to have come off a console when it did not.

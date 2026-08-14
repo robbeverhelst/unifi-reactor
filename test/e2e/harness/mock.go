@@ -175,6 +175,37 @@ func (m *Mock) Internet(query string) error { return m.post("/internet?" + query
 // to go back to the capture.
 func (m *Mock) Quality(query string) error { return m.post("/quality?" + query) }
 
+// Device drives one adopted device's fleet fields, which the devices and
+// device.<name> keys are derived from: name=<slug> plus state=online|offline,
+// adopted=<bool>, rename=<new name>, or present=false to take it off the
+// console entirely. reset=true puts every device back to the capture.
+//
+// A device is addressed by the slug of the name it was CAPTURED under, even
+// after a rename, which is what makes the rename rehearsal reversible.
+func (m *Mock) Device(query string) error { return m.post("/device?" + query) }
+
+// Firmware drives the upgrade fields: upgradable=<bool>, eol=<bool>,
+// name=<slug> to move one device rather than all of them, present=false to stop
+// reporting the field at all — which is the state every committed capture is
+// in, and therefore the mock's own default.
+func (m *Mock) Firmware(query string) error { return m.post("/firmware?" + query) }
+
+// Temperature drives the thermal fields: celsius=<reading>, overheating=<bool>,
+// general=true for the single-value form, present=false for a device reporting
+// no thermals. Nothing is served until this is called, because no capture
+// carries a thermal field.
+func (m *Mock) Temperature(query string) error { return m.post("/temperature?" + query) }
+
+// WiFi drives the wlan subsystem's AP counts, which the wifi key is derived
+// from: adopted=<n>, disconnected=<n>, present=false to remove the subsystem.
+// status=<word> moves the console's own wording without moving the counts,
+// which is how the disagreement path is rehearsed.
+func (m *Mock) WiFi(query string) error { return m.post("/wifi?" + query) }
+
+// PoE drives the PoE budget and draw: watts=<n>, budget=<n>, silent=true for a
+// powered port that reports no wattage, present=false for no PoE fields at all.
+func (m *Mock) PoE(query string) error { return m.post("/poe?" + query) }
+
 // Reachable reports whether the mock is answering yet.
 func (m *Mock) Reachable() error {
 	return m.request(http.MethodGet, "/proxy/network/api/s/default/stat/device")

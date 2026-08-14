@@ -72,13 +72,23 @@ const (
 
 	// The state values the rehearsed console publishes, written the way an
 	// Automation's spec.when.state writes them.
-	keyWAN             = "wan"
-	keyWANQuality      = "wan.quality"
-	keyUPS             = "ups"
-	keyUPSBattery      = "ups.battery"
-	keyUPSRuntime      = "ups.runtime"
-	keyUPSLoad         = "ups.load"
-	keyInternet        = "internet"
+	keyWAN         = "wan"
+	keyWANQuality  = "wan.quality"
+	keyUPS         = "ups"
+	keyUPSBattery  = "ups.battery"
+	keyUPSRuntime  = "ups.runtime"
+	keyUPSLoad     = "ups.load"
+	keyInternet    = "internet"
+	keyDevices     = "devices"
+	keyFirmware    = "firmware"
+	keyTemperature = "temperature"
+	keyWiFi        = "wifi"
+	keyPoE         = "poe"
+	// keyUPSDevice is the per-device key the captured UPS publishes under, and
+	// the reason the suite installs with per-device keys on: they are opt-in,
+	// so an install that does not ask for them is the default rather than the
+	// case under test.
+	keyUPSDevice       = "device.ups-2u"
 	wanPrimary         = "primary"
 	wanBackup          = "backup"
 	wanQualityDegraded = "degraded"
@@ -90,6 +100,19 @@ const (
 	upsLoadHigh        = "high"
 	internetOK         = "ok"
 	internetDown       = "down"
+	devicesAllOnline   = "all-online"
+	devicesDegraded    = "degraded"
+	deviceOnline       = "online"
+	deviceOffline      = "offline"
+	firmwareCurrent    = "current"
+	firmwareUpdates    = "updates-available"
+	temperatureNormal  = "normal"
+	temperatureHigh    = "high"
+	wifiOK             = "ok"
+	wifiWarning        = "warning"
+	wifiError          = "error"
+	poeOK              = "ok"
+	poeInsufficient    = "insufficient"
 
 	// settleWindow is how long a workload must hold a value for the suite to
 	// accept that nothing is going to move it. It spans several polls and at
@@ -163,6 +186,10 @@ var _ = BeforeSuite(func() {
 		// Reactor declines a workload a HorizontalPodAutoscaler already drives,
 		// which is exactly the behaviour this value turns on.
 		"--set", "safety.detectHPA=true",
+		// The per-device keys are opt-in, so the suite has to ask for them to
+		// rehearse one. The aggregate is published either way, and both are
+		// asserted — the point of the opt-in is that only one of them is free.
+		"--set", "unifi.devices.perDeviceKeys=true",
 		// Structured logs, so the suite can assert on what the operator did
 		// and did not observe rather than on a rendered sentence.
 		"--set", "log.format=json",
@@ -195,6 +222,15 @@ func resetConsole() {
 	Expect(mock.UPS("mode=mains&level=100&present=true&runtime=1043&output=310&budget=1000")).To(Succeed())
 	Expect(mock.Internet("present=true&status=ok")).To(Succeed())
 	Expect(mock.Quality("reset=true")).To(Succeed())
+	// The fleet keys hold their overrides the same way the UPS numbers do, so
+	// each is put back explicitly rather than left wherever the last spec left
+	// it. firmware, temperature and poe are reset to "not reported at all",
+	// which is what the captures actually show.
+	Expect(mock.Device("reset=true")).To(Succeed())
+	Expect(mock.WiFi("reset=true")).To(Succeed())
+	Expect(mock.Firmware("present=false")).To(Succeed())
+	Expect(mock.Temperature("present=false")).To(Succeed())
+	Expect(mock.PoE("present=false")).To(Succeed())
 }
 
 // workload renders a target Deployment. The pods run the mock's image because

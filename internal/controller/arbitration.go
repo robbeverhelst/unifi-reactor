@@ -691,22 +691,9 @@ func claimTarget(
 	}
 	slices.Sort(claimants)
 
-	annotations := map[string]string{annotationClaimedBy: strings.Join(claimants, ",")}
-	if _, recorded := target.GetAnnotations()[handler.baseline]; !recorded {
-		// Recorded once, on the transition from unclaimed to claimed. Writing
-		// it again later would capture the value Reactor itself set — after a
-		// controller restart mid-outage that means recording 0 as the
-		// baseline, and the workload never comes back.
-		found, err := handler.read(ctx, c, target)
-		if err != nil {
-			return false, err
-		}
-		annotations[handler.baseline] = handler.format(found)
-		annotations[annotationClaimedAt] = metav1.Now().UTC().Format(time.RFC3339)
-	}
-	changed, err := setAnnotations(ctx, c, target, annotations)
+	changed, err := recordClaim(ctx, c, handler, target, claimants)
 	if err != nil {
-		return changed, fmt.Errorf("recording the claim on %s: %w", describeObject(target), err)
+		return changed, err
 	}
 
 	written, err := handler.apply(ctx, c, target, resolution.Level)
@@ -760,11 +747,74 @@ func releaseTarget(
 // anything that treated "not in this map" as "remove it" would erase the
 // baseline fifteen seconds after recording it, and the release would then find
 // nothing to restore.
+// recordClaim writes the claim annotations, and records the baseline if this is
+// the first claim on this target.
+//
+// The baseline is the only thing that knows what a workload was before Reactor
+// touched it, so recording it wrong is not cosmetic: the outage ends and the
+// workload comes back at the level Reactor itself set. Two things make that
+// easy to get wrong, and both are handled here.
+//
+// The test for "already recorded" reads the caller's SNAPSHOT of the target,
+// while the level being recorded comes from a live read of the scale. Two
+// Automations sharing a target reconcile concurrently — maxConcurrentReconciles
+// is 4 — so the second one can still see no baseline in its snapshot while the
+// live level is already the one the first one applied, and record that.
+//
+// So the write that records a baseline carries an optimistic lock: if the
+// target moved between the snapshot and the write, the patch is refused rather
+// than believed. On that conflict the target is re-read once and the claim is
+// written again — by then the baseline the other reconcile recorded is visible,
+// and this one leaves it alone. A second conflict is returned, because at that
+// point something other than this race is happening and a reconcile that says
+// so is better than one that keeps trying.
+func recordClaim(
+	ctx context.Context,
+	c client.Client,
+	handler targetHandler,
+	target *unstructured.Unstructured,
+	claimants []string,
+) (bool, error) {
+	for attempt := range 2 {
+		annotations := map[string]string{annotationClaimedBy: strings.Join(claimants, ",")}
+		_, recorded := target.GetAnnotations()[handler.baseline]
+		if !recorded {
+			// Recorded once, on the transition from unclaimed to claimed.
+			// Writing it again later would capture the value Reactor itself
+			// set — after a controller restart mid-outage that means recording
+			// 0 as the baseline, and the workload never comes back.
+			found, err := handler.read(ctx, c, target)
+			if err != nil {
+				return false, err
+			}
+			annotations[handler.baseline] = handler.format(found)
+			annotations[annotationClaimedAt] = metav1.Now().UTC().Format(time.RFC3339)
+		}
+
+		changed, err := setAnnotations(ctx, c, target, annotations, !recorded)
+		switch {
+		case err == nil:
+			return changed, nil
+		case recorded || !errors.IsConflict(err) || attempt > 0:
+			return changed, fmt.Errorf("recording the claim on %s: %w", describeObject(target), err)
+		}
+
+		// Someone else claimed this target first. Re-read so the baseline they
+		// recorded — from a level nobody had changed yet — is the one that
+		// stands.
+		if err := c.Get(ctx, client.ObjectKeyFromObject(target), target); err != nil {
+			return false, fmt.Errorf("re-reading %s after a claim conflict: %w", describeObject(target), err)
+		}
+	}
+	return false, fmt.Errorf("recording the claim on %s: too many conflicts", describeObject(target))
+}
+
 func setAnnotations(
 	ctx context.Context,
 	c client.Client,
 	target *unstructured.Unstructured,
 	want map[string]string,
+	guard bool,
 ) (bool, error) {
 	current := target.GetAnnotations()
 	next := maps.Clone(current)
@@ -778,7 +828,7 @@ func setAnnotations(
 			dirty = true
 		}
 	}
-	return patchAnnotations(ctx, c, target, next, dirty)
+	return patchAnnotations(ctx, c, target, next, dirty, guard)
 }
 
 // clearAnnotations removes every annotation a claim writes, which is what stops
@@ -793,20 +843,31 @@ func clearAnnotations(ctx context.Context, c client.Client, target *unstructured
 			dirty = true
 		}
 	}
-	return patchAnnotations(ctx, c, target, next, dirty)
+	// No lock: removing a claim is idempotent, and a release built from a
+	// slightly stale snapshot still removes exactly the annotations a claim
+	// writes. It is recording a value that must not be got wrong, not clearing
+	// one.
+	return patchAnnotations(ctx, c, target, next, dirty, false)
 }
 
+// guard adds an optimistic lock, so a patch built from a stale snapshot is
+// refused rather than applied. It is used where writing the wrong thing is
+// worse than failing: recording a target's baseline.
 func patchAnnotations(
 	ctx context.Context,
 	c client.Client,
 	target *unstructured.Unstructured,
 	next map[string]string,
 	dirty bool,
+	guard bool,
 ) (bool, error) {
 	if !dirty {
 		return false, nil
 	}
 	patch := client.MergeFrom(target.DeepCopy())
+	if guard {
+		patch = client.MergeFromWithOptions(target.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	}
 	target.SetAnnotations(next)
 	if err := c.Patch(ctx, target, patch); err != nil {
 		return false, err

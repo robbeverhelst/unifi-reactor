@@ -95,7 +95,29 @@ curl -X POST 'http://localhost:9443/internet?present=false'    # the www subsyst
 curl -X POST 'http://localhost:9443/quality?availability=97'   # the live uplink gets flaky
 curl -X POST 'http://localhost:9443/quality?latency=400'       # ...or just slow
 curl -X POST 'http://localhost:9443/quality?reset=true'        # back to the capture
+
+curl http://localhost:9443/device                              # what the capture holds, and each device's key
+curl -X POST 'http://localhost:9443/device?name=ups-2u&state=offline'    # a device dies
+curl -X POST 'http://localhost:9443/device?name=ups-2u&rename=Rack+UPS'  # ...or is renamed
+curl -X POST 'http://localhost:9443/device?reset=true'         # back to the capture
+
+curl -X POST 'http://localhost:9443/wifi?disconnected=1'       # one access point drops
+curl -X POST 'http://localhost:9443/wifi?disconnected=3'       # all of them: wifi error
+
+curl -X POST 'http://localhost:9443/firmware?upgradable=true'  # an update is waiting
+curl -X POST 'http://localhost:9443/temperature?celsius=82'    # a device runs hot
+curl -X POST 'http://localhost:9443/poe?watts=55&budget=60'    # the PoE budget fills up
+curl -X POST 'http://localhost:9443/poe?silent=true'           # a powered port reports no wattage
+curl -X POST 'http://localhost:9443/poe?port=7&name=re-patched' # ...and the write path's identity check
 ```
+
+`/poe` drives both halves of the PoE story, because the mock has one synthetic switch and one `port_table` and they are the same one: `watts`/`budget`/`silent` move what the `poe` **state key** measures, while `port`/`name`/`uplink`/`poe` break the identity checks the `unifi.poe.cycle` **action** makes. That switch is adopted and online, so it is part of the fleet `devices` counts and is addressable as `mock-switch` through `/device`.
+
+> **`/firmware`, `/temperature` and `/poe` serve fields no capture contains.** The committed records carry no upgrade flags, no thermals and no `port_table`, so those three endpoints render the shape UniFi's API *documents* — including `poe_power` as a string, which is the form most likely to break a parser. Driving them exercises the derivation; it does not confirm a console reports any of it. Until one does, the mock's honest default is what the captures show: those keys are simply absent, and `present=false` puts each back to that state. See [the capture notes](../testdata/unifi/README.md#what-is-not-captured-yet).
+
+Per-device keys are opt-in in Reactor (`unifi.devices.perDeviceKeys`), so `device.<name>` will not appear until you ask for it — `devices` is published either way. A device is addressed by the slug of the name it was *captured* under even after `rename=`, which is what makes the rename rehearsal reversible: renaming makes the old key **vanish**, and the reconciler holds the last known state rather than treating it as a recovery.
+
+`/wifi` drives the `wlan` subsystem's AP counts, because that is what `wifi` is derived from. `?status=` moves the console's own wording *without* moving the counts, which is how you rehearse the disagreement Reactor reports rather than silently resolving.
 
 `present=false` removes the UPS from the device list rather than reporting a value for it, so the `ups` keys vanish entirely. That is the case an Automation has to distinguish from "the outage ended", and the one the reconciler answers with `StateKeyUnavailable`. `/internet?present=false` does the same for the `www` health subsystem.
 

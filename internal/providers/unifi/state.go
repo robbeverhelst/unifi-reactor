@@ -22,14 +22,25 @@ const (
 	// ProviderName is how Automations refer to this provider.
 	ProviderName = "unifi"
 
-	stateKeyWAN        = "wan"
-	stateKeyWANQuality = "wan.quality"
-	stateKeyISP        = "isp"
-	stateKeyInternet   = "internet"
-	stateKeyUPS        = "ups"
-	stateKeyUPSBattery = "ups.battery"
-	stateKeyUPSRuntime = "ups.runtime"
-	stateKeyUPSLoad    = "ups.load"
+	stateKeyWAN         = "wan"
+	stateKeyWANQuality  = "wan.quality"
+	stateKeyISP         = "isp"
+	stateKeyInternet    = "internet"
+	stateKeyUPS         = "ups"
+	stateKeyUPSBattery  = "ups.battery"
+	stateKeyUPSRuntime  = "ups.runtime"
+	stateKeyUPSLoad     = "ups.load"
+	stateKeyDevices     = "devices"
+	stateKeyFirmware    = "firmware"
+	stateKeyTemperature = "temperature"
+	stateKeyWiFi        = "wifi"
+	stateKeyPoE         = "poe"
+
+	// stateKeyDevicePrefix is what a per-device key is published under:
+	// device.<slugified name>. It is the first key on this list whose NAME is
+	// open rather than whose values are, and that is why publishing them is
+	// opt-in — see the note on StateVocabulary below.
+	stateKeyDevicePrefix = "device."
 
 	wanPrimary = "primary"
 	wanBackup  = "backup"
@@ -74,8 +85,9 @@ const (
 
 	// The stat/health subsystems this provider reads. www is the console's own
 	// internet-reachability subsystem; wan carries the per-uplink uptime_stats.
-	healthSubsystemWWW = "www"
-	healthSubsystemWAN = "wan"
+	healthSubsystemWWW  = "www"
+	healthSubsystemWAN  = "wan"
+	healthSubsystemWLAN = "wlan"
 
 	// The per-subsystem status values. ok, warning and unknown are all present
 	// in the committed capture — on wan, wlan and vpn respectively — so the
@@ -110,19 +122,64 @@ const (
 	// could never be a metric label.
 	upsLoadNormal = "normal"
 	upsLoadHigh   = "high"
+
+	// device.<name> is whether the console is in contact with one adopted
+	// device. It is a switch position, not a measurement — the console either
+	// has a heartbeat from a device or it does not.
+	deviceOnline  = "online"
+	deviceOffline = "offline"
+
+	// devices is the fleet in one value, and it is the key most installs should
+	// match on: it says nothing about which device is missing, and it costs one
+	// series regardless of how many devices are adopted.
+	devicesAllOnline = "all-online"
+	devicesDegraded  = "degraded"
+
+	// firmware is whether the console has an update waiting for anything in the
+	// fleet. Observing is in scope and applying is not: Reactor never triggers
+	// an upgrade, so this key turns "I should check for UniFi updates sometime"
+	// into something that can page, notify or open a ticket, and stops there.
+	firmwareCurrent          = "current"
+	firmwareUpdatesAvailable = "updates-available"
+
+	// temperature buckets a measurement, exactly as wan.quality and ups.load
+	// do, and for the same two reasons: a number cannot be matched by spec.when,
+	// and it could never be a metric label. The hottest device in the fleet
+	// decides, against a configurable threshold; the readings behind it are a
+	// V(1) log line.
+	temperatureNormal = "normal"
+	temperatureHigh   = "high"
+
+	// wifi is the WiFi subsystem as a whole, which is a different question from
+	// any single AP being down: error is every adopted AP gone, warning is some
+	// of them. It is derived from the console's AP counts rather than from its
+	// own status wording — see wifi.go for why, which #9 asks to be documented.
+	wifiOK      = "ok"
+	wifiWarning = "warning"
+	wifiError   = "error"
+
+	// poe buckets a budget, which is a measurement like temperature and
+	// ups.load. insufficient means the headroom is gone — the worst switch is
+	// delivering at or above the configured share of its budget — rather than
+	// that a port has already been denied power. By the time the console
+	// refuses a port, the camera is already off.
+	poeOK           = "ok"
+	poeInsufficient = "insufficient"
 )
 
 // The comparisons this provider makes between two independent signals for the
 // same fact, named so a disagreement can be counted without the values that
 // disagreed — which come from the outside world — becoming a metric label.
 const (
-	signalWANUplinkDisagrees = "wan-uplink-disagrees"
-	signalWANUplinkUnclaimed = "wan-uplink-unclaimed"
-	signalWANUplinkAmbiguous = "wan-uplink-ambiguous"
-	signalWANNotOnline       = "wan-not-online"
-	signalWANMovedWithoutISP = "wan-moved-without-isp"
-	signalISPMovedWithoutWAN = "isp-moved-without-wan"
-	signalWANHealthDisagrees = "wan-health-disagrees"
+	signalWANUplinkDisagrees  = "wan-uplink-disagrees"
+	signalWANUplinkUnclaimed  = "wan-uplink-unclaimed"
+	signalWANUplinkAmbiguous  = "wan-uplink-ambiguous"
+	signalWANNotOnline        = "wan-not-online"
+	signalWANMovedWithoutISP  = "wan-moved-without-isp"
+	signalISPMovedWithoutWAN  = "isp-moved-without-wan"
+	signalWANHealthDisagrees  = "wan-health-disagrees"
+	signalDeviceNameShared    = "device-name-shared"
+	signalWiFiStatusDisagrees = "wifi-status-disagrees"
 )
 
 // StateVocabulary is the closed value set of every key this provider publishes
@@ -147,14 +204,31 @@ const (
 // distinct latency reading is the same cardinality failure isp would have
 // been. Bucketing into two named levels is what makes it a state key at all —
 // a number is not something spec.when can match either.
+//
+// device.<name> is absent for a third reason, and it is the reason this map is
+// keyed at all rather than being a list of values. Its VALUES are closed —
+// online and offline, two of them — but its key NAME is derived from a device
+// name, so the set of keys is open and only known at runtime. This map is
+// returned once at startup and cannot enumerate them, and enumerating them
+// would be the wrong thing to want: an install with forty adopted devices would
+// silently multiply its series count. So the per-device keys are opt-in
+// (Client.PerDeviceKeys), they are never labelled by value, and the aggregate
+// devices key — one series, whatever the fleet size — is what ships on by
+// default. What any single device currently is stays in the Automation's status
+// and in a Kubernetes Event, exactly as isp's value does.
 func StateVocabulary() map[string][]string {
 	return map[string][]string{
-		stateKeyWAN:        {wanPrimary, wanBackup},
-		stateKeyWANQuality: {wanQualityGood, wanQualityDegraded},
-		stateKeyInternet:   {internetOK, internetDegraded, internetDown},
-		stateKeyUPS:        {upsOnline, upsOnBattery},
-		stateKeyUPSBattery: {batteryNormal, batteryLow, batteryCritical},
-		stateKeyUPSRuntime: {upsRuntimeAmple, upsRuntimeShort, upsRuntimeCritical},
-		stateKeyUPSLoad:    {upsLoadNormal, upsLoadHigh},
+		stateKeyWAN:         {wanPrimary, wanBackup},
+		stateKeyWANQuality:  {wanQualityGood, wanQualityDegraded},
+		stateKeyInternet:    {internetOK, internetDegraded, internetDown},
+		stateKeyUPS:         {upsOnline, upsOnBattery},
+		stateKeyUPSBattery:  {batteryNormal, batteryLow, batteryCritical},
+		stateKeyUPSRuntime:  {upsRuntimeAmple, upsRuntimeShort, upsRuntimeCritical},
+		stateKeyUPSLoad:     {upsLoadNormal, upsLoadHigh},
+		stateKeyDevices:     {devicesAllOnline, devicesDegraded},
+		stateKeyFirmware:    {firmwareCurrent, firmwareUpdatesAvailable},
+		stateKeyTemperature: {temperatureNormal, temperatureHigh},
+		stateKeyWiFi:        {wifiOK, wifiWarning, wifiError},
+		stateKeyPoE:         {poeOK, poeInsufficient},
 	}
 }

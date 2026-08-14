@@ -21,6 +21,7 @@ package engine
 
 import (
 	"maps"
+	"strings"
 	"sync"
 	"time"
 
@@ -51,7 +52,29 @@ type DebounceConfig struct {
 	// PerKey overrides Default for individual keys. The engine never authors
 	// these — providers supply them as data, so the core stays free of any
 	// knowledge of what the keys mean.
+	//
+	// An entry may end in "*", which matches every key with that prefix:
+	// "device.*" covers a fleet whose key names are only known at runtime,
+	// which is otherwise impossible to configure. Exact entries win over
+	// patterns, and the longest matching prefix wins between patterns, so a
+	// specific key can always be pulled out of the group it belongs to. This
+	// is still opaque data — the engine matches strings and learns nothing
+	// about what a prefix means.
 	PerKey map[string]int
+}
+
+// patternSamples is the sample count of the longest "prefix*" entry matching
+// key, and whether any did.
+func (d DebounceConfig) patternSamples(key string) (int, bool) {
+	best, samples := -1, 0
+	for pattern, configured := range d.PerKey {
+		prefix, wildcard := strings.CutSuffix(pattern, "*")
+		if !wildcard || !strings.HasPrefix(key, prefix) || len(prefix) <= best {
+			continue
+		}
+		best, samples = len(prefix), configured
+	}
+	return samples, best >= 0
 }
 
 // StoreOption configures a StateStore at construction.
@@ -107,6 +130,9 @@ func (s *StateStore) samplesFor(provider, key string) int {
 		return 1
 	}
 	if samples, overridden := config.PerKey[key]; overridden {
+		return samples
+	}
+	if samples, matched := config.patternSamples(key); matched {
 		return samples
 	}
 	if config.Default < 1 {

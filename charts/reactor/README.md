@@ -250,6 +250,12 @@ hardware is adopted by the controller.
 | `ups.battery` | `normal`, `low`, `critical` | remaining charge vs. the configured thresholds |
 | `ups.runtime` | `ample`, `short`, `critical` | `timeToRemain` vs. the configured thresholds |
 | `ups.load` | `normal`, `high` | output as a share of the UPS's power budget |
+| `devices` | `all-online`, `degraded` | whether every adopted device is in contact with the console |
+| `device.<name>` | `online`, `offline` | one adopted device's `state`, by slugified name. **Opt-in** |
+| `firmware` | `current`, `updates-available` | whether the console has an update waiting for any adopted device |
+| `temperature` | `normal`, `high` | the hottest adopted device vs. the configured threshold |
+| `wifi` | `ok`, `warning`, `error` | the `wlan` subsystem's AP counts: some disconnected, or all of them |
+| `poe` | `ok`, `insufficient` | the worst switch's PoE draw vs. its budget and the configured threshold |
 
 `isp` is the only key with an open value set — it is your carrier's name, lowercased with
 non-alphanumerics turned into hyphens. Read it off a state transition line before matching on it.
@@ -296,6 +302,115 @@ goes, and that is worth knowing while the lights are still on.
 > ⚠️ `timeToRemain`'s unit is **inferred** to be seconds, from a single
 > observation on a UPS that was not discharging. Confirm it against a real
 > outage before letting `ups.runtime: critical` shut anything down.
+
+### `devices`, and why `device.<name>` is opt-in
+
+`devices` is the fleet in one value: `all-online` while every adopted device is in
+contact with the console, `degraded` the moment one is not. Unadopted and pending
+devices are excluded — the console can see hardware it does not manage — as is any
+device reporting a state this provider does not recognise, because UniFi documents
+provisioning and upgrading states no capture has shown and reading one as `offline`
+would report a firmware upgrade as an outage.
+
+| Value | Default | Description |
+| --- | --- | --- |
+| `unifi.devices.perDeviceKeys` | `false` | also publish a `device.<name>` key per adopted device |
+
+This is the only value in this chart that changes how *much* Reactor publishes
+rather than what any of it means. Every other state key is bounded by what is
+compiled in; a per-device key's name comes from your network, so turning this on
+costs one state key, one `reactor_state_transitions_total` series, and one more key
+an Automation can hold state for **per adopted device**. The aggregate costs one
+series whatever the fleet size, which is why it is the one that ships on. Reactor
+logs a line at startup when per-device keys are enabled.
+
+Names are slugified — `US 48` publishes `device.us-48`. Renaming a device makes its
+old key vanish rather than report `offline`, so `Ready=False`/`StateKeyUnavailable`
+holds the last known state instead of firing `onExit`. Two devices whose names
+slugify to one key publish neither, and the disagreement counter records it.
+
+### `firmware`
+
+`updates-available` while the console has an update waiting for **any** adopted
+device, `current` when it does not. There is nothing to configure. Which devices,
+and which version would move where, is a debug log line rather than a state value —
+a version string is not something `spec.when` can match, and one series per version
+is a cardinality problem.
+
+**Reactor never applies an upgrade.** Observing is in scope; rebooting your hardware
+is your decision.
+
+A device that does not report `upgradable` is not a device that is up to date, so a
+console where nothing answers publishes no `firmware` key at all. `model_in_eol` is
+read and counted in that same log line, and deliberately not a key: it is an
+inventory fact that never transitions.
+
+> ⚠️ The upgrade fields are **not in any committed capture**, so this parser is
+> written to the shape UniFi documents and is unverified. It fails by publishing
+> nothing rather than by publishing `current`.
+
+### `temperature`
+
+The hottest adopted device, bucketed against a threshold you set. The console's own
+`overheating` flag reports `high` regardless of it — the firmware knows what a model
+tolerates and a default here does not.
+
+| Value | Default | Description |
+| --- | --- | --- |
+| `unifi.temperature.highCelsius` | `75` | hottest reading at or above this reports `high` |
+
+Set against the debounce this key ships with, not in isolation: UniFi switches and
+APs normally sit at 40–60 °C, so 75 °C plus 3 samples is a reading that held for 90
+seconds rather than a fan spinning up late. The per-device readings are in a debug
+log line, which is where to look before choosing your own number.
+
+A device reporting no temperature is not a device at 0 °C: it contributes nothing,
+and a fleet where nothing is instrumented publishes no key at all.
+
+> ⚠️ The thermal fields are **not in any committed capture** — the UPS 2U reports
+> none — so this parser is written to the shape UniFi documents and is unverified,
+> including whether the readings are Celsius.
+
+### `wifi`
+
+`ok` while every adopted access point is connected, `warning` while some are
+disconnected, `error` when **all** of them are. There is nothing to configure.
+
+It is derived from the `wlan` subsystem's `num_disconnected` and `num_adopted`
+counts rather than from its `status` string: the counts are a fact that can be
+explained, and they make `error` derivable where the vendor string would have been
+inference. The status is still read and cross-checked — a mismatch is counted as a
+signal disagreement and logged, rather than either being silently trusted.
+
+A site with no adopted access points publishes no key at all.
+
+The three values are alternatives rather than steps of a ladder, the same shape
+`internet` has: an automation matching `wifi: warning` stops matching — and reverses —
+when the value moves to `error`. Match the value you mean, or write one automation per
+value.
+
+### `poe`
+
+`insufficient` when the worst switch is delivering at or above a share of its PoE
+budget — meaning the headroom is gone, not that a port has already been denied
+power. By the time the console refuses a port, the camera is off.
+
+| Value | Default | Description |
+| --- | --- | --- |
+| `unifi.poe.maxUtilizationPercent` | `90` | draw at or above this share of the budget reports `insufficient` |
+
+Set against the debounce this key ships with: PoE draw is instantaneous, so it
+settles over 3 samples, and 90% leaves roughly one powered device's worth of
+headroom during those 90 seconds.
+
+A port that is powering something and reports no wattage makes that whole switch
+unreadable rather than contributing zero — under-counting the draw would report
+headroom that is not there. Other switches are still measured; a fleet with no
+readable switch publishes no key.
+
+> ⚠️ The PoE fields are **not in any committed capture** — no switch record exists
+> at all — so this parser is written to the shape UniFi documents and is
+> unverified, including that `poe_power` arrives as a string.
 
 ### `internet` and `wan.quality`
 
@@ -712,11 +827,18 @@ was told, while the workload was still scaled and the Automation is still
 
 `reactor_state_info{provider,key,value}` is published **only for state keys
 whose value set the provider declares closed** — `wan`, `wan.quality`,
-`internet`, `ups`, `ups.battery`, `ups.runtime`, `ups.load`. `isp` is not one of them: its values are
+`internet`, `ups`, `ups.battery`, `ups.runtime`, `ups.load`, `devices`, `firmware`, `temperature`, `wifi`, `poe`. `isp` is not one of them: its values are
 carrier slugs derived from whatever public address your gateway holds, so
 labelling by them would add one permanent time series per carrier ever seen.
 `reactor_state_transitions_total` is not labelled by `from`/`to` for the same
 reason.
+
+`device.<name>` is left out for the mirror-image reason: its *values* are closed,
+and its **key name** is not, because it comes from your device names. It is
+therefore never in `reactor_state_info`, and enabling `unifi.devices.perDeviceKeys`
+adds one `reactor_state_transitions_total` series per adopted device — a number
+bounded by your rack rather than by this chart, which is exactly why you have to
+ask for it.
 
 `wan.quality` and `ups.load` are in that list only because they were bucketed.
 The availability, latency and wattage behind them are continuous, and
@@ -815,8 +937,11 @@ publishing — which fails as silence rather than as an error.
 | `unifi.ups.highLoadPercent` | `80` | draw at or above this share of the power budget reports `ups.load: high` |
 | `unifi.wan.quality.minAvailabilityPercent` | `99` | availability below this reports `wan.quality: degraded` |
 | `unifi.wan.quality.maxLatencyMs` | `150` | average latency above this reports `wan.quality: degraded` |
+| `unifi.devices.perDeviceKeys` | `false` | also publish a `device.<name>` key per adopted device; one more series per device |
+| `unifi.temperature.highCelsius` | `75` | hottest adopted device at or above this reports `temperature: high` |
+| `unifi.poe.maxUtilizationPercent` | `90` | a switch delivering at or above this share of its PoE budget reports `poe: insufficient` |
 | `unifi.debounce.default` | `1` | consecutive observations a changed value needs before Reactor acts; each extra sample costs one `pollInterval` of reaction time |
-| `unifi.debounce.keys` | `{ups.battery: 2, ups.runtime: 2, ups.load: 3, isp: 2, internet: 3, wan.quality: 3}` | per-key overrides for signals that settle rather than switch |
+| `unifi.debounce.keys` | `{ups.battery: 2, ups.runtime: 2, ups.load: 3, isp: 2, internet: 3, wan.quality: 3, devices: 2, device.*: 2, firmware: 3, temperature: 3, wifi: 2, poe: 3}` | per-key overrides for signals that settle rather than switch; an entry may end in `*` to cover keys named after your hardware |
 | `unifi.webhook.enabled` | `false` | Run the webhook receiver; a delivery triggers a poll, never a state change |
 | `unifi.webhook.port` | `9090` | Port the receiver listens on inside the pod |
 | `unifi.webhook.path` | `/webhooks/unifi` | URL path deliveries are accepted on |

@@ -114,6 +114,22 @@ type Client struct {
 	MinAvailabilityPercent float64
 	MaxLatencyMs           float64
 
+	// HighTemperatureCelsius bounds the temperature state key: the hottest
+	// adopted device at or above this reports high.
+	HighTemperatureCelsius float64
+
+	// MaxPoEUtilizationPercent bounds the poe state key: a switch delivering at
+	// or above this share of its PoE budget reports insufficient.
+	MaxPoEUtilizationPercent float64
+
+	// PerDeviceKeys publishes a device.<name> key per adopted device alongside
+	// the aggregate devices key. It defaults off because it is the one setting
+	// here that changes how many things Reactor publishes rather than what they
+	// mean: a fleet of forty devices is forty more state keys, forty more
+	// transition series, and forty more keys an Automation could hold state for.
+	// The aggregate answers "is anything down" on one series.
+	PerDeviceKeys bool
+
 	// mu guards previous only.
 	mu sync.Mutex
 	// previous remembers the last WAN signals so that a change in one can be
@@ -134,16 +150,18 @@ func NewClient(baseURL string, apiKey APIKey, site string, insecureSkipVerify bo
 		apiKey = StaticAPIKey("")
 	}
 	return &Client{
-		baseURL:                baseURL,
-		apiKey:                 apiKey,
-		site:                   site,
-		LowBatteryPercent:      DefaultLowBatteryPercent,
-		CriticalBatteryPercent: DefaultCriticalBatteryPercent,
-		ShortRuntimeSeconds:    DefaultShortRuntimeSeconds,
-		CriticalRuntimeSeconds: DefaultCriticalRuntimeSeconds,
-		HighLoadPercent:        DefaultHighLoadPercent,
-		MinAvailabilityPercent: DefaultMinAvailabilityPercent,
-		MaxLatencyMs:           DefaultMaxLatencyMs,
+		baseURL:                  baseURL,
+		apiKey:                   apiKey,
+		site:                     site,
+		LowBatteryPercent:        DefaultLowBatteryPercent,
+		CriticalBatteryPercent:   DefaultCriticalBatteryPercent,
+		ShortRuntimeSeconds:      DefaultShortRuntimeSeconds,
+		CriticalRuntimeSeconds:   DefaultCriticalRuntimeSeconds,
+		HighLoadPercent:          DefaultHighLoadPercent,
+		MinAvailabilityPercent:   DefaultMinAvailabilityPercent,
+		MaxLatencyMs:             DefaultMaxLatencyMs,
+		HighTemperatureCelsius:   DefaultHighTemperatureCelsius,
+		MaxPoEUtilizationPercent: DefaultMaxPoEUtilizationPercent,
 		http: &http.Client{
 			Timeout: 10 * time.Second,
 			Transport: &http.Transport{
@@ -177,6 +195,14 @@ type deviceRecord struct {
 	// including the UPS keys — down with it.
 	LastWANStatus map[string]any `json:"last_wan_status"`
 	VBMS          *vbmsTable     `json:"vbms_table"`
+
+	// The fleet-wide fields, embedded so each group lives in the file holding
+	// the parser that reads it. Embedded struct fields decode from the same
+	// flat object, so this is a grouping for readers and nothing more.
+	deviceHealthFields
+	firmwareFields
+	temperatureFields
+	poeFields
 }
 
 type wanPort struct {
@@ -240,6 +266,12 @@ type vbmsTable struct {
 //	ups.battery  normal  | low | critical
 //	ups.runtime  ample   | short | critical
 //	ups.load     normal  | high
+//	devices      all-online | degraded   (the adopted fleet in one value)
+//	device.<name>  online | offline      (opt-in; see Client.PerDeviceKeys)
+//	firmware     current | updates-available
+//	temperature  normal  | high              (the hottest adopted device)
+//	wifi         ok | warning | error        (the WLAN subsystem as a whole)
+//	poe          ok | insufficient           (headroom on the worst switch)
 //
 // ups and ups.battery are deliberately independent: a `when: {ups: on-battery}`
 // automation must stay matched for the whole outage, including as the battery
@@ -264,7 +296,7 @@ func (c *Client) Observe(ctx context.Context) (map[string]string, error) {
 	}
 
 	// The health endpoint is a second call rather than a second parse of the
-	// first, so it fails separately. Losing it costs internet and wan.quality,
+	// first, so it fails separately. Losing it costs internet, wifi and wan.quality,
 	// which then vanish from the observation and are held as last known state
 	// by anything matching them — the same degradation a UPS dropping off the
 	// console produces, and the same reason it must not be an error here.
@@ -281,7 +313,7 @@ func (c *Client) Observe(ctx context.Context) (map[string]string, error) {
 		log.Error(deviceErr, "The device endpoint failed; the keys derived from it are unavailable this poll")
 	}
 	if healthErr != nil {
-		log.Error(healthErr, "The health endpoint failed; internet and wan.quality are unavailable this poll")
+		log.Error(healthErr, "The health endpoint failed; internet, wifi and wan.quality are unavailable this poll")
 	}
 	return state, nil
 }
@@ -325,8 +357,27 @@ func (c *Client) get(ctx context.Context, endpoint string, out any) error {
 func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse) (map[string]string, error) {
 	state := map[string]string{}
 	gatewaySeen := false
+	// One tally per fleet-wide key, each holding whatever operator configuration
+	// it needs, so that publishing takes nothing but the state map.
+	fleet := newDeviceTally(c.PerDeviceKeys)
+	var firmware firmwareTally
+	heat := newTemperatureTally(c.HighTemperatureCelsius)
+	poe := newPoETally(c.MaxPoEUtilizationPercent)
 
 	for _, d := range parsed.Data {
+		// The fleet keys are about devices the console manages, so an unadopted
+		// or pending one is skipped here while the gateway and UPS halves below
+		// are unchanged: they are about specific hardware being present, which
+		// is a different question from whether it has been adopted.
+		if d.adopted() {
+			fleet.observe(ctx, d)
+			firmware.observe(d)
+			heat.observe(ctx, d)
+			poe.observe(d)
+		} else {
+			logf.FromContext(ctx).WithName("unifi-devices").V(1).Info(
+				"Skipping a device that is not adopted", "model", d.Model, "type", d.Type)
+		}
 		if !gatewaySeen && (d.WAN1 != nil || d.WAN2 != nil) {
 			gatewaySeen = true
 			if wan := c.wanFrom(ctx, d); wan != "" {
@@ -353,10 +404,15 @@ func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse
 			}
 		}
 	}
+	fleet.publish(ctx, state)
+	firmware.publish(ctx, state)
+	heat.publish(ctx, state)
+	poe.publish(ctx, state)
 
 	if len(state) == 0 {
 		return nil, fmt.Errorf(
-			"no gateway reporting WAN ports and no UPS found in the device list; "+
+			"no gateway reporting WAN ports, no UPS, and no adopted device reporting a state "+
+				"were found in the device list; "+
 				"the fields this provider reads were verified on UniFi Network %s (%s), "+
 				"and another version or console model may report them differently "+
 				"— see the compatibility matrix in the README",
