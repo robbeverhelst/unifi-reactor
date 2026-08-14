@@ -600,6 +600,16 @@ kubectl -n reactor-system logs deploy/reactor | grep -E 'unifi-health|unifi-obse
 | `The live uplink's health entry reports no availability` (at `log.level=debug`) | The console reported the uplink but no numbers for it, so `wan.quality` is withheld rather than guessed at zero |
 | Neither key ever appears, and no line above | `wan` itself is not derivable, which withholds `wan.quality` too — `internet` should still be there. Start at [§13](#13-reactor-is-running-but-nothing-is-reacting) |
 
+`wifi` comes from the same response and degrades the same way. It is derived from
+the `wlan` subsystem's AP counts rather than from its `status` string, so:
+
+| What you see | What it means |
+| --- | --- |
+| `The wlan subsystem reports no AP counts` (debug) | `num_adopted` or `num_disconnected` is missing. Neither is read as zero, so the key is withheld |
+| `No access point is adopted` (debug) | Zero adopted APs — there is no WiFi here to be healthy. Not the same as `ok` |
+| `wifi: warning` you cannot explain | The debug line names the numbers: `wifi wifi=warning adopted=3 disconnected=1 connected=2`. One of your APs is out of contact — `devices` and the per-device keys say which |
+| `The console's own wlan status and the value derived from its AP counts disagree` | UniFi's own wording and the counts have parted company. The counts are what `wifi` reports. If this fires steadily, UniFi's `warning` means something the counts do not — worth reporting on [#9](https://github.com/robbeverhelst/unifi-reactor/issues/9) |
+
 The same granularity applies to the UPS keys. `ups.runtime` is published only
 when the UPS reports a `timeToRemain` above zero, and `ups.load` only when it
 reports both an output and a non-zero budget — so a UPS that reports charge but

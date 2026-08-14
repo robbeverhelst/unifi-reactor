@@ -264,6 +264,7 @@ type vbmsTable struct {
 //	device.<name>  online | offline      (opt-in; see Client.PerDeviceKeys)
 //	firmware     current | updates-available
 //	temperature  normal  | high              (the hottest adopted device)
+//	wifi         ok | warning | error        (the WLAN subsystem as a whole)
 //
 // ups and ups.battery are deliberately independent: a `when: {ups: on-battery}`
 // automation must stay matched for the whole outage, including as the battery
@@ -288,7 +289,7 @@ func (c *Client) Observe(ctx context.Context) (map[string]string, error) {
 	}
 
 	// The health endpoint is a second call rather than a second parse of the
-	// first, so it fails separately. Losing it costs internet and wan.quality,
+	// first, so it fails separately. Losing it costs internet, wifi and wan.quality,
 	// which then vanish from the observation and are held as last known state
 	// by anything matching them — the same degradation a UPS dropping off the
 	// console produces, and the same reason it must not be an error here.
@@ -305,7 +306,7 @@ func (c *Client) Observe(ctx context.Context) (map[string]string, error) {
 		log.Error(deviceErr, "The device endpoint failed; the keys derived from it are unavailable this poll")
 	}
 	if healthErr != nil {
-		log.Error(healthErr, "The health endpoint failed; internet and wan.quality are unavailable this poll")
+		log.Error(healthErr, "The health endpoint failed; internet, wifi and wan.quality are unavailable this poll")
 	}
 	return state, nil
 }

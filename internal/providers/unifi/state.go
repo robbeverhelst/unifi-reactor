@@ -33,6 +33,7 @@ const (
 	stateKeyDevices     = "devices"
 	stateKeyFirmware    = "firmware"
 	stateKeyTemperature = "temperature"
+	stateKeyWiFi        = "wifi"
 
 	// stateKeyDevicePrefix is what a per-device key is published under:
 	// device.<slugified name>. It is the first key on this list whose NAME is
@@ -83,8 +84,9 @@ const (
 
 	// The stat/health subsystems this provider reads. www is the console's own
 	// internet-reachability subsystem; wan carries the per-uplink uptime_stats.
-	healthSubsystemWWW = "www"
-	healthSubsystemWAN = "wan"
+	healthSubsystemWWW  = "www"
+	healthSubsystemWAN  = "wan"
+	healthSubsystemWLAN = "wlan"
 
 	// The per-subsystem status values. ok, warning and unknown are all present
 	// in the committed capture — on wan, wlan and vpn respectively — so the
@@ -146,20 +148,29 @@ const (
 	// V(1) log line.
 	temperatureNormal = "normal"
 	temperatureHigh   = "high"
+
+	// wifi is the WiFi subsystem as a whole, which is a different question from
+	// any single AP being down: error is every adopted AP gone, warning is some
+	// of them. It is derived from the console's AP counts rather than from its
+	// own status wording — see wifi.go for why, which #9 asks to be documented.
+	wifiOK      = "ok"
+	wifiWarning = "warning"
+	wifiError   = "error"
 )
 
 // The comparisons this provider makes between two independent signals for the
 // same fact, named so a disagreement can be counted without the values that
 // disagreed — which come from the outside world — becoming a metric label.
 const (
-	signalWANUplinkDisagrees = "wan-uplink-disagrees"
-	signalWANUplinkUnclaimed = "wan-uplink-unclaimed"
-	signalWANUplinkAmbiguous = "wan-uplink-ambiguous"
-	signalWANNotOnline       = "wan-not-online"
-	signalWANMovedWithoutISP = "wan-moved-without-isp"
-	signalISPMovedWithoutWAN = "isp-moved-without-wan"
-	signalWANHealthDisagrees = "wan-health-disagrees"
-	signalDeviceNameShared   = "device-name-shared"
+	signalWANUplinkDisagrees  = "wan-uplink-disagrees"
+	signalWANUplinkUnclaimed  = "wan-uplink-unclaimed"
+	signalWANUplinkAmbiguous  = "wan-uplink-ambiguous"
+	signalWANNotOnline        = "wan-not-online"
+	signalWANMovedWithoutISP  = "wan-moved-without-isp"
+	signalISPMovedWithoutWAN  = "isp-moved-without-wan"
+	signalWANHealthDisagrees  = "wan-health-disagrees"
+	signalDeviceNameShared    = "device-name-shared"
+	signalWiFiStatusDisagrees = "wifi-status-disagrees"
 )
 
 // StateVocabulary is the closed value set of every key this provider publishes
@@ -208,5 +219,6 @@ func StateVocabulary() map[string][]string {
 		stateKeyDevices:     {devicesAllOnline, devicesDegraded},
 		stateKeyFirmware:    {firmwareCurrent, firmwareUpdatesAvailable},
 		stateKeyTemperature: {temperatureNormal, temperatureHigh},
+		stateKeyWiFi:        {wifiOK, wifiWarning, wifiError},
 	}
 }

@@ -67,6 +67,18 @@ limitations under the License.
 //	curl -X POST 'http://localhost:9443/ups?output=850'           # a heavy load on the same budget
 //	curl -X POST 'http://localhost:9443/ups?output=310&budget=1000'  # back to the capture
 //
+// Rehearse the WiFi subsystem degrading. wifi is derived from the wlan
+// subsystem's AP counts rather than from its status wording, so these drive the
+// counts — and ?status= drives the console's own wording, which Reactor
+// cross-checks against them and disagrees with out loud:
+//
+//	curl -X POST 'http://localhost:9443/wifi?disconnected=1'       # some APs gone
+//	curl -X POST 'http://localhost:9443/wifi?disconnected=3'       # all of them: error
+//	curl -X POST 'http://localhost:9443/wifi?adopted=0'            # no APs at all: no key
+//	curl -X POST 'http://localhost:9443/wifi?status=ok'            # make the two disagree
+//	curl -X POST 'http://localhost:9443/wifi?present=false'        # wlan subsystem gone
+//	curl -X POST 'http://localhost:9443/wifi?reset=true'           # back to the capture
+//
 // Rehearse a device dying, which is the case #8 exists for: an AP can sit dead
 // for days with nothing surfacing it. GET /device lists what the capture holds
 // and the key each device would publish under:
@@ -194,6 +206,7 @@ const (
 	// named exactly as the capture spells them.
 	subsystemWWW     = "www"
 	subsystemWAN     = "wan"
+	subsystemWLAN    = "wlan"
 	uptimeKeyPrimary = "WAN"
 	uptimeKeyBackup  = "WAN2"
 
@@ -238,6 +251,7 @@ const (
 	fieldDevices  = "devices"
 	fieldPresent  = "present"
 	paramName     = "name"
+	paramAdopted  = "adopted"
 
 	// What a variant says wan1/wan2 is_uplink do when the backup takes over.
 	uplinkMoves   = "moves"
@@ -378,6 +392,15 @@ type mock struct {
 	availability *float64
 	latency      *float64
 	noQuality    bool
+	// The wlan subsystem's AP counts, which the wifi key is derived from, and
+	// the console's own status wording, which Reactor cross-checks against
+	// them. Nil means "serve whatever the capture has" (3 adopted, 1
+	// disconnected, 2 connected, status warning); noWLAN drops the subsystem.
+	apAdopted      *int
+	apDisconnected *int
+	wlanStatus     string
+	noWLAN         bool
+
 	// noUPS drops the UPS from the device list, as an unadopted or powered-off
 	// one would be. The provider then publishes no ups keys at all rather than
 	// a placeholder value, which is the case that must not be read as "the
@@ -488,6 +511,7 @@ func main() {
 	mux.HandleFunc("POST /device", m.setDevice)
 	mux.HandleFunc("POST /firmware", m.setFirmware)
 	mux.HandleFunc("POST /temperature", m.setTemperature)
+	mux.HandleFunc("POST /wifi", m.setWiFi)
 
 	// The write path: the Network application under /proxy/network, but
 	// authenticated the UniFi OS way — a session cookie plus the csrf header.
@@ -584,7 +608,7 @@ func (m *mock) rewriteFleet(device map[string]any) bool {
 		device["state"] = *override.state
 	}
 	if override.adopted != nil {
-		device["adopted"] = *override.adopted
+		device[paramAdopted] = *override.adopted
 	}
 	if override.rename != "" {
 		device["name"] = override.rename
@@ -712,6 +736,11 @@ func (m *mock) health() []any {
 				continue
 			}
 			subsystem["status"] = m.wwwStatus
+		case subsystemWLAN:
+			if m.noWLAN {
+				continue
+			}
+			m.rewriteWLAN(subsystem)
 		case subsystemWAN:
 			m.rewriteUptimeStats(subsystem)
 		}
@@ -750,6 +779,97 @@ func (m *mock) rewriteUptimeStats(subsystem map[string]any) {
 	if m.latency != nil {
 		entry[fieldLatency] = *m.latency
 	}
+}
+
+// rewriteWLAN applies the AP-count overrides, keeping num_ap consistent with
+// them: the capture has 2 connected alongside 3 adopted and 1 disconnected, and
+// a mock that broke that arithmetic would be rehearsing a console nobody has.
+func (m *mock) rewriteWLAN(subsystem map[string]any) {
+	if m.apAdopted != nil {
+		subsystem["num_adopted"] = *m.apAdopted
+	}
+	if m.apDisconnected != nil {
+		subsystem["num_disconnected"] = *m.apDisconnected
+	}
+	if m.wlanStatus != "" {
+		subsystem["status"] = m.wlanStatus
+	}
+	adopted, adoptedOK := subsystem["num_adopted"].(float64)
+	disconnected, disconnectedOK := subsystem["num_disconnected"].(float64)
+	if !adoptedOK {
+		adopted, adoptedOK = toFloat(subsystem["num_adopted"])
+	}
+	if !disconnectedOK {
+		disconnected, disconnectedOK = toFloat(subsystem["num_disconnected"])
+	}
+	if adoptedOK && disconnectedOK {
+		subsystem["num_ap"] = max(0, int(adopted)-int(disconnected))
+	}
+}
+
+// toFloat reads a number that may have arrived as an int from an override
+// rather than as JSON's float64.
+func toFloat(value any) (float64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case int:
+		return float64(v), true
+	}
+	return 0, false
+}
+
+// setWiFi drives the wlan subsystem. present=false removes it entirely, so the
+// wifi key vanishes rather than reporting a value.
+func (m *mock) setWiFi(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if query.Get("reset") != "" {
+		m.apAdopted, m.apDisconnected, m.wlanStatus, m.noWLAN = nil, nil, "", false
+		log.Print("wlan subsystem back to the capture")
+		writeJSON(w, map[string]any{"wlan": valueCaptured})
+		return
+	}
+	for _, field := range []struct {
+		name   string
+		target **int
+	}{
+		{paramAdopted, &m.apAdopted},
+		{"disconnected", &m.apDisconnected},
+	} {
+		raw := query.Get(field.name)
+		if raw == "" {
+			continue
+		}
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 0 {
+			http.Error(w, field.name+" must be a non-negative integer", http.StatusBadRequest)
+			return
+		}
+		*field.target = &value
+	}
+	if status := query.Get("status"); status != "" {
+		m.wlanStatus = status
+	}
+	if raw := query.Get(fieldPresent); raw != "" {
+		present, err := strconv.ParseBool(raw)
+		if err != nil {
+			http.Error(w, "present must be a boolean", http.StatusBadRequest)
+			return
+		}
+		m.noWLAN = !present
+	}
+
+	log.Printf("wlan subsystem: adopted=%s disconnected=%s status=%q present=%v",
+		describeInt(m.apAdopted), describeInt(m.apDisconnected), m.wlanStatus, !m.noWLAN)
+	writeJSON(w, map[string]any{
+		paramAdopted: m.apAdopted, "disconnected": m.apDisconnected,
+		"status": m.wlanStatus, fieldPresent: !m.noWLAN,
+		fieldNote: "wifi is derived from the counts, not from status; setting only status makes " +
+			"Reactor report a disagreement, which is the point of it",
+	})
 }
 
 func (m *mock) serveHealth(w http.ResponseWriter, _ *http.Request) {
@@ -1229,7 +1349,7 @@ func (m *mock) setDevice(w http.ResponseWriter, r *http.Request) {
 		}
 		override.state = &state
 	}
-	if raw := query.Get("adopted"); raw != "" {
+	if raw := query.Get(paramAdopted); raw != "" {
 		adopted, err := strconv.ParseBool(raw)
 		if err != nil {
 			http.Error(w, "adopted must be a boolean", http.StatusBadRequest)
@@ -1270,7 +1390,7 @@ func (m *mock) describeDevices() []any {
 			"state":   device["state"],
 			// The handle to address it by, which does not move when it is
 			// renamed: every response is rebuilt from the capture.
-			"adopted": device["adopted"],
+			paramAdopted: device[paramAdopted],
 		})
 	}
 	return described

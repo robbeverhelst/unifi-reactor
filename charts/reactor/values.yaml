@@ -124,6 +124,9 @@ unifi:
     # threshold would otherwise report high/normal/high. Its default threshold
     # is set against these 3 samples.
     #
+    # wifi takes 2 for the same reason devices does, and from the same
+    # underlying fact: an AP count is the console's judgement about heartbeats.
+    #
     # firmware takes 3, and nothing is lost by it: the key comes from the
     # console's lookup against Ubiquiti's release catalogue rather than from
     # your hardware, and no firmware update needs reacting to within 30
@@ -145,6 +148,7 @@ unifi:
       device.*: 2
       firmware: 3
       temperature: 3
+      wifi: 2
   # Name of an existing Secret containing the key UNIFI_API_KEY.
   # Create it with:
   #   kubectl -n <namespace> create secret generic unifi-reactor-credentials \

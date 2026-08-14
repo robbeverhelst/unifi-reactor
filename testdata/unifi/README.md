@@ -98,6 +98,30 @@ something about how a dead uplink is summarized is not settled by one capture,
 and the parser does not need it to be: a missing field is treated as missing
 either way.
 
+### WiFi health (`wlan` subsystem)
+
+The third key from this capture, and the only one in the `device.<name>`/
+`firmware`/`temperature`/`wifi`/`poe` batch that needed no new field at all:
+
+| Field | In the capture | What the provider does with it |
+| --- | --- | --- |
+| `num_adopted` | `3` | the denominator: how many APs this site owns |
+| `num_disconnected` | `1` | some → `warning`, all → `error`, none → `ok` |
+| `num_ap` | `2` | never derived from — logged, because `2 + 1 = 3` is the arithmetic that says `num_adopted` is the right denominator |
+| `status` | `warning` | never derived from either. Cross-checked against the counts, and a mismatch is counted as `wifi-status-disagrees` |
+
+`wifi` comes from the counts rather than from `status`, and issue
+[#9](https://github.com/robbeverhelst/unifi-reactor/issues/9) asked for that to be
+documented rather than left mysterious. The counts can be explained — "1 of 3
+access points is disconnected" — and they make `error` *derivable*, where mapping
+the vendor string through would have been inference: no capture has ever shown
+any subsystem saying `error`, on any subsystem. Here the two agree exactly, which
+is what makes the counts a sharpening of the console's verdict rather than a
+disagreement with it.
+
+Both counts decode into pointers. Zero adopted APs is a site with no WiFi and
+publishes no key; a subsystem that reports no counts is not a site with no APs.
+
 ### A third opinion on the `wan` mapping
 
 `uptime` is the only field the capture shows exclusively on the live uplink,

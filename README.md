@@ -733,6 +733,7 @@ Each key is published only when the matching hardware is adopted by your control
 | `device.<name>` | `online`, `offline` | one adopted device, by slugified name. **Opt-in** — see below |
 | `firmware` | `current`, `updates-available` | whether the console has an update waiting for anything adopted |
 | `temperature` | `normal`, `high` | the hottest adopted device against the configured threshold |
+| `wifi` | `ok`, `warning`, `error` | the WiFi subsystem as a whole, from the console's AP counts |
 
 `isp` is the one key whose values are not a closed set: it is the carrier name your console geolocated your public address to, lowercased with everything non-alphanumeric turned into a hyphen. Look it up before matching on it —
 
@@ -949,6 +950,36 @@ nothing, and a fleet where nothing is instrumented publishes no `temperature` ke
 at all. Reading a missing sensor as zero would make the rack look coldest exactly
 when a sensor stops answering.
 
+### `wifi` is the subsystem, not any one AP
+
+`devices: degraded` says something in the rack stopped answering. `wifi` says how
+much of your *WiFi* is left, which is a different question and often the one that
+matters to whoever is complaining:
+
+| Value | When |
+| --- | --- |
+| `ok` | every adopted access point is connected |
+| `warning` | at least one is disconnected, but not all of them |
+| `error` | **every** adopted access point is disconnected |
+
+It is derived from the console's own `num_disconnected` and `num_adopted` counts
+rather than from the `wlan` subsystem's `status` string, and #9 asked for that
+choice to be documented rather than left mysterious. The counts are a fact that can
+be explained — "1 of 3 access points is disconnected" is an answer; "UniFi said
+warning" is not — and they make `error` *derivable*, where mapping the vendor
+string through would have been inference: no capture has ever shown any subsystem
+saying `error`. In the one capture there is, the two agree exactly (`warning`, with
+1 of 3 APs disconnected), so this sharpens the console's verdict rather than
+contradicting it.
+
+The status string is still read, and a mismatch is counted as
+`reactor_provider_signal_disagreements_total{signal="wifi-status-disagrees"}` and
+logged. If UniFi's `warning` turns out to mean something else — airtime, channel
+interference — that counter rises instead of the derivation quietly being wrong.
+
+A site with **no** adopted access points publishes no `wifi` key: there is no WiFi
+there to be healthy, which is not the same as WiFi that is fine.
+
 If a provider stops reporting a key at all — the hardware dropped off the controller — Reactor holds the last known state and reports `Ready=False` with `StateKeyUnavailable` rather than treating lost visibility as a condition that ended ([what to do about it](docs/troubleshooting.md#2-statekeyunavailable-and-held-state)).
 
 ### Settling a noisy signal
@@ -970,6 +1001,7 @@ unifi:
       device.*: 2       # a trailing * covers keys named after your hardware
       firmware: 3       # ...and nothing about an update is urgent
       temperature: 3    # ...and a measurement hovers on its threshold
+      wifi: 2           # ...and an AP heartbeat can miss a beat
 ```
 
 Each extra sample costs one `pollInterval` of reaction time, so the default is `1`: a WAN failover and a power cut both deserve an immediate reaction, and neither flaps. `ups.battery` ships at `2` because it is a threshold crossing — a charge hovering at 30% would otherwise report `low`, `normal`, `low` — and because a battery drains over minutes, so spending one more poll to be sure costs nothing. At the default 30s poll that makes a battery-level escalation react in 60s worst case instead of 30s.
@@ -989,6 +1021,8 @@ Debounce is also the whole of the flap control for `wan.quality`, and that is wo
 `firmware` ships at `3`, and here the reason is that nothing is lost by it. The key is not derived from your hardware at all but from the console's lookup against Ubiquiti's release catalogue, which can refresh, blip or briefly disagree with itself — and *no* firmware update needs reacting to within 30 seconds. Extra samples are free when reaction time does not matter, so it takes the most of any key.
 
 `temperature` ships at `3` because it is a measurement that hovers: thermals move with the room, the fan and the load, and a reading sitting near the threshold would otherwise report `high`, `normal`, `high`. Debounce is the whole of the flap control here, exactly as it is for `wan.quality` — three consecutive identical readings, or the key holds what it had.
+
+`wifi` ships at `2` for the same reason `devices` does, and from the same underlying fact: an AP count is the console's judgement about heartbeats, and one missed beat on a busy console must not fire an automation.
 
 `device.*` is the one entry here that is a pattern rather than a key. Per-device key names come from your hardware, so no list written here could name them; a trailing `*` matches every key with that prefix. An exact key always wins over a pattern, and the longest matching prefix wins between patterns, so `device.ap-attic: 5` pulls one device out of the group it belongs to.
 

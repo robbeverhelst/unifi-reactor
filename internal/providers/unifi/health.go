@@ -57,6 +57,18 @@ type healthSubsystem struct {
 	// UptimeStats appears on the wan subsystem, keyed by uplink (WAN, WAN2,
 	// WAN3) exactly as last_wan_status is.
 	UptimeStats map[string]uplinkHealth `json:"uptime_stats"`
+
+	// The AP counts on the wlan subsystem, which the wifi key is derived from.
+	// Pointers, like every other number in this file: a subsystem that reports
+	// no counts is not a subsystem with zero APs, and zero adopted APs is a
+	// site with no WiFi rather than a site whose WiFi is fine.
+	//
+	// The capture carries all three — 2, 3 and 1 — and they are internally
+	// consistent: 2 connected plus 1 disconnected is the 3 that are adopted,
+	// which is what says NumAdopted is the denominator wifi should use.
+	NumAP           *int `json:"num_ap"`
+	NumAdopted      *int `json:"num_adopted"`
+	NumDisconnected *int `json:"num_disconnected"`
 }
 
 // uplinkHealth is one uplink's entry in the wan subsystem's uptime_stats.
@@ -121,6 +133,10 @@ func (c *Client) mergeHealth(ctx context.Context, state map[string]string, healt
 				"internet will not be published. Please report it — the set of statuses is "+
 				"what this key is derived from",
 				"status", subsystem.Status)
+		case healthSubsystemWLAN:
+			if wifi := wifiFrom(ctx, subsystem); wifi != "" {
+				state[stateKeyWiFi] = wifi
+			}
 		case healthSubsystemWAN:
 			c.crossCheckUplinkHealth(ctx, wan, subsystem.UptimeStats)
 			if wan == "" {
