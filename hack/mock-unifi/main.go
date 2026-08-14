@@ -1432,8 +1432,18 @@ func (m *mock) setDevice(w http.ResponseWriter, r *http.Request) {
 	defer m.mu.Unlock()
 
 	if raw := query.Get("reset"); raw != "" {
-		m.deviceOverrides = map[string]*deviceOverride{}
-		log.Print("device overrides cleared")
+		// Only what /device drives. One device has one override record, shared
+		// with /firmware and /temperature, and wiping the whole thing here
+		// would make two other endpoints' fields disappear behind the caller's
+		// back — which is exactly the "a key vanished" case Reactor holds its
+		// claim through, so a teardown that reset devices last would hang
+		// waiting for a workload it had just frozen. Each endpoint resets its
+		// own; that is why /firmware and /temperature have resets of their own.
+		for _, override := range m.deviceOverrides {
+			override.state, override.adopted = nil, nil
+			override.rename, override.absent = "", false
+		}
+		log.Print("device overrides cleared (firmware and thermal fields left alone)")
 		writeJSON(w, map[string]any{fieldDevices: m.describeDevices()})
 		return
 	}
