@@ -1242,6 +1242,9 @@ Chart values ([full reference](charts/reactor/README.md)):
 | `unifi.ups.highLoadPercent` | `80` | draw at or above this share of the power budget reports `ups.load: high` |
 | `unifi.wan.quality.minAvailabilityPercent` | `99` | availability below this reports `wan.quality: degraded` |
 | `unifi.wan.quality.maxLatencyMs` | `150` | average latency above this reports `wan.quality: degraded` |
+| `unifi.temperature.highCelsius` | `75` | hottest adopted device at or above this reports `temperature: high` |
+| `unifi.poe.maxUtilizationPercent` | `90` | a switch delivering at or above this share of its PoE budget reports `poe: insufficient` |
+| `unifi.devices.perDeviceKeys` | `false` | also publish a `device.<name>` key per adopted device — [one more series per device](#the-fleet-devices-and-why-devicename-is-opt-in) |
 | `unifi.webhook.enabled` | `false` | webhook fast path (below) |
 | `actions.allowedDestinations` | `[]` | where outbound actions may go. Empty refuses all of them, and withholds the operator's read access to Secrets ([why](#telling-you-what-happened)) |
 | `metrics.enabled` | `false` | serve `/metrics` on `:8443` over HTTPS behind the API server's authn/authz filter ([above](#knowing-it-is-working)) |
