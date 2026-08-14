@@ -336,7 +336,17 @@ kubectl auth can-i update statefulsets/scale \
   --as system:serviceaccount:reactor-system:reactor
 ```
 
-Two ways out, and the second is usually better in a homelab you did not want cluster-wide RBAC in:
+A `Node` target is a different problem with a different fix. Node access is opt-in, so the message says so directly:
+
+```text
+Ready  False  ActionFailed
+target Node/worker-03 not reachable with current RBAC
+(node actions are opt-in: install with rbac.allowNodeActions=true): ...
+```
+
+Nodes are cluster-scoped, so enabling that creates a ClusterRole even in a namespace-scoped install — see the README before you do. The manifest bundle does not offer node RBAC at all; use the chart, or grant the ClusterRole yourself.
+
+Two ways out for a namespaced target, and the second is usually better in a homelab you did not want cluster-wide RBAC in:
 
 - `helm upgrade ... --set rbac.clusterWide=true`
 - Move the Automation into the target's namespace and drop `target.namespace`. Automations are namespaced precisely so they can live next to what they act on.

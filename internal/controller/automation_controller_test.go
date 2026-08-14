@@ -932,6 +932,116 @@ var _ = Describe("Automation Controller", func() {
 		})
 	})
 
+	// A Node is the first cluster-scoped target, and cordoning is the first
+	// action whose blast radius is the cluster rather than one workload.
+	Context("with a Node", func() {
+		cordon := func(target string, cordoned *bool) reactorv1alpha1.Action {
+			return reactorv1alpha1.Action{
+				Type:     actionKubernetesCordon,
+				Target:   &reactorv1alpha1.TargetRef{Kind: kindNode, Name: target},
+				Cordoned: cordoned,
+			}
+		}
+
+		createNode := func(name string, unschedulable bool) {
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{Name: name},
+				Spec:       corev1.NodeSpec{Unschedulable: unschedulable},
+			}
+			Expect(k8sClient.Create(ctx, node)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, node) })
+		}
+
+		nodeOf := func(name string) corev1.Node {
+			var node corev1.Node
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name}, &node)).To(Succeed())
+			return node
+		}
+
+		It("cordons on entering the state and reopens on leaving it", func() {
+			const (
+				target     = "worker-on-battery"
+				automation = "cordon-on-battery"
+			)
+			createNode(target, false)
+			createAutomation(automation, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyUPS: upsOnBattery},
+				},
+				Actions: []reactorv1alpha1.Action{cordon(target, nil)},
+			})
+
+			observe(map[string]string{keyUPS: upsOnBattery})
+			reconcileOnce(automation)
+			Expect(nodeOf(target).Spec.Unschedulable).To(BeTrue())
+			Expect(nodeOf(target).Annotations).To(HaveKeyWithValue(annotationBaselineUnschedulable, "false"))
+
+			By("addressing a cluster-scoped target without a namespace")
+			status := statusOf(automation)
+			Expect(status.Targets).To(HaveLen(1))
+			Expect(status.Targets[0].Ref).To(Equal("Node/"+target),
+				"a Node has no namespace, so the ref must not invent one")
+			Expect(status.Targets[0].Level).To(Equal("cordoned"))
+
+			By("reopening it once the power returns")
+			observe(map[string]string{keyUPS: upsOnline})
+			reconcileOnce(automation)
+			Expect(nodeOf(target).Spec.Unschedulable).To(BeFalse())
+			Expect(nodeOf(target).Annotations).NotTo(HaveKey(annotationBaselineUnschedulable))
+		})
+
+		It("leaves a node cordoned by hand cordoned", func() {
+			const (
+				target     = "worker-in-maintenance"
+				automation = "cordon-maintenance"
+			)
+			createNode(target, true)
+			createAutomation(automation, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyUPS: upsOnBattery},
+				},
+				Actions: []reactorv1alpha1.Action{cordon(target, nil)},
+			})
+
+			observe(map[string]string{keyUPS: upsOnBattery})
+			reconcileOnce(automation)
+			Expect(nodeOf(target).Annotations).To(HaveKeyWithValue(annotationBaselineUnschedulable, "true"))
+
+			By("releasing to what a human chose, not to schedulable")
+			observe(map[string]string{keyUPS: upsOnline})
+			reconcileOnce(automation)
+			Expect(nodeOf(target).Spec.Unschedulable).To(BeTrue(),
+				"restoring the baseline must not quietly undo somebody's maintenance")
+		})
+
+		It("resolves cordoned against schedulable in favour of cordoned", func() {
+			const (
+				target = "worker-contested"
+				sheds  = "cordon-sheds"
+				opens  = "cordon-opens"
+			)
+			createNode(target, false)
+			createAutomation(sheds, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyUPS: upsOnBattery},
+				},
+				Actions: []reactorv1alpha1.Action{cordon(target, nil)},
+			})
+			open := false
+			createAutomation(opens, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
+				},
+				Actions: []reactorv1alpha1.Action{cordon(target, &open)},
+			})
+
+			observe(map[string]string{keyUPS: upsOnBattery, keyWAN: wanBackup})
+			reconcileOnce(opens)
+			Expect(nodeOf(target).Spec.Unschedulable).To(BeTrue())
+			Expect(statusOf(opens).Targets[0].DeferredBy).To(Equal([]string{testNamespace + "/" + sheds}))
+		})
+	})
+
 	// kubernetes.restart is the first edge action that acts on the cluster
 	// rather than leaving it, and the first non-idempotent action of any kind.
 	Context("with a restart", func() {

@@ -69,6 +69,16 @@ const (
 	// running alone: declining to start more work is a different and far safer
 	// act than killing work in flight.
 	actionCronJobSuspend = "kubernetes.cronjob.suspend"
+	// actionKubernetesCordon holds a Node at schedulable or unschedulable. It is
+	// desired-state for the same reason suspend is: schedulable is a level, it
+	// is reversible, and applying it twice is applying it once.
+	//
+	// Its sibling in #18, kubernetes.drain, is deliberately not here and is not
+	// implemented anywhere. See docs/spec.md for the reasoning; the short form
+	// is that an eviction cannot be un-evicted, so a drain has no level to
+	// arbitrate, no reversal to declare, and no way to be a pure function of
+	// which conditions currently hold.
+	actionKubernetesCordon = "kubernetes.cordon"
 	// actionKubernetesRestart rolls a workload's pods, the way `kubectl rollout
 	// restart` does. It is an edge action: a restart is an occurrence, not a
 	// level — there is no value a target can be held at that means "restarted",
@@ -156,8 +166,9 @@ func retryBackoff(attempts int32) time.Duration {
 // The rule for a new action type: if you cannot define a meet with an identity
 // element for it, it is an edge action and belongs out of this map.
 var desiredStateActions = map[string]bool{
-	actionKubernetesScale: true,
-	actionCronJobSuspend:  true,
+	actionKubernetesScale:  true,
+	actionCronJobSuspend:   true,
+	actionKubernetesCordon: true,
 }
 
 func isDesiredState(actionType string) bool {
@@ -205,6 +216,15 @@ type AutomationReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments/scale;statefulsets/scale,verbs=get;update
 // +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;patch
+//
+// Nodes are deliberately NOT marked here, even though kubernetes.cordon targets
+// them. These markers generate config/rbac/role.yaml, which is granted
+// unconditionally by `make deploy` and by the manifest bundle — and node access
+// is the one grant in this operator that reaches outside the workloads it was
+// installed to manage, so it must be something an install opts into rather than
+// something every install carries. The chart renders it under
+// rbac.allowNodeActions; the bundle does not offer it at all, and an Automation
+// that needs it says so in its status.
 // mgr.GetEventRecorder returns the events.k8s.io/v1 recorder, not the deprecated
 // core/v1 one. They share storage but are separate API groups for authorization,
 // and a rule naming only "" fails every emission with a Forbidden the broadcaster

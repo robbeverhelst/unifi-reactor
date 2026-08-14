@@ -91,9 +91,8 @@ func (r *AutomationReconciler) runClusterAction(
 	name := types.NamespacedName{Namespace: key.Namespace, Name: key.Name}
 	if err := r.Get(ctx, name, target); err != nil {
 		if outOfScope(err) {
-			return result, fmt.Errorf(
-				"target %s not reachable with current RBAC (cross-namespace targets need cluster-wide permissions): %w",
-				key, err)
+			return result, fmt.Errorf("target %s not reachable with current RBAC (%s): %w",
+				key, permissionHint(key.Kind), err)
 		}
 		return result, fmt.Errorf("getting target %s: %w", key, err)
 	}

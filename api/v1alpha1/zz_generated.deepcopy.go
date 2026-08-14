@@ -43,6 +43,11 @@ func (in *Action) DeepCopyInto(out *Action) {
 		*out = new(bool)
 		**out = **in
 	}
+	if in.Cordoned != nil {
+		in, out := &in.Cordoned, &out.Cordoned
+		*out = new(bool)
+		**out = **in
+	}
 	if in.Request != nil {
 		in, out := &in.Request, &out.Request
 		*out = new(HTTPRequest)

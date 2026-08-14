@@ -111,6 +111,52 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "reactor.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+{{- if .Values.rbac.allowNodeActions }}
+---
+# kubernetes.cordon, and nothing else. Off unless rbac.allowNodeActions is set,
+# because this is the one grant here that reaches outside the workloads Reactor
+# was installed to manage.
+#
+# It is a ClusterRole in BOTH RBAC modes, and it has to be: Nodes are
+# cluster-scoped, and a namespaced Role cannot grant access to them at all. So
+# turning this on in a namespace-scoped install is a real widening of the
+# operator's reach, not a formality — it is the reason this is a separate
+# object with its own value rather than three more lines in the rule list above.
+#
+# What it does and does not permit:
+#   - patch on nodes lets Reactor set spec.unschedulable and write its own
+#     baseline and claim annotations. It also lets it write any other node
+#     label or annotation, which is not a permission Kubernetes lets us split
+#     more finely, and is the honest cost of this feature.
+#   - It grants nothing over pods and nothing over pods/eviction, so Reactor
+#     cannot drain a node however it is configured. That action is not
+#     implemented, and this is the second lock on it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "reactor.fullname" . }}-node-actions
+  labels:
+    {{- include "reactor.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "reactor.fullname" . }}-node-actions
+  labels:
+    {{- include "reactor.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "reactor.fullname" . }}-node-actions
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "reactor.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
 ---
 # Leader election needs lease access in the release namespace in both modes.
 apiVersion: rbac.authorization.k8s.io/v1

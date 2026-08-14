@@ -48,6 +48,8 @@ const (
 	// tokenReviews is how the metrics endpoint's authn/authz filter appears in
 	// the rendered RBAC.
 	tokenReviews = "tokenreviews"
+	// nodesRule is how kubernetes.cordon's opt-in permission appears.
+	nodesRule = `resources: ["nodes"]`
 	// clusterWide and namespaced are the two RBAC modes. Anything the operator
 	// is granted has to be checked in both, because they render as different
 	// object kinds from the same rule list.
@@ -144,6 +146,62 @@ func readSpec(t *testing.T, path string) string {
 	// The chart copy ends with the Helm guard; the generated one does not.
 	spec, _, _ = strings.Cut(spec, "\n{{- end }}")
 	return strings.TrimSpace(spec)
+}
+
+// celReservedWords are the identifiers CEL reserves. Kubernetes exposes a
+// schema property whose name collides with one only under an escaped name
+// (__namespace__ for namespace), and a rule that spells it plainly does not
+// fail validation — it fails to COMPILE, which the API server reports by
+// rejecting the entire CustomResourceDefinition.
+//
+// See https://kubernetes.io/docs/reference/using-api/cel/#escaping.
+var celReservedWords = []string{
+	"as", "break", "const", "continue", "else", "false", "for", "function",
+	"if", "import", "in", "let", "loop", "namespace", "null", "package",
+	"return", "true", "var", "void", "while",
+}
+
+// stringLiteral matches a CEL single-quoted literal, which is stripped before
+// scanning so that a reserved word inside a message or a compared value —
+// 'notification.' has no reserved word, but a future rule's might — cannot be
+// mistaken for a field select.
+var stringLiteral = regexp.MustCompile(`'[^']*'`)
+
+// TestCELRulesEscapeReservedWords guards a failure mode that no other test in
+// this repository can reach.
+//
+// A CEL rule is compiled by the API server and nowhere else. Get one wrong and
+// the CRD is rejected whole — every field, not just the offending rule — so an
+// install or upgrade fails outright and takes the operator down with it. Go
+// vet, the unit suites and `helm template` all pass regardless, because none of
+// them compiles CEL. This test cannot compile it either, but it can check the
+// one mistake that is easy to make and expensive to discover: selecting a
+// property whose name is a CEL reserved word without escaping it.
+//
+// Found the hard way. `has(self.namespace)` on TargetRef was correct-looking,
+// passed everything local, and was rejected by the API server the moment the
+// e2e suite tried to install the chart.
+func TestCELRulesEscapeReservedWords(t *testing.T) {
+	crd, err := os.ReadFile(filepath.Join("..", "..", "config", "crd", "bases",
+		"reactor.robbeverhelst.com_automations.yaml"))
+	if err != nil {
+		t.Fatalf("reading the generated CRD: %v", err)
+	}
+
+	rules := regexp.MustCompile(`(?m)^\s*(?:- )?rule: (.*)$`).FindAllStringSubmatch(string(crd), -1)
+	if len(rules) == 0 {
+		t.Fatal("no x-kubernetes-validations rules found; this test is checking nothing")
+	}
+	for _, match := range rules {
+		rule := stringLiteral.ReplaceAllString(match[1], "''")
+		for _, word := range celReservedWords {
+			unescaped := regexp.MustCompile(`\.` + word + `\b`)
+			if unescaped.MatchString(rule) {
+				t.Errorf("rule selects the CEL reserved word %q unescaped, so the API server "+
+					"will refuse the whole CRD; write __%s__ instead:\n  %s", word, word, match[1])
+			}
+		}
+	}
 }
 
 // TestLogLevelIsSettable covers the knob that makes the V(1) observation lines
@@ -575,6 +633,39 @@ func TestTargetKindsAreGrantedInBothRBACModes(t *testing.T) {
 				if !regexp.MustCompile(resources + `\n\s+` + verbs).MatchString(manifests) {
 					t.Errorf("%s is not granted exactly %s", resources, verbs)
 				}
+			}
+		})
+	}
+}
+
+// TestNodeActionsAreOptIn pins the gate on the one permission Reactor asks for
+// that reaches outside the workloads it was installed to manage.
+//
+// Two properties, and the second is the one that would be easy to lose. Node
+// RBAC must be absent by default in both modes. And when it is turned on it
+// must grant nodes and nothing else — in particular nothing over pods or
+// pods/eviction, because kubernetes.drain is deliberately not implemented and
+// this is the second lock on it.
+func TestNodeActionsAreOptIn(t *testing.T) {
+	for _, mode := range rbacModes {
+		t.Run(mode, func(t *testing.T) {
+			if strings.Contains(render(t, unifiURL, mode), nodesRule) {
+				t.Fatal("node RBAC is granted by default; kubernetes.cordon must be opted into")
+			}
+
+			enabled := render(t, unifiURL, mode, "rbac.allowNodeActions=true")
+			if !strings.Contains(enabled, nodesRule) {
+				t.Fatal("rbac.allowNodeActions=true granted no access to nodes")
+			}
+			// Cluster-scoped in both modes, because a namespaced Role cannot
+			// grant access to a cluster-scoped resource at all.
+			if !strings.Contains(enabled, "kind: ClusterRole\nmetadata:\n  name: reactor-node-actions") {
+				t.Error("node RBAC is not a ClusterRole, so it cannot reach a cluster-scoped resource")
+			}
+			// A rule, not a mention: the template's own comments name
+			// pods/eviction to say it is deliberately absent.
+			if pods := regexp.MustCompile(`resources: \[[^\]]*"pods`); pods.MatchString(enabled) {
+				t.Error("enabling node actions granted access to pods; draining is not an action Reactor has")
 			}
 		})
 	}

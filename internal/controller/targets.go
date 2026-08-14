@@ -24,6 +24,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -39,6 +40,7 @@ const (
 	kindDeployment  = "Deployment"
 	kindStatefulSet = "StatefulSet"
 	kindCronJob     = "CronJob"
+	kindNode        = "Node"
 )
 
 // fieldSpec is the top of every path below. Spelled once because a typo in it
@@ -79,6 +81,11 @@ const (
 	// annotationBaselineSuspend records whether a CronJob was suspended before
 	// Reactor first claimed it, as "true" or "false".
 	annotationBaselineSuspend = "reactor.robbeverhelst.com/baseline-suspend"
+	// annotationBaselineUnschedulable records whether a Node was cordoned before
+	// Reactor first claimed it, as "true" or "false". It matters more here than
+	// anywhere else: a node cordoned by hand for maintenance must come back
+	// cordoned, or Reactor's release would quietly undo a human's decision.
+	annotationBaselineUnschedulable = "reactor.robbeverhelst.com/baseline-unschedulable"
 	// annotationClaimedBy names the Automations currently holding the target.
 	// Advisory: refreshed on every claim, never read back as truth. It exists
 	// so that describing a target explains why it is scaled to zero.
@@ -92,6 +99,7 @@ const (
 var claimAnnotations = []string{
 	annotationBaselineReplicas,
 	annotationBaselineSuspend,
+	annotationBaselineUnschedulable,
 	annotationClaimedBy,
 	annotationClaimedAt,
 }
@@ -108,6 +116,10 @@ type targetHandler struct {
 	// than a typed one so that no path here has to enumerate kinds, and
 	// uncached, so a target kind costs no informer and needs no list or watch.
 	gvk schema.GroupVersionKind
+
+	// clusterScoped marks a kind that has no namespace, so a target ref naming
+	// one is never silently defaulted into the Automation's own.
+	clusterScoped bool
 
 	// baseline is the annotation this kind's pre-claim level is recorded in.
 	baseline string
@@ -146,6 +158,27 @@ var handlers = map[string]targetHandler{
 		actionCronJobSuspend,
 		"suspended", "running",
 	),
+	kindNode: clusterScopedHandler(switchHandler(
+		corev1.SchemeGroupVersion.WithKind(kindNode),
+		[]string{fieldSpec, "unschedulable"},
+		annotationBaselineUnschedulable,
+		actionKubernetesCordon,
+		"cordoned", "schedulable",
+	)),
+}
+
+// clusterScopedHandler marks a handler's kind as having no namespace.
+func clusterScopedHandler(handler targetHandler) targetHandler {
+	handler.clusterScoped = true
+	return handler
+}
+
+// clusterScopedKind reports whether a target kind has no namespace. An
+// unrecognised kind is treated as namespaced, which is the safe answer: it will
+// fail at handlerFor with a clear message rather than being looked up at the
+// wrong scope.
+func clusterScopedKind(kind string) bool {
+	return handlers[kind].clusterScoped
 }
 
 // handlerFor resolves a target kind. It fails rather than defaulting: a kind
@@ -330,6 +363,8 @@ func levelOfAction(action reactorv1alpha1.Action) (int64, bool) {
 		return int64(*action.Replicas), true
 	case actionCronJobSuspend:
 		return levelOfFlag(action.Suspended == nil || *action.Suspended), true
+	case actionKubernetesCordon:
+		return levelOfFlag(action.Cordoned == nil || *action.Cordoned), true
 	default:
 		return 0, false
 	}

@@ -571,6 +571,55 @@ permission over Jobs at all: declining to start more work is a categorically
 safer act than killing work in flight, and deleting in-flight Jobs is not
 something an outage should decide on the operator's behalf.
 
+#### Cordon — and why there is no drain
+
+`kubernetes.cordon` is shipped, as a desired-state action behind an explicit
+chart opt-in:
+
+```yaml
+- type: kubernetes.cordon
+  target:
+    kind: Node
+    name: worker-03
+  cordoned: true         # optional; true is the default
+```
+
+`spec.unschedulable` is a level, ordered so that cordoned is the restrictive
+answer, so it folds like every other level and needs no new rule. It is the
+first cluster-scoped target, which is why `target.namespace` is rejected on a
+`Node` rather than defaulted.
+
+`kubernetes.drain` — proposed in #18 alongside it — is **deliberately not
+implemented**. Not deferred behind a flag, not implemented with a timeout: not
+built. The reasoning, because a well-evidenced "no" is worth more here than a
+dangerous feature:
+
+1. **An eviction cannot be reversed, so it cannot be a level.** Every action in
+   this design declares a value that is a pure function of which conditions
+   currently hold — that is what makes the outcome independent of reconcile
+   order, a controller restart harmless, and `onExit` expressible. A drain has
+   no such value. There is no state a node can be held at that means "drained",
+   nothing for `spec.reversal` to declare, and nothing for a later reconcile to
+   correct. A flapping key would empty the node once per flap.
+2. **It inverts its own goal on a small cluster.** Draining assumes spare
+   capacity elsewhere. On three nodes behind one UPS the evicted pods do not
+   move, they go Pending — so the workload is lost at the moment of the drain
+   rather than at the moment the battery dies. Cordoning delivers the actual
+   benefit (new pods land on the node still on mains) without that cost.
+3. **It can evict the operator performing it**, if Reactor's own pod is on the
+   node. Nothing else here can kill the thing doing and reporting the work,
+   mid-action.
+4. **It hangs by design.** Eviction respects PodDisruptionBudgets, and a
+   single-replica workload with `minAvailable: 1` blocks indefinitely. A
+   timeout bounds the call; it does not bound a half-drained node.
+
+The RBAC follows the decision rather than merely reflecting it:
+`rbac.allowNodeActions` grants `nodes` and nothing over `pods` or
+`pods/eviction`, under any setting. An operator whose plan genuinely needs a
+drain should pair `kubernetes.cordon` with a notification and run `kubectl
+drain` by hand — an irreversible cluster-wide decision at 3am is the right
+place for a human.
+
 #### Patch resource
 
 Potential future action:
@@ -781,6 +830,15 @@ cluster-admin
 
 unless there is a compelling reason.
 
+Anything reaching outside the workloads Reactor was installed to manage is
+opt-in rather than default, and is a separate object so that turning it on is a
+visible decision. `kubernetes.cordon` is the only such permission today: nodes
+are cluster-scoped, so `rbac.allowNodeActions` creates a ClusterRole even in a
+namespace-scoped install, and the chart says so where the value is set. The
+generated `config/rbac/role.yaml` deliberately does not carry it, so the
+manifest bundle grants no node access at all.
+
+Document how users can restrict Reactor's permissions.
 
 ## Observability
 

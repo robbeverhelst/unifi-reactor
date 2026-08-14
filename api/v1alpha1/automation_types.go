@@ -36,6 +36,17 @@ type StateTrigger struct {
 }
 
 // TargetRef identifies the Kubernetes object an action operates on.
+//
+// The cluster-scope rule below reads __namespace__ rather than namespace, and
+// has to: namespace is a CEL reserved word, so Kubernetes exposes the property
+// under its escaped name. Written the obvious way the rule does not fail at
+// admission — it fails to compile, which makes the whole CRD unapplyable and
+// takes every other field down with it. No unit test catches that, because a
+// CRD is only compiled by a real API server; the e2e suites are what found it.
+//
+// It lives on TargetRef rather than on Action because the constraint is a
+// property of a target reference, not of any particular action that holds one.
+// +kubebuilder:validation:XValidation:rule="self.kind != 'Node' || !has(self.__namespace__)",message="target.namespace: a Node is cluster-scoped and takes no namespace"
 type TargetRef struct {
 	// Kind of the target resource.
 	//
@@ -52,7 +63,7 @@ type TargetRef struct {
 	// Automation was written for, instead of a rejected write at admission.
 	// Adding a kind is an entry here and a rule in the chart, and no executor
 	// code either way.
-	// +kubebuilder:validation:Enum=Deployment;StatefulSet;CronJob
+	// +kubebuilder:validation:Enum=Deployment;StatefulSet;CronJob;Node
 	Kind string `json:"kind"`
 
 	// Name of the target resource.
@@ -62,6 +73,9 @@ type TargetRef struct {
 	// Namespace of the target resource. Defaults to the Automation's own
 	// namespace. Cross-namespace targets require the controller to run with
 	// cluster-wide RBAC; otherwise the Automation reports Ready=False.
+	//
+	// Rejected on a cluster-scoped kind. A Node addressed inside a namespace is
+	// not a different Node, it is a lookup that cannot succeed.
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
 }
@@ -191,19 +205,21 @@ type Notification struct {
 //
 // A desired-state action's level is an integer the arbiter orders and nothing
 // more, so a boolean level is carried as its own field — replicas for a count,
-// suspended for a switch — rather than by overloading one of them. The units
-// differ; the ordering does not.
+// suspended and cordoned for a switch — rather than by overloading one of them.
+// The units differ; the ordering does not.
 // +kubebuilder:validation:XValidation:rule="(self.type == 'http.request') == has(self.request)",message="spec.actions: request is required by http.request and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type.startsWith('notification.') == has(self.notification)",message="spec.actions: notification is required by the notification.* types and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type.startsWith('kubernetes.') == has(self.target)",message="spec.actions: target is required by the kubernetes.* actions and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type == 'kubernetes.scale' || !has(self.replicas)",message="spec.actions: replicas belongs to kubernetes.scale"
 // +kubebuilder:validation:XValidation:rule="self.type == 'kubernetes.cronjob.suspend' || !has(self.suspended)",message="spec.actions: suspended belongs to kubernetes.cronjob.suspend"
+// +kubebuilder:validation:XValidation:rule="self.type == 'kubernetes.cordon' || !has(self.cordoned)",message="spec.actions: cordoned belongs to kubernetes.cordon"
+// +kubebuilder:validation:XValidation:rule="!has(self.target) || self.type != 'kubernetes.cordon' || self.target.kind == 'Node'",message="spec.actions: kubernetes.cordon targets a Node"
 // +kubebuilder:validation:XValidation:rule="!has(self.target) || self.type != 'kubernetes.scale' || self.target.kind in ['Deployment', 'StatefulSet']",message="spec.actions: kubernetes.scale targets a kind with a scale subresource: Deployment or StatefulSet"
 // +kubebuilder:validation:XValidation:rule="!has(self.target) || self.type != 'kubernetes.cronjob.suspend' || self.target.kind == 'CronJob'",message="spec.actions: kubernetes.cronjob.suspend targets a CronJob"
 // +kubebuilder:validation:XValidation:rule="!has(self.target) || self.type != 'kubernetes.restart' || self.target.kind in ['Deployment', 'StatefulSet']",message="spec.actions: kubernetes.restart targets a kind with a pod template: Deployment or StatefulSet"
 type Action struct {
 	// Type of the action, e.g. "kubernetes.scale".
-	// +kubebuilder:validation:Enum=kubernetes.scale;kubernetes.cronjob.suspend;kubernetes.restart;http.request;notification.ntfy;notification.discord;notification.slack
+	// +kubebuilder:validation:Enum=kubernetes.scale;kubernetes.cronjob.suspend;kubernetes.cordon;kubernetes.restart;http.request;notification.ntfy;notification.discord;notification.slack
 	Type string `json:"type"`
 
 	// Target of a kubernetes.* action.
@@ -225,6 +241,22 @@ type Action struct {
 	// deletion is not something an outage should decide on your behalf.
 	// +optional
 	Suspended *bool `json:"suspended,omitempty"`
+
+	// Cordoned is whether kubernetes.cordon wants the target Node closed to new
+	// scheduling. Omitting it means true, which is what the action is named
+	// after; write cordoned: false in spec.onExit to reopen it explicitly.
+	//
+	// Cordoning stops new Pods being scheduled onto the Node and moves nothing
+	// that is already running. Evicting those — draining — is not offered, and
+	// not because it was not built: an eviction cannot be reversed, so it has no
+	// level to arbitrate and no reversal to declare, which is the one property
+	// every other action here has. See docs/spec.md.
+	//
+	// Node actions need cluster-scoped RBAC that the chart grants only when
+	// rbac.allowNodeActions is set. Without it the Automation reports the target
+	// as unreachable and names the value to set.
+	// +optional
+	Cordoned *bool `json:"cordoned,omitempty"`
 
 	// Request describes the outbound call an http.request action makes.
 	// +optional

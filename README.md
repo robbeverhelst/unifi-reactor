@@ -127,16 +127,41 @@ Scaling cannot express "do not start the nightly backup tonight" — that is `sp
 
 **Suspending stops new Jobs being created and does nothing to a Job already running.** That is deliberate, and Reactor is not granted any permission over Jobs at all, so it could not delete one if it wanted to: declining to start more work is a very different act from killing work in flight, and killing work in flight is not a decision an outage should make on your behalf. If a running backup is what you need stopped, stop it yourself.
 
+### Closing a node to new work
+
+The endgame of a power cut is a graceful shutdown, not a hard cut. Cordoning a worker running on a dying battery stops new pods landing there, so replacements come up on the node still on mains:
+
+```yaml
+  actions:
+    - type: kubernetes.cordon
+      target: { kind: Node, name: worker-03 }
+```
+
+Cordoning is desired-state, like scaling: `spec.unschedulable` is a level, `cordoned` wins over `schedulable` in a fold, and applying it twice is applying it once. `cordoned` defaults to `true`; write `cordoned: false` in `onExit` to reopen explicitly, or omit `onExit` and Reactor restores what it found — **including leaving a node cordoned that you had already cordoned by hand.**
+
+> **It is opt-in, and it is the only permission Reactor asks for that reaches outside the workloads you installed it to manage.** Nodes are cluster-scoped, so `--set rbac.allowNodeActions=true` creates a `ClusterRole` *even in a namespace-scoped install*. It grants `get` and `patch` on nodes; Kubernetes cannot narrow `patch` to one field, so that also permits writing node labels and annotations. Decide whether that is worth it before turning it on. Without it, an automation using `kubernetes.cordon` reports the node as unreachable and names the value to set. The manifest bundle (`install.yaml`) does not offer it at all.
+
+#### Why there is no `kubernetes.drain`
+
+Draining was proposed alongside cordoning and is **deliberately not implemented** — not deferred, not behind a flag. Four reasons, and the first is the one that decides it:
+
+1. **An eviction cannot be un-evicted.** Every other action here declares a *level* that is a pure function of which conditions currently hold, which is what makes the outcome independent of ordering and a controller restart harmless. A drain has no such value: there is no state a node can be held at that means "drained", `onExit` cannot express undoing it, and a flapping key would empty the node again on every flap with nothing to correct it.
+2. **In a small cluster it makes things worse.** Draining assumes somewhere else to go. In a three-node homelab on one UPS, the evicted pods do not reschedule — they go `Pending`, so you lose the workload *before* the battery runs out instead of when it does. Cordoning gets the actual benefit here without that cost.
+3. **It can evict the operator.** If Reactor's own pod is on the node being drained, the action kills the thing performing and reporting it, mid-action. Nothing else Reactor does can do that.
+4. **It hangs, by design.** Eviction respects PodDisruptionBudgets, and a single-replica workload with `minAvailable: 1` blocks forever. That is a bounded-timeout problem on paper and an unbounded blast-radius problem in practice.
+
+So the RBAC that would make it possible is not granted under any setting: `rbac.allowNodeActions` gives access to `nodes` and nothing to `pods` or `pods/eviction`. If your outage plan genuinely needs a drain, `kubernetes.cordon` plus a `notification.*` telling you to run `kubectl drain` yourself is the honest shape — a human is the right thing to make an irreversible cluster-wide decision at 3am.
+
 ### The two shapes an action has
 
 | | Declares | Arbitrated? | Types |
 | --- | --- | --- | --- |
-| **Desired-state** | a *level* — what a target should be | yes, continuously across every automation sharing the target | `kubernetes.scale`, `kubernetes.cronjob.suspend` |
+| **Desired-state** | a *level* — what a target should be | yes, continuously across every automation sharing the target | `kubernetes.scale`, `kubernetes.cronjob.suspend`, `kubernetes.cordon` |
 | **Edge** | an *occurrence* | no — fires on this automation's own transition and owns nothing | `kubernetes.restart`, `http.request`, `notification.*` |
 
 `kubernetes.scale` works through the [scale subresource](https://kubernetes.io/docs/reference/using-api/api-concepts/#subresources), so `kind: Deployment` and `kind: StatefulSet` take the same path and Reactor never has to know where a kind keeps its replicas. `target.kind` is still a closed list, on purpose: a kind is only reachable if the chart granted RBAC for it, and RBAC has to name resources explicitly — so an open field would turn a typo into a `Forbidden` discovered *during* the outage, instead of a rejected write at admission.
 
-A level is ordered and nothing else: **lower is more restrictive, and a shared target resolves to the lowest anyone asked for.** For `kubernetes.scale` that is the replica count, so shedding wins. For `kubernetes.cronjob.suspend` it is a switch, ordered so that *suspended* is the restrictive answer — which means suspended wins over running for exactly the same reason 0 replicas wins over 3, and with no new rule to learn. `status.targets[].level` says which in words.
+A level is ordered and nothing else: **lower is more restrictive, and a shared target resolves to the lowest anyone asked for.** For `kubernetes.scale` that is the replica count, so shedding wins. For `kubernetes.cronjob.suspend` and `kubernetes.cordon` it is a switch, ordered so that *suspended* and *cordoned* are the restrictive answers — which means suspended wins over running for exactly the same reason 0 replicas wins over 3, and with no new rule to learn. `status.targets[].level` says which in words.
 
 ### Restarting a workload
 

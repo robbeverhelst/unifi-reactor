@@ -53,12 +53,21 @@ func (k targetKey) String() string {
 
 // targetKeyFor resolves an action's target, defaulting the namespace to the
 // Automation's own — the same defaulting the API documents.
+//
+// A cluster-scoped kind gets no namespace at all, not even a defaulted one. The
+// CRD rejects a namespace on one, and this is the second half of that rule: a
+// Node addressed inside a namespace is not a different Node, it is a read that
+// fails, and the failure would be reported as an unreachable target rather than
+// as the mistake it is.
 func targetKeyFor(automation *reactorv1alpha1.Automation, action reactorv1alpha1.Action) (targetKey, bool) {
 	if action.Target == nil {
 		return targetKey{}, false
 	}
 	namespace := action.Target.Namespace
-	if namespace == "" {
+	switch {
+	case clusterScopedKind(action.Target.Kind):
+		namespace = ""
+	case namespace == "":
 		namespace = automation.Namespace
 	}
 	return targetKey{Kind: action.Target.Kind, Namespace: namespace, Name: action.Target.Name}, true
@@ -173,6 +182,18 @@ func baselineOf(handler targetHandler, obj *unstructured.Unstructured) (level *i
 	return &parsed, true
 }
 
+// permissionHint names what an unreachable target would have needed. The two
+// ways it happens have different fixes, and the person reading this cannot see
+// the operator's RBAC: a namespaced target is a scope problem, while a node is
+// a feature the install has to opt into and would otherwise look like a bug in
+// the automation rather than a value that was never set.
+func permissionHint(kind string) string {
+	if clusterScopedKind(kind) {
+		return "node actions are opt-in: install with rbac.allowNodeActions=true"
+	}
+	return "cross-namespace targets need cluster-wide permissions"
+}
+
 // outOfScope reports whether a target could not be read because Reactor is not
 // allowed to see it, in either of the two ways that happens.
 //
@@ -237,9 +258,8 @@ func (r *AutomationReconciler) reconcileTarget(
 	name := types.NamespacedName{Namespace: key.Namespace, Name: key.Name}
 	if err := r.Get(ctx, name, target); err != nil {
 		if outOfScope(err) {
-			return outcome, fmt.Errorf(
-				"target %s not reachable with current RBAC (cross-namespace targets need cluster-wide permissions): %w",
-				key, err)
+			return outcome, fmt.Errorf("target %s not reachable with current RBAC (%s): %w",
+				key, permissionHint(key.Kind), err)
 		}
 		return outcome, fmt.Errorf("getting target %s: %w", key, err)
 	}

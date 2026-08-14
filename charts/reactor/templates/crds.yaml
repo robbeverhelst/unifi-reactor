@@ -89,9 +89,25 @@ spec:
 
                     A desired-state action's level is an integer the arbiter orders and nothing
                     more, so a boolean level is carried as its own field — replicas for a count,
-                    suspended for a switch — rather than by overloading one of them. The units
-                    differ; the ordering does not.
+                    suspended and cordoned for a switch — rather than by overloading one of them.
+                    The units differ; the ordering does not.
                   properties:
+                    cordoned:
+                      description: |-
+                        Cordoned is whether kubernetes.cordon wants the target Node closed to new
+                        scheduling. Omitting it means true, which is what the action is named
+                        after; write cordoned: false in spec.onExit to reopen it explicitly.
+
+                        Cordoning stops new Pods being scheduled onto the Node and moves nothing
+                        that is already running. Evicting those — draining — is not offered, and
+                        not because it was not built: an eviction cannot be reversed, so it has no
+                        level to arbitrate and no reversal to declare, which is the one property
+                        every other action here has. See docs/spec.md.
+
+                        Node actions need cluster-scoped RBAC that the chart grants only when
+                        rbac.allowNodeActions is set. Without it the Automation reports the target
+                        as unreachable and names the value to set.
+                      type: boolean
                     notification:
                       description: Notification is the message a notification.* action
                         sends.
@@ -257,6 +273,7 @@ spec:
                           - Deployment
                           - StatefulSet
                           - CronJob
+                          - Node
                           type: string
                         name:
                           description: Name of the target resource.
@@ -267,11 +284,18 @@ spec:
                             Namespace of the target resource. Defaults to the Automation's own
                             namespace. Cross-namespace targets require the controller to run with
                             cluster-wide RBAC; otherwise the Automation reports Ready=False.
+
+                            Rejected on a cluster-scoped kind. A Node addressed inside a namespace is
+                            not a different Node, it is a lookup that cannot succeed.
                           type: string
                       required:
                       - kind
                       - name
                       type: object
+                      x-kubernetes-validations:
+                      - message: 'target.namespace: a Node is cluster-scoped and takes
+                          no namespace'
+                        rule: self.kind != 'Node' || !has(self.__namespace__)
                     timeoutSeconds:
                       description: |-
                         TimeoutSeconds bounds a single attempt at this action, so an
@@ -288,6 +312,7 @@ spec:
                       enum:
                       - kubernetes.scale
                       - kubernetes.cronjob.suspend
+                      - kubernetes.cordon
                       - kubernetes.restart
                       - http.request
                       - notification.ntfy
@@ -311,6 +336,11 @@ spec:
                     rule: self.type == 'kubernetes.scale' || !has(self.replicas)
                   - message: 'spec.actions: suspended belongs to kubernetes.cronjob.suspend'
                     rule: self.type == 'kubernetes.cronjob.suspend' || !has(self.suspended)
+                  - message: 'spec.actions: cordoned belongs to kubernetes.cordon'
+                    rule: self.type == 'kubernetes.cordon' || !has(self.cordoned)
+                  - message: 'spec.actions: kubernetes.cordon targets a Node'
+                    rule: '!has(self.target) || self.type != ''kubernetes.cordon''
+                      || self.target.kind == ''Node'''
                   - message: 'spec.actions: kubernetes.scale targets a kind with a
                       scale subresource: Deployment or StatefulSet'
                     rule: '!has(self.target) || self.type != ''kubernetes.scale''
@@ -344,9 +374,25 @@ spec:
 
                     A desired-state action's level is an integer the arbiter orders and nothing
                     more, so a boolean level is carried as its own field — replicas for a count,
-                    suspended for a switch — rather than by overloading one of them. The units
-                    differ; the ordering does not.
+                    suspended and cordoned for a switch — rather than by overloading one of them.
+                    The units differ; the ordering does not.
                   properties:
+                    cordoned:
+                      description: |-
+                        Cordoned is whether kubernetes.cordon wants the target Node closed to new
+                        scheduling. Omitting it means true, which is what the action is named
+                        after; write cordoned: false in spec.onExit to reopen it explicitly.
+
+                        Cordoning stops new Pods being scheduled onto the Node and moves nothing
+                        that is already running. Evicting those — draining — is not offered, and
+                        not because it was not built: an eviction cannot be reversed, so it has no
+                        level to arbitrate and no reversal to declare, which is the one property
+                        every other action here has. See docs/spec.md.
+
+                        Node actions need cluster-scoped RBAC that the chart grants only when
+                        rbac.allowNodeActions is set. Without it the Automation reports the target
+                        as unreachable and names the value to set.
+                      type: boolean
                     notification:
                       description: Notification is the message a notification.* action
                         sends.
@@ -512,6 +558,7 @@ spec:
                           - Deployment
                           - StatefulSet
                           - CronJob
+                          - Node
                           type: string
                         name:
                           description: Name of the target resource.
@@ -522,11 +569,18 @@ spec:
                             Namespace of the target resource. Defaults to the Automation's own
                             namespace. Cross-namespace targets require the controller to run with
                             cluster-wide RBAC; otherwise the Automation reports Ready=False.
+
+                            Rejected on a cluster-scoped kind. A Node addressed inside a namespace is
+                            not a different Node, it is a lookup that cannot succeed.
                           type: string
                       required:
                       - kind
                       - name
                       type: object
+                      x-kubernetes-validations:
+                      - message: 'target.namespace: a Node is cluster-scoped and takes
+                          no namespace'
+                        rule: self.kind != 'Node' || !has(self.__namespace__)
                     timeoutSeconds:
                       description: |-
                         TimeoutSeconds bounds a single attempt at this action, so an
@@ -543,6 +597,7 @@ spec:
                       enum:
                       - kubernetes.scale
                       - kubernetes.cronjob.suspend
+                      - kubernetes.cordon
                       - kubernetes.restart
                       - http.request
                       - notification.ntfy
@@ -566,6 +621,11 @@ spec:
                     rule: self.type == 'kubernetes.scale' || !has(self.replicas)
                   - message: 'spec.actions: suspended belongs to kubernetes.cronjob.suspend'
                     rule: self.type == 'kubernetes.cronjob.suspend' || !has(self.suspended)
+                  - message: 'spec.actions: cordoned belongs to kubernetes.cordon'
+                    rule: self.type == 'kubernetes.cordon' || !has(self.cordoned)
+                  - message: 'spec.actions: kubernetes.cordon targets a Node'
+                    rule: '!has(self.target) || self.type != ''kubernetes.cordon''
+                      || self.target.kind == ''Node'''
                   - message: 'spec.actions: kubernetes.scale targets a kind with a
                       scale subresource: Deployment or StatefulSet'
                     rule: '!has(self.target) || self.type != ''kubernetes.scale''
