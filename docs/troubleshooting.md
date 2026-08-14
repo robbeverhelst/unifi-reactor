@@ -62,6 +62,7 @@ status:
 | `DryRun` | `spec.dryRun: true`, or the whole install runs with `safety.dryRun`. Everything is evaluated; nothing is written. | [§14](#14-an-automation-is-not-acting-and-is-telling-you-what-it-would-do) |
 | `ProviderStateUnavailable` | No state has been observed yet for this provider. | [§1](#1-nothing-happens-when-the-state-changes) |
 | `StateKeyUnavailable` | A key this Automation needs vanished from the observation. Last known matching state is held. | [§2](#2-statekeyunavailable-and-held-state) |
+| `ObservationStale` | The console has stopped answering at all, and the last state it gave is older than `unifi.maxObservationAge`. Everything is held and still acted on. | [§2a](#2a-observationstale-and-how-old-a-decision-is-allowed-to-be) |
 | `ActionFailed` | An action returned an error. `status.lastExecution.reason` has the message. | [§5](#5-rbac-refuses-a-cross-namespace-target), [§6](#6-the-crd-invalid-ownership-metadata-or-a-stale-schema) |
 
 `Applied` carries its own reasons, and two of them are not faults: `DeferredToOtherAutomation` is a peer's more restrictive claim winning, and `TargetManagedByHPA` is Reactor declining a target another controller drives — [§15](#15-reactor-and-a-horizontalpodautoscaler-want-the-same-deployment).
@@ -96,7 +97,9 @@ kubectl -n media describe automation pause-downloads-on-backup-wan | tail -20
 | `TargetHeld` / `TargetReleased` | Normal | a write to a target actually happened; the message names the level in words ("0 replicas", "suspended") |
 | `DeferredToOtherAutomation` | Normal | a peer's more restrictive claim won — [§7](#7-two-automations-fighting-over-one-target) |
 | `EdgeActionSent` | Normal | an edge action ran: a notification or HTTP request delivered, or a restart applied |
+| `ReversalDisagreement` | Warning | two Automations declared different `onExit` levels for one target, so they disagree about its normal size — [§7](#the-workload-came-back-at-the-wrong-number) |
 | `StateKeyUnavailable` | Warning | a key vanished and state is being held — [§2](#2-statekeyunavailable-and-held-state) |
+| `ObservationStale` | Warning | the console has stopped answering and decisions are being taken against old state — [§2a](#2a-observationstale-and-how-old-a-decision-is-allowed-to-be) |
 | `ActionFailed` | Warning | a desired-state action could not be applied — [§5](#5-rbac-refuses-a-cross-namespace-target) |
 | `RetryBudgetExhausted` | Warning | Reactor stopped retrying and is waiting for the next state change |
 | `EdgeActionFailed` / `EdgeActionSkipped` | Warning | an edge action did not happen — [§12](#12-a-notification-or-http-request-did-not-arrive) |
@@ -107,6 +110,10 @@ kubectl -n media describe automation pause-downloads-on-backup-wan | tail -20
 
 **Being outvoted is `Normal`, not a Warning.** Two Automations sharing a
 workload and one of them losing is the arbitration working as designed.
+`ReversalDisagreement` is the Warning next to it, and the difference is not
+severity for its own sake: two automations wanting a workload down for different
+reasons are both right, while two declaring different normal sizes for it cannot
+both be — nothing Reactor does resolves that, so somebody has to.
 
 **Events fire on edges, not on states.** A condition that has been held for an
 hour raised one Event when it started, not one every fifteen seconds — so an
@@ -204,6 +211,56 @@ kubectl -n reactor-system logs deploy/reactor | grep 'state observed' | tail -1
 **Fix the hardware, not the Automation.** Re-adopt or power up the device. The key reappears on the next poll and the condition clears on its own. If the device is gone for good, delete or rewrite the Automations that reference its keys — otherwise they hold their last matching state indefinitely, which is exactly what "held" means.
 
 **A worked trap.** The UPS keys are only published when a UniFi UPS is adopted. Writing `when: {ups: on-battery}` with no UPS on the site gives you an Automation that never matches and permanently reports `StateKeyUnavailable`. That is not a bug; it is the operator declining to guess.
+
+---
+
+## 2a. `ObservationStale`, and how old a decision is allowed to be
+
+```text
+Ready  False  ObservationStale
+provider "unifi" has not been observed since 2026-08-14T09:12:41Z, past the 5m0s this
+install allows; still acting on the state it last reported
+```
+
+**What it means.** The console has stopped answering. Not one key missing from a reply — [that is §2](#2-statekeyunavailable-and-held-state) — but no successful reply at all since the timestamp in the message. A failed observation is logged and dropped, because the next poll is the recovery mechanism, so the state Reactor reports is simply the last one it got.
+
+**What Reactor does: exactly what it was doing.** Nothing is released, no `onExit` runs, no target moves. This is deliberate and it is the behaviour you want for the same reason §2 is: the console is often unreachable *because* of the thing the automation is reacting to. Handing workloads back the moment Reactor loses sight of a UPS would bring them up on battery power. So the bound governs what is **said**, never what is **done**.
+
+**Two windows, and only this one is unbounded.** A value that *changed* reaches an automation within `unifi.pollInterval` × that key's debounce samples — 30 seconds for `wan` at the defaults, 90 for `internet`. A console that has gone quiet has no such window at all, which is why it is the one that has to announce itself.
+
+**How old is it?** Every Automation reports the observation its decisions are being taken against, whether or not a bound is set:
+
+```sh
+kubectl get automation -A -o custom-columns=\
+'NAME:.metadata.name,MATCHING:.status.matching,OBSERVED:.status.observedAt'
+```
+
+**Turning the report on.** It is empty by default, which means unbounded:
+
+```sh
+helm upgrade reactor ... --set unifi.maxObservationAge=5m
+```
+
+Set it against `unifi.pollInterval` and the debounce samples rather than in isolation. Anything under about four poll intervals reports a slow console rather than a blind operator.
+
+**Then fix the console, not the Automation.** The cause is in [§3](#3-credentials-and-reachability) — an expired API key, a rebooted gateway, a network policy, a certificate. Every failed attempt logs it:
+
+```sh
+kubectl -n reactor-system logs deploy/reactor | grep 'state observation failed'
+```
+
+The condition clears on its own on the first successful poll; nothing has to be reset.
+
+**The fleet-wide version of the same question** needs no bound and no Automation, but it does need `metrics.enabled`, and somebody looking:
+
+```promql
+time() - reactor_last_observation_timestamp_seconds   # is Reactor still seeing anything
+rate(reactor_stale_decisions_total[15m])              # was it still deciding while it was not
+```
+
+The shipped `ReactorObservationStale` alert is the first of those. The counter is the attributable half: the gauge says Reactor went blind, the counter says automations went on making decisions while it was.
+
+**What it is not.** It is not `ProviderStateUnavailable`, which means nothing has *ever* been observed — a first start against a console that has never answered. An install that has been running for a week and lost its console reports this instead, and keeps its claims.
 
 ---
 
@@ -454,6 +511,38 @@ kubectl -n media get deploy qbittorrent -o jsonpath='{.metadata.annotations}'
 
 **A scale-*up* Automation loses to any scale-down claim on the same target**, because `min` encodes "most restrictive wins". `status.targets[].effective` makes it visible instead of silent. If you need the opposite, that is a design conversation, not a misconfiguration.
 
+### The workload came back at the wrong number
+
+A different failure with the same shape, and the one that is easy to miss because it only shows up *after* the incident is over. Two Automations sharing a target can disagree about what its **normal** size is:
+
+```yaml
+# power/shed-on-battery          # net/pause-on-backup-wan
+onExit: [replicas: 1]            onExit: [replicas: 3]
+```
+
+While either matches, the workload is at 0 and everything above applies. When the last one releases, the reversals are folded the same way live claims are — `min(1, 3) = 1` — and the workload comes back at 1.
+
+**Reactor still takes `min`, and will not guess which number you meant.** What it does is say that the two specs contradict each other, from the moment they do rather than at release:
+
+```sh
+kubectl -n power get automation shed-on-battery -o jsonpath='{.status.targets[0].reversalDisagreement}'
+# [{"claimant":"net/pause-on-backup-wan","desired":3,"level":"3 replicas"},
+#  {"claimant":"power/shed-on-battery","desired":1,"level":"1 replicas"}]
+```
+
+```sh
+# every automation currently contradicting another about a target
+kubectl get automation -A -o json | jq -r '
+  .items[] | .status.targets[]? | select(.reversalDisagreement) |
+  "\(.ref): \([.reversalDisagreement[] | "\(.claimant) wants \(.level)"] | join(", "))"' | sort -u
+```
+
+There is a Warning `Event` with reason `ReversalDisagreement` on each Automation involved, and `reactor_reversal_disagreements_total` for the fleet-wide count.
+
+**Fix it in the specs, not in Reactor.** Decide what the workload's normal size is and write the same number in both, or give one of them `reversal: None` so it contributes no level at all. `None` is never part of a disagreement, and two Automations both on `Baseline` agree by construction — they resolve to the same recorded baseline. The cases reported are `Declared` against `Declared`, and `Declared` against `Baseline`.
+
+**It is a Warning, unlike `DeferredToOtherAutomation`.** Being outvoted on a live claim is two correct policies arbitrating, which is the design working. This is two policies that cannot both be correct, where the value Reactor picks is a tie-break rather than an answer.
+
 **None of this reaches a claimant that is not an Automation.** The fold is over what Reactor can see, so a HorizontalPodAutoscaler on the same Deployment is not resolved — it is fought, unless detection is on. That is [§15](#15-reactor-and-a-horizontalpodautoscaler-want-the-same-deployment), and it looks quite different: a workload that flaps rather than one that settles on a value somebody else asked for.
 
 > The fold, `status.targets[]`, and the target annotations land with the target-ownership change. On v0.3.0 the outcome of two Automations on one target depends on reconcile order.
@@ -508,6 +597,23 @@ kubectl delete crd automations.reactor.robbeverhelst.com
 ```
 
 *Deleting the CRD while Automations still carry finalizers.* Nothing is left to remove them and deletion hangs forever. Clear the finalizers first (the patch above, over every Automation), then delete the CRD.
+
+**And one case where the finalizer fired and could not finish.** Different from the three above: Reactor is running, the finalizer is doing exactly its job, and the release itself keeps failing — the target has been deleted, RBAC changed under it, an admission webhook is refusing the write. Each failed attempt is counted in `status.releaseAttempts` and reported as `Applied=False` with reason `ReleaseFailed`, carrying the error:
+
+```sh
+kubectl -n media get automation pause-downloads-on-backup-wan -o jsonpath=\
+'{.status.releaseAttempts}{"\n"}{.status.conditions[?(@.type=="Applied")].message}{"\n"}'
+```
+
+It is bounded at three attempts, 5 then 10 seconds apart, after which Reactor removes the finalizer anyway and lets the object go:
+
+```text
+Warning  ReleaseFailed  could not hand targets back after 3 attempts, deleting anyway: ...
+```
+
+That is the same trade this whole section is about, made in the other direction: a stranded workload is recoverable from its `baseline-replicas` annotation, and a resource stuck `Terminating` forever is not. So treat that Event as the one that sends you to the restore commands at the top of this section — it is the only case where the finalizer existed, ran, and still left a workload behind.
+
+You will never catch `releaseAttempts` at 3. The third failure is the reconcile that removes the finalizer, so the object is deleted before that value could be written; on a live object it reads 1 or 2, and only ever while it is `Terminating`.
 
 **What is explicitly not covered:** the controller being deleted outright, permanently evicted, or the cluster rebuilt. Reactor does not supervise its own absence. The baseline annotation on the target is the answer in those cases, and it is the reason it lives there.
 

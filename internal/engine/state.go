@@ -87,6 +87,27 @@ func WithDebounce(provider string, config DebounceConfig) StoreOption {
 	}
 }
 
+// WithStaleAfter bounds how old one provider's reported state may be before the
+// store calls it stale. Zero or less leaves it unbounded, which is the default.
+//
+// It bounds what is SAID, never what is done. The store goes on reporting the
+// last state it has whatever its age, because the alternative — withdrawing
+// state Reactor can no longer confirm — would release claims during exactly the
+// incident that made the console unreachable. This is the same rule the
+// reconciler applies to a key that stops being reported, and the same reason:
+// losing sight of a thing is not evidence about the thing.
+//
+// The duration is opaque here in the way DebounceConfig's sample counts are.
+// What a sensible bound is depends on how often a provider polls and how long
+// its console may plausibly be unreachable, and the core knows neither.
+func WithStaleAfter(provider string, bound time.Duration) StoreOption {
+	return func(s *StateStore) {
+		if bound > 0 {
+			s.staleAfter[provider] = bound
+		}
+	}
+}
+
 // candidate is a value seen but not yet reported, and how many consecutive
 // observations have backed it so far.
 type candidate struct {
@@ -106,15 +127,17 @@ type providerState struct {
 // transitions by comparing consecutive observations. Repeated identical
 // observations produce no transitions.
 type StateStore struct {
-	mu       sync.RWMutex
-	current  map[string]providerState
-	debounce map[string]DebounceConfig
+	mu         sync.RWMutex
+	current    map[string]providerState
+	debounce   map[string]DebounceConfig
+	staleAfter map[string]time.Duration
 }
 
 func NewStateStore(options ...StoreOption) *StateStore {
 	store := &StateStore{
-		current:  map[string]providerState{},
-		debounce: map[string]DebounceConfig{},
+		current:    map[string]providerState{},
+		debounce:   map[string]DebounceConfig{},
+		staleAfter: map[string]time.Duration{},
 	}
 	for _, option := range options {
 		option(store)
@@ -240,4 +263,47 @@ func (s *StateStore) Get(provider string) (events.Observation, bool) {
 		State:      maps.Clone(current.stable),
 		ObservedAt: current.observedAt,
 	}, true
+}
+
+// Freshness is how current a provider's reported state is: when it was read,
+// how long ago that was, and whether that is longer than the install allows.
+//
+// It exists because two very different windows both look like "Reactor is
+// acting on something that is no longer true", and only one of them is bounded.
+// A value that CHANGED reaches every Automation within one poll interval times
+// the samples its key has to hold for — a window the operator set, on both
+// terms. A provider that stops answering has no such window: the store keeps
+// reporting what it last saw, for as long as that lasts. This reports the
+// second one so it can be said out loud rather than inferred from a graph.
+type Freshness struct {
+	// ObservedAt is when the reported state was read from the provider.
+	ObservedAt time.Time
+	// Age is how long ago that was.
+	Age time.Duration
+	// Bound is the configured maximum age, or zero when none is configured.
+	Bound time.Duration
+	// Stale reports an Age past Bound. Always false when Bound is zero: an
+	// install that set no bound is not being told its state is too old.
+	Stale bool
+}
+
+// Freshness reports how current a provider's reported state is. ok is false
+// when the provider has never reported anything, which is a different state
+// from stale and is reported differently: nothing has been observed at all, so
+// there is no decision being taken against something out of date.
+func (s *StateStore) Freshness(provider string) (Freshness, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	current, ok := s.current[provider]
+	if !ok {
+		return Freshness{}, false
+	}
+	freshness := Freshness{
+		ObservedAt: current.observedAt,
+		Age:        time.Since(current.observedAt),
+		Bound:      s.staleAfter[provider],
+	}
+	freshness.Stale = freshness.Bound > 0 && freshness.Age > freshness.Bound
+	return freshness, true
 }

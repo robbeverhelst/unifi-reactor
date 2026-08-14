@@ -155,6 +155,15 @@ case <-p.Nudge:
 
 A nudge is still allowed to *start* a debounce — that is "look sooner", and it costs one observation. Every later nudge is refused until the value is either promoted or abandoned, so the samples that promote it always come from the poll cadence. If your provider has an inbound trigger and any debounced key, copy this condition too.
 
+**Your poll interval is half of a correctness bound, and dropping a failed observation is the other half.** Those two lines above decide how long every Automation on your provider may go on acting on something that is no longer true, and they decide it in two very different ways:
+
+- **A value that changed** reaches an Automation within `pollInterval × samples(key)`, and nothing else is in that path. That product is the bound, it is made entirely of settings the operator chose, and a nudge narrows only the first term.
+- **A provider that stops answering** has no bound at all. `observe` logs the error and returns, the store keeps reporting the last state it got, and every reconcile re-decides against it for as long as that lasts.
+
+The second is correct and you should copy it: withdrawing state you can no longer confirm would release claims during exactly the incident that took your upstream away. But it must not be silent. `engine.WithStaleAfter(providerName, d)` gives the store a per-provider bound, and past it every Automation on that provider reports `Ready=False` with reason `ObservationStale`, raises a Warning Event and counts `reactor_stale_decisions_total` — while still acting. Like the debounce sample counts, the duration is opaque data the provider supplies from its own configuration; the engine never learns what a sensible one is.
+
+Default it to zero. Zero means unbounded, which is the behaviour every install had before the bound existed, and a provider that ships one on would make an upgrade start reporting a fault that was always there.
+
 ### 4. `cmd/main.go` — the wiring
 
 The provider is constructed only when its configuration is present, and its absence is logged rather than fatal:

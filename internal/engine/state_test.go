@@ -18,6 +18,7 @@ package engine
 
 import (
 	"testing"
+	"time"
 
 	"github.com/robbeverhelst/unifi-reactor/internal/events"
 )
@@ -257,5 +258,64 @@ func TestProvingReportsValuesPartWayThroughDebounce(t *testing.T) {
 	// An unknown provider is not proving anything, and asking must not create it.
 	if store.Proving("nobody") {
 		t.Error("an unknown provider has nothing proving itself")
+	}
+}
+
+func TestStateStoreFreshnessIsUnboundedUnlessConfigured(t *testing.T) {
+	s := NewStateStore()
+	s.Observe(events.Observation{
+		Provider: testProvider, State: map[string]string{keyWAN: wanPrimary},
+		ObservedAt: time.Now().Add(-time.Hour),
+	})
+
+	freshness, ok := s.Freshness(testProvider)
+	if !ok {
+		t.Fatal("a provider that has reported should have a freshness")
+	}
+	if freshness.Stale {
+		t.Error("an hour-old observation is stale on a store nobody gave a bound to")
+	}
+	if freshness.Age < time.Hour {
+		t.Errorf("age should be measured from the observation, got %s", freshness.Age)
+	}
+}
+
+func TestStateStoreFreshnessReportsPastTheBound(t *testing.T) {
+	s := NewStateStore(WithStaleAfter(testProvider, time.Minute))
+	observedAt := time.Now().Add(-time.Hour)
+	s.Observe(events.Observation{
+		Provider: testProvider, State: map[string]string{keyWAN: wanPrimary}, ObservedAt: observedAt,
+	})
+
+	freshness, _ := s.Freshness(testProvider)
+	if !freshness.Stale {
+		t.Fatal("an hour-old observation is not stale against a one-minute bound")
+	}
+	if !freshness.ObservedAt.Equal(observedAt) {
+		t.Errorf("freshness should name the observation, got %s", freshness.ObservedAt)
+	}
+	if freshness.Bound != time.Minute {
+		t.Errorf("freshness should carry the bound it was judged against, got %s", freshness.Bound)
+	}
+
+	// The state itself is still reported, whatever its age. Withdrawing it
+	// would release claims during the incident that took the console away.
+	if got, ok := s.Get(testProvider); !ok || got.State[keyWAN] != wanPrimary {
+		t.Error("a stale observation stopped being reported, so nothing is holding its claims")
+	}
+
+	// And a fresh observation clears it without anything having to reset.
+	s.Observe(events.Observation{
+		Provider: testProvider, State: map[string]string{keyWAN: wanPrimary}, ObservedAt: time.Now(),
+	})
+	if freshness, _ := s.Freshness(testProvider); freshness.Stale {
+		t.Error("the console answered again and the store still calls its state stale")
+	}
+}
+
+func TestStateStoreFreshnessOfAnUnknownProvider(t *testing.T) {
+	s := NewStateStore(WithStaleAfter(testProvider, time.Minute))
+	if _, ok := s.Freshness(testProvider); ok {
+		t.Error("a provider that has never reported has no observation to call stale")
 	}
 }

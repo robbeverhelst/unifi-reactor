@@ -245,6 +245,44 @@ The baseline annotation is named for what it records, so a CronJob carries `base
 
 > **GitOps:** Reactor writes `spec.replicas` and the three annotations above onto target Deployments. If Flux or Argo CD manages those Deployments it will report drift and revert them. Exclude the fields on any workload you let Reactor act on — Argo CD `ignoreDifferences` on `/spec/replicas` and the `reactor.robbeverhelst.com` annotations, or a Flux `patch` with the same exclusions.
 
+### When they disagree about coming back
+
+Two automations can share a workload and still not agree on what its normal size is:
+
+```yaml
+# shed-a                          # shed-b
+onExit:                           onExit:
+  - type: kubernetes.scale          - type: kubernetes.scale
+    target: {kind: Deployment, name: qbittorrent}
+    replicas: 1                       replicas: 3
+```
+
+While either matches, the workload sits at 0 and everything above applies. When both stop matching, the reversals are folded the same way live claims are — `min(1, 3) = 1` — and the workload comes back at 1 and stays there.
+
+**Reactor keeps taking `min`, and does not try to resolve this.** It cannot know which number was meant, and picking the more restrictive one is defensible, documented and order-independent, exactly as it is for a live claim.
+
+**What it will not do is resolve it silently.** Two automations declaring different reversal levels for one target is a contradiction visible in the specs themselves — no intent has to be guessed to see it — so it is reported from the moment it exists, not at the moment the workload comes back at the wrong number:
+
+```sh
+kubectl -n media get automation shed-a -o jsonpath='{.status.targets[0].reversalDisagreement}'
+# [{"claimant":"media/shed-a","desired":1,"level":"1 replicas"},
+#  {"claimant":"media/shed-b","desired":3,"level":"3 replicas"}]
+```
+
+```sh
+kubectl -n media describe automation shed-a | tail -3
+# Warning  ReversalDisagreement  Deployment/media/qbittorrent: media/shed-a wants 1 replicas,
+#          media/shed-b wants 3 replicas. They cannot both be its normal level — Reactor takes
+#          the most restrictive, 1 replicas, and changing one of the specs is the only thing
+#          that resolves it
+```
+
+and `reactor_reversal_disagreements_total` for the fleet-wide version.
+
+It is a **Warning**, unlike being outvoted on a live claim, and the difference is not severity for its own sake. Two automations wanting a workload down for different reasons are both right, and arbitration between them is the design working — that is `Normal`. Two automations declaring different normal sizes for one workload cannot both be right; nothing Reactor does resolves it, and the number it picks is only a tie-break. Somebody has to change one of the specs.
+
+`reversal: None` contributes no level at all, so it is never part of a disagreement. Two automations both on `Baseline` agree by construction — they resolve to the same recorded baseline — so the cases this catches are `Declared` against `Declared`, and `Declared` against `Baseline`.
+
 ### When an action fails
 
 Each action is bounded by `timeoutSeconds` (default 30), so a target that has stopped answering fails and is retried rather than occupying the reconciler. Retries back off exponentially from 2s to a 1-minute cap and stop after five consecutive failures — at which point the automation says so and waits for the next state change instead of retrying forever:
@@ -357,6 +395,16 @@ And an honest limit: the general problem is not solvable by detection. KEDA, a G
 ### Removing an automation, or Reactor itself
 
 Deleting an automation while it is holding a workload down hands the workload back rather than stranding it — a finalizer releases the claim first. Removing the policy removes its effect, even mid-outage, so an automation deleted while the UPS is still on battery brings its workload back up.
+
+That release can fail — the target has been deleted, RBAC changed under it, an admission webhook is refusing the write — and the finalizer is bounded so that it can never be the reason a resource does not delete. It tries three times, 5 then 10 seconds apart, counting the failures in `status.releaseAttempts`, and then removes itself anyway:
+
+```text
+Warning  ReleaseFailed  could not hand targets back after 3 attempts, deleting anyway: ...
+```
+
+That Event is the signal to go and look at the target by hand, because it is the one case where the finalizer existed, ran, and still left something behind. The trade is deliberate: a workload left where it was is recoverable from its `baseline-replicas` annotation, and a resource stuck `Terminating` forever is not.
+
+`status.releaseAttempts` only ever exists on an automation that is mid-deletion, and it stops at 2. The third failure is the reconcile that removes the finalizer, so the object is gone before a 3 could be written to it.
 
 `helm uninstall` is the case worth understanding, because Helm does **not** delete the `Automation` CRD or your `Automation` resources. They survive the uninstall and simply stop reconciling. A pre-delete hook therefore releases every claim before the operator goes away, and removes the finalizers, which nothing would be left to service:
 
@@ -1169,6 +1217,41 @@ Debouncing happens in the shared state store, so every automation sees the same 
 
 This is the setting to revisit the moment you write a [`kubernetes.restart`](#restart-is-why-debounce-matters): scaling is idempotent and a flap costs nothing, while a restart under a flapping key is a rollout per poll.
 
+### How long Reactor may act on state that has already changed
+
+Debounce is half of an answer to a question worth asking outright, because a policy engine acting on something that stopped being true is the failure everything else here is arranged to avoid. **There are two windows, and only one of them is bounded by anything.**
+
+**A value that changed** reaches every Automation within **`pollInterval` × the key's debounce samples**. Worst case is the change landing just after a poll, then needing its samples on the poll cadence: `wan` at the defaults is 30 seconds, `internet` is 90. Both terms are yours, and that product *is* the bound — there is deliberately nothing else in the path. The reconciler re-evaluates every 15 seconds regardless and is woken immediately on a transition, so it contributes latency, not staleness.
+
+The webhook fast path narrows the **first** term only. A delivery brings the next observation forward, and while a value is still proving itself against its debounce threshold a delivery is [ignored outright](#webhook-fast-path). That is not an oversight: a delivery only ever says *look now*, and if it could also supply the samples that promote a value, anyone who can reach the endpoint could fast-forward a key straight through the settling time you asked for.
+
+**A console that stops answering** has no such window. A failed observation is logged and dropped — the next poll is the recovery mechanism — so the store keeps reporting the last state it has, and every reconcile re-decides against it for as long as the console is away. That is **correct and stays correct**: withdrawing state Reactor can no longer confirm would release claims during exactly the incident that took the console offline, which is the same reason a key that vanishes gets [`StateKeyUnavailable`](docs/troubleshooting.md#2-statekeyunavailable-and-held-state) and held state rather than an `onExit`.
+
+What was missing is that the second case said nothing. `StateKeyUnavailable` announces itself on the Automation; a console that has gone quiet announced itself only in `time() - reactor_last_observation_timestamp_seconds`, which needs metrics enabled and somebody watching. So:
+
+```yaml
+unifi:
+  pollInterval: 30s
+  maxObservationAge: 5m    # empty by default: unbounded, and silent
+```
+
+Past that age, every Automation driven by the provider reports it, and **goes on acting**:
+
+```text
+Ready  False  ObservationStale
+provider "unifi" has not been observed since 2026-08-14T09:12:41Z, past the 5m0s this
+install allows; still acting on the state it last reported
+```
+
+```yaml
+status:
+  observedAt: "2026-08-14T09:12:41Z"   # always reported; this is what every field below is only as current as
+```
+
+plus a Warning `Event` and `reactor_stale_decisions_total`, which is the attributable half of the observation gauge: the gauge says Reactor went blind, this says automations were still deciding while it was.
+
+It is off by default and it changes no behaviour when on — no claim is released, no `onExit` runs, no target moves. Set it against `pollInterval` and the samples above rather than in isolation: a changed value already takes up to 90 seconds to be believed at the defaults, so anything under about four poll intervals reports a slow console rather than a blind operator.
+
 ## Knowing it is working
 
 Reactor's worst failure is **silent and fails open**. If it stops observing — an expired API key, a rebooted console, a network partition — every automation quietly stops reacting. Nothing in the cluster notices, and the next real outage simply does not get handled. There is no error to find, because nothing errored.
@@ -1192,6 +1275,7 @@ helm upgrade reactor ... \
 | Metric | Type | Answers |
 | --- | --- | --- |
 | `reactor_last_observation_timestamp_seconds` | gauge | is Reactor still seeing anything |
+| `reactor_stale_decisions_total` | counter | how much deciding it did while it was not ([above](#how-long-reactor-may-act-on-state-that-has-already-changed)) |
 | `reactor_observations_total` | counter | how often polling succeeds and fails |
 | `reactor_state_info` | gauge 0/1 | what each state key holds right now |
 | `reactor_state_transitions_total` | counter | how often failover actually happens |
@@ -1202,6 +1286,7 @@ helm upgrade reactor ... \
 | `reactor_reaction_latency_seconds` | histogram | observation → action, end to end |
 | `reactor_webhook_deliveries_total` | counter | fast-path deliveries accepted, coalesced, refused |
 | `reactor_provider_signal_disagreements_total` | counter | two independent signals for one fact disagreeing |
+| `reactor_reversal_disagreements_total` | counter | two automations disagreeing about a workload's normal size ([above](#when-they-disagree-about-coming-back)) |
 
 Reconcile counts, queue depth and reconcile latency are controller-runtime's own `controller_runtime_*` series on the same endpoint. Reactor does not reimplement them. It also deliberately **does not re-export UniFi telemetry** — a UniFi exporter covers that better, and Reactor's unique vantage point is the decision layer.
 
@@ -1324,6 +1409,7 @@ Chart values ([full reference](charts/reactor/README.md)):
 | `unifi.url` | — | UniFi console base URL; the provider stays disabled until this is set |
 | `unifi.site` | `default` | UniFi Network site |
 | `unifi.pollInterval` | `30s` | how often WAN, internet and UPS state are observed |
+| `unifi.maxObservationAge` | `""` | how old the observed state may get before every automation reports `ObservationStale` and says so. Empty is unbounded — and silent ([above](#how-long-reactor-may-act-on-state-that-has-already-changed)) |
 | `unifi.insecureSkipVerify` | `true` | accept the console's self-signed certificate |
 | `unifi.existingSecret` | `unifi-reactor-credentials` | Secret holding `UNIFI_API_KEY`; re-read on every poll, so rotating the key needs no restart |
 | `log.level` | `info` | `debug` adds the per-observation lines used to work out why an automation did not fire |
@@ -1373,6 +1459,14 @@ See the [chart reference](charts/reactor/README.md#webhook-fast-path-optional-of
 ## Stability
 
 Early days: the API group is `v1alpha1` and the project is pre-1.0, so expect breaking changes between minor versions.
+
+### What a v1.1 user has to change
+
+Nothing is required, and no workload changes what it does. Two things become visible that were not:
+
+- **`unifi.maxObservationAge` is new and empty, which is exactly what you have today** — unbounded, and silent, if the console stops answering. Setting it makes every automation report `Ready=False` with reason `ObservationStale` past that age, raise a Warning `Event`, and publish `reactor_stale_decisions_total`. It changes nothing about what is written: no claim is released and no `onExit` runs, because going blind must not scale workloads back up mid-outage ([why](#how-long-reactor-may-act-on-state-that-has-already-changed)). Start at four or five poll intervals.
+- **`status.observedAt` is new on every Automation**, additive and always populated once anything has been observed. If you have alerting or scripts that treat an unexpected status field as drift, this is the one to expect.
+- **Two automations that declare different `onExit` levels for one target now say so** — a Warning `Event` with reason `ReversalDisagreement`, `status.targets[].reversalDisagreement`, and `reactor_reversal_disagreements_total`. **Nothing about the resolved value changes**: `min` still wins, and the workload comes back at exactly the number it came back at before ([why it is reported and not resolved](#when-they-disagree-about-coming-back)). This is not gated behind a value, because a contradiction between two of your own specs is not something to opt into being told about — but if you have such a pair today, expect one Warning per automation involved on the first reconcile after the upgrade. Fixing it is a one-line spec edit.
 
 **`spec.trigger` — the event-shaped trigger kind — has been removed from `v1alpha1`.** Up to v0.3.0 the CRD accepted it, CEL-validated it, and then ignored it: no version of the engine has ever processed an event trigger. A v1 whose API accepts configuration it silently drops is worse than one that does not offer the field at all, so it is gone until it is real. Two things had to exist before it could come back, and one of them now does:
 

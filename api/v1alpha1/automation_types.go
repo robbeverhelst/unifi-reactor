@@ -763,6 +763,30 @@ type TargetStatus struct {
 	// +optional
 	Preview *TargetPreview `json:"preview,omitempty"`
 
+	// ReversalDisagreement names every Automation declaring a reversal level
+	// for this target, and the level each one declares, whenever they do not
+	// all declare the same one. Empty when they agree, which is the normal
+	// case, and when only one Automation has an opinion at all.
+	//
+	// Two Automations that both want a workload down are both right, and
+	// resolving that is what DeferredBy reports. Two Automations declaring
+	// different levels for the same workload once NOTHING claims it cannot both
+	// be right: a workload has one normal size, and these specs disagree about
+	// what it is. Reactor does not resolve that — it takes the most restrictive
+	// level, the same order-independent tie-break it uses for a live claim, and
+	// it says which specs contradicted each other so somebody can fix one.
+	//
+	// It is reported while the disagreement EXISTS rather than at the moment of
+	// release, because the value of knowing is finding out before the outage
+	// ends, not after the workload has already come back at the wrong number.
+	//
+	// Reversal None contributes no level and is never part of one. Two
+	// Automations both on Baseline agree by construction, resolving to the same
+	// recorded baseline, so the cases reported are Declared against Declared
+	// and Declared against Baseline.
+	// +optional
+	ReversalDisagreement []ReversalIntent `json:"reversalDisagreement,omitempty"`
+
 	// ManagedBy names a controller other than Reactor that already drives this
 	// target's level, as "Kind/namespace/name".
 	//
@@ -780,6 +804,30 @@ type TargetStatus struct {
 	// discoverable.
 	// +optional
 	ManagedBy string `json:"managedBy,omitempty"`
+}
+
+// ReversalIntent is one Automation's declared reversal level for a target: what
+// it says that target should be once nothing claims it any more.
+//
+// It is reported only as part of a disagreement, because that is the only time
+// naming one is worth anything. An Automation's own reversal is already in
+// TargetStatus.Desired while it is not matching; what this adds is the other
+// Automations' answers to the same question, alongside it, so the contradiction
+// reads as one fact rather than as something to be assembled from two objects.
+type ReversalIntent struct {
+	// Claimant is the Automation declaring this level, as "namespace/name".
+	Claimant string `json:"claimant"`
+
+	// Desired is the level it would hand the target back to. Ordered exactly as
+	// TargetStatus.Desired is: lower is more restrictive, and the lowest is the
+	// one that wins.
+	Desired int32 `json:"desired"`
+
+	// Level renders Desired in the units of the action that set it, for the
+	// same reason TargetStatus.Level does — a disagreement between "suspended"
+	// and "running" is not readable as one between 0 and 1.
+	// +optional
+	Level string `json:"level,omitempty"`
 }
 
 // TargetPreview is what would happen to one target if this Automation's
@@ -859,6 +907,23 @@ type AutomationStatus struct {
 	// last reconcile, e.g. {"wan": "backup"}.
 	// +optional
 	ObservedState map[string]string `json:"observedState,omitempty"`
+
+	// ObservedAt is when the provider state above was read from the provider,
+	// which is not the same as when this Automation last reconciled.
+	//
+	// It is the qualifier on every other field here. A decision is only as
+	// current as the observation it was taken against, and the two windows that
+	// separate them are very different: a value that CHANGED reaches this
+	// object within one poll interval times the samples its key must hold for,
+	// while a provider that has stopped answering leaves this timestamp
+	// standing still and every decision below being re-taken against it. Past
+	// the age the install allows, Ready goes False with reason
+	// ObservationStale — and Reactor still acts, because withdrawing state it
+	// cannot confirm would release claims mid-incident.
+	//
+	// Absent until the provider has reported anything at all.
+	// +optional
+	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
 
 	// LastTransition is the state change that last flipped Matching.
 	// +optional

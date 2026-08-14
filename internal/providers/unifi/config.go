@@ -43,6 +43,7 @@ const (
 	envSite               = "UNIFI_SITE"
 	envInsecureSkipVerify = "UNIFI_INSECURE_SKIP_VERIFY"
 	envPollInterval       = "UNIFI_POLL_INTERVAL"
+	envMaxObservationAge  = "UNIFI_MAX_OBSERVATION_AGE"
 	envLowBattery         = "UNIFI_UPS_LOW_BATTERY_PERCENT"
 	envCriticalBattery    = "UNIFI_UPS_CRITICAL_BATTERY_PERCENT"
 	envShortRuntime       = "UNIFI_UPS_SHORT_RUNTIME_SECONDS"
@@ -76,10 +77,21 @@ type Config struct {
 	URL string
 	// APIKey is resolved per request, not held from startup, so rotating a
 	// mounted credential takes effect on the next poll.
-	APIKey                   APIKey
-	Site                     string
-	InsecureSkipVerify       bool
-	PollInterval             time.Duration
+	APIKey             APIKey
+	Site               string
+	InsecureSkipVerify bool
+	PollInterval       time.Duration
+	// MaxObservationAge is how old the reported state may get before every
+	// Automation driven by this provider reports ObservationStale. Zero — the
+	// default — means unbounded, which is what an install that never sets it
+	// keeps.
+	//
+	// It bounds what is said and never what is done: a console that has stopped
+	// answering must not become a reason to release the claims made while it
+	// still was. It is set against PollInterval and the debounce samples, not in
+	// isolation — anything under a few poll intervals reports a slow console
+	// rather than a blind operator.
+	MaxObservationAge        time.Duration
 	LowBatteryPercent        int
 	CriticalBatteryPercent   int
 	ShortRuntimeSeconds      int
@@ -198,6 +210,7 @@ func ConfigFromEnv(lookup func(string) string) (Config, bool, error) {
 		target *time.Duration
 	}{
 		{envPollInterval, &cfg.PollInterval},
+		{envMaxObservationAge, &cfg.MaxObservationAge},
 		{envWebhookMinInterval, &cfg.Webhook.MinObserveInterval},
 	} {
 		raw := lookup(field.env)

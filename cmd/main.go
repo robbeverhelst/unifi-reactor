@@ -416,12 +416,6 @@ func main() {
 		setupLog.Error(err, "Invalid debounce configuration")
 		os.Exit(1)
 	}
-	store := engine.NewStateStore(engine.WithDebounce(unifi.ProviderName, debounce))
-	// Providers push onto this when they observe a state change so the
-	// affected Automations reconcile immediately; the periodic re-evaluation
-	// in the reconciler is the backstop, not the mechanism.
-	wake := make(chan event.GenericEvent, 256)
-
 	// The UniFi provider is configured at the controller level (Helm values /
 	// env), not per-Automation: one UniFi console per Reactor install.
 	//
@@ -434,6 +428,20 @@ func main() {
 		setupLog.Error(err, "Failed to configure the UniFi provider")
 		os.Exit(1)
 	}
+
+	// Read before the store is built, because both of the store's provider
+	// settings come from here: how much evidence a changed value needs, and how
+	// old the whole observation may get before Reactor says it is deciding
+	// against something nothing has confirmed since.
+	store := engine.NewStateStore(
+		engine.WithDebounce(unifi.ProviderName, debounce),
+		engine.WithStaleAfter(unifi.ProviderName, unifiConfig.MaxObservationAge),
+	)
+	// Providers push onto this when they observe a state change so the
+	// affected Automations reconcile immediately; the periodic re-evaluation
+	// in the reconciler is the backstop, not the mechanism.
+	wake := make(chan event.GenericEvent, 256)
+
 	if unifiEnabled {
 		if console, err = setupUniFi(mgr, unifiConfig, store, wake); err != nil {
 			setupLog.Error(err, "Failed to set up the UniFi provider")
@@ -441,6 +449,12 @@ func main() {
 		}
 	} else {
 		setupLog.Info("UniFi provider disabled (UNIFI_URL not set); state triggers will stay pending")
+	}
+
+	if unifiEnabled && unifiConfig.MaxObservationAge <= 0 {
+		setupLog.Info("No maximum observation age is set; if the console stops answering, automations go on " +
+			"acting on the last state it reported and nothing on them says how old it is. " +
+			"Set unifi.maxObservationAge to a few poll intervals to have them report ObservationStale")
 	}
 
 	// Where Reactor may send an outbound edge action. Empty by default, which

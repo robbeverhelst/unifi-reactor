@@ -162,6 +162,65 @@ func reversalFor(
 	}
 }
 
+// reversalIntents is what every Automation referencing a target says that
+// target's normal level is: what each would hand it back to once nothing claims
+// it any more.
+//
+// It is deliberately taken over EVERY referencing Automation, matching or not,
+// where the reversals folded at release are taken only over the ones not
+// currently claiming. The two answer different questions. That fold asks what
+// should happen now; this asks what the specs declare, which is answerable at
+// any moment and is answerable long before the moment it matters.
+//
+// A peer out of force still counts. Suspending an Automation does not withdraw
+// its opinion about a workload's normal size — resuming it brings the same
+// contradiction straight back — and one being deleted contributes its reversal
+// to the release that deletion causes.
+func reversalIntents(
+	peers []*reactorv1alpha1.Automation,
+	key targetKey,
+	baseline *int64,
+) []engine.Intent {
+	intents := make([]engine.Intent, 0, len(peers))
+	for _, peer := range peers {
+		if intent, ok := reversalFor(peer, key, baseline); ok {
+			intents = append(intents, intent)
+		}
+	}
+	return intents
+}
+
+// disagreementOver reports the intents when they do not all name the same
+// level, and nothing when they do.
+//
+// Everything or nothing, rather than only the outvoted ones: a disagreement is
+// a fact about a set of specs and not about any one of them, and naming only
+// the losers would read as "these were overruled" when what happened is that
+// two people wrote down different answers to the same question. Sorted by
+// claimant so a status field and an Event stay stable across reconciles that
+// gathered the peers in a different order.
+func disagreementOver(handler targetHandler, intents []engine.Intent) []reactorv1alpha1.ReversalIntent {
+	if len(intents) < 2 {
+		return nil
+	}
+	if !slices.ContainsFunc(intents, func(i engine.Intent) bool { return i.Level != intents[0].Level }) {
+		return nil
+	}
+
+	reported := make([]reactorv1alpha1.ReversalIntent, 0, len(intents))
+	for _, intent := range intents {
+		reported = append(reported, reactorv1alpha1.ReversalIntent{
+			Claimant: intent.Claimant,
+			Desired:  int32(intent.Level),
+			Level:    handler.describe(intent.Level),
+		})
+	}
+	slices.SortFunc(reported, func(a, b reactorv1alpha1.ReversalIntent) int {
+		return strings.Compare(a.Claimant, b.Claimant)
+	})
+	return reported
+}
+
 // baselineOf reads the recorded pre-claim level off a target. recorded reports
 // whether Reactor has ever claimed this target, which is what distinguishes
 // "release it back to where it was" from "never touched it, leave it alone".
@@ -229,6 +288,9 @@ type targetOutcome struct {
 	// withheld reports an outcome that was resolved and then not written,
 	// because the whole install is running as a dry run.
 	withheld bool
+	// disagreement is every Automation's declared reversal level for this
+	// target, when they do not all declare the same one. Empty when they agree.
+	disagreement []reactorv1alpha1.ReversalIntent
 	// managedBy names the controller Reactor declined to fight for this target.
 	managedBy string
 }
@@ -320,6 +382,16 @@ func (r *AutomationReconciler) reconcileTarget(
 	if level, ok := selfLevel(self, key, s.claiming, baseline); ok {
 		value := int32(level)
 		outcome.desired = &value
+	}
+
+	// Asked of every peer and on every reconcile, not only of the ones
+	// currently reversing and not only at release. It is a comparison over
+	// intents already in hand, and the point of asking now is that the answer
+	// stops being useful the moment the workload has come back at the wrong
+	// number.
+	outcome.disagreement = disagreementOver(handler, reversalIntents(peers, key, baseline))
+	if len(outcome.disagreement) > 0 {
+		metrics.ReversalDisagreement()
 	}
 
 	// Before the preview, and that ordering is load-bearing. A target another

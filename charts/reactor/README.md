@@ -138,6 +138,14 @@ kubectl patch automation <name> -n <namespace> \
   --type=merge -p '{"metadata":{"finalizers":[]}}'
 ```
 
+A delete the operator *does* process can still fail to hand the workload back —
+the target is gone, RBAC changed under it, an admission webhook refuses the
+write. That is bounded rather than retried forever: three attempts, counted in
+the Automation's `status.releaseAttempts`, and then the finalizer is removed
+anyway with a Warning `ReleaseFailed` Event naming the error. A workload left
+where it was is recoverable from its `baseline-replicas` annotation; a resource
+stuck `Terminating` is not.
+
 ## HorizontalPodAutoscalers (optional, off by default)
 
 Reactor writes `spec.replicas`. So does an HPA, from metrics, and neither is
@@ -931,6 +939,7 @@ publishing — which fails as silence rather than as an error.
 | `unifi.url` | `""` | UniFi console base URL (required to enable the provider) |
 | `unifi.site` | `default` | UniFi Network site |
 | `unifi.pollInterval` | `30s` | WAN state poll interval (polling is the source of truth) |
+| `unifi.maxObservationAge` | `""` | How old the observed state may get before every automation reports `Ready=False` with reason `ObservationStale`. Empty is unbounded, which is the pre-v1.2 behaviour. It changes what Reactor *says* and never what it writes — a console that has gone quiet must not release the claims it made while it was answering. Set it to four or five `pollInterval`s |
 | `unifi.insecureSkipVerify` | `true` | Accept the console's self-signed certificate |
 | `unifi.existingSecret` | `unifi-reactor-credentials` | Secret containing `UNIFI_API_KEY`, mounted and re-read per poll |
 | `log.level` | `info` | `debug`, `info`, `error`, or a V-level number |
