@@ -53,6 +53,9 @@ const (
 	release = "reactor"
 	// releaseJob is the pre-delete hook that hands claimed workloads back.
 	releaseJob = release + "-release-claims"
+	// adoptJob is the pre-upgrade hook that takes over a CRD belonging to no
+	// release, and the name its ServiceAccount and cluster-scoped RBAC share.
+	adoptJob = release + "-adopt-crd"
 
 	annotationBaseline  = "reactor.robbeverhelst.com/baseline-replicas"
 	annotationClaimedBy = "reactor.robbeverhelst.com/claimed-by"

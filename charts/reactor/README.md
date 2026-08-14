@@ -38,17 +38,13 @@ kubectl delete crd automations.reactor.robbeverhelst.com   # also deletes every 
 
 ### Upgrading from chart 0.3.0 or earlier
 
-Those versions installed the CRD through `crds/`, which Helm does not record as part of the release. The first upgrade to a chart that templates it fails with `invalid ownership metadata` until the existing CRD is handed over to the release:
+Nothing to do — `helm upgrade` is the whole procedure.
 
-```bash
-kubectl label crd automations.reactor.robbeverhelst.com \
-  app.kubernetes.io/managed-by=Helm --overwrite
-kubectl annotate crd automations.reactor.robbeverhelst.com \
-  meta.helm.sh/release-name=reactor \
-  meta.helm.sh/release-namespace=reactor-system --overwrite
-```
+Those versions installed the CRD through `crds/`, which Helm applies without recording it as part of the release, so the first upgrade to a chart that templates it meets a CRD owned by nobody and Helm will not touch it. The chart adopts that CRD itself on that one upgrade: a hook Job with its own ServiceAccount and a ClusterRole granting `get` and `patch` on that single CRD name sets the ownership metadata from the release you are installing, and puts the current schema live in the same patch. Nothing is deleted or recreated — the CRD stays live, and your Automations with it.
 
-Use your own release name and namespace. Nothing is deleted or recreated — the CRD stays live, and your Automations with it.
+It is rendered only when there is something to adopt, so a fresh install and every later upgrade carry no Job and no cluster-scoped permission. A CRD belonging to a *different* release is never adopted: that upgrade stops, naming the release that owns it.
+
+Set `crds.adopt=false` to hand the CRD over yourself instead; [the troubleshooting guide](https://github.com/robbeverhelst/unifi-reactor/blob/main/docs/troubleshooting.md#6-the-crd-invalid-ownership-metadata-or-a-stale-schema) has the two `kubectl` commands, which are also the fallback if the hook ever fails.
 
 ### Managing the CRD outside the release
 
@@ -931,6 +927,7 @@ publishing — which fails as silence rather than as an error.
 | Key | Default | Description |
 | --- | --- | --- |
 | `crds.install` | `true` | install and upgrade the `Automation` CRD with the release; `false` when you manage it yourself |
+| `crds.adopt` | `true` | take over a CRD that belongs to no release, which is what chart 0.3.0 and earlier left behind; `false` to do it by hand |
 | `unifi.url` | `""` | UniFi console base URL (required to enable the provider) |
 | `unifi.site` | `default` | UniFi Network site |
 | `unifi.pollInterval` | `30s` | WAN state poll interval (polling is the source of truth) |

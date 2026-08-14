@@ -51,6 +51,7 @@ import (
 
 	reactorv1alpha1 "github.com/robbeverhelst/unifi-reactor/api/v1alpha1"
 	"github.com/robbeverhelst/unifi-reactor/internal/actions"
+	"github.com/robbeverhelst/unifi-reactor/internal/adopt"
 	"github.com/robbeverhelst/unifi-reactor/internal/controller"
 	"github.com/robbeverhelst/unifi-reactor/internal/engine"
 	"github.com/robbeverhelst/unifi-reactor/internal/metrics"
@@ -184,6 +185,30 @@ func runReleaseClaims() error {
 		logf.IntoContext(ctx, ctrl.Log.WithName("release-claims")), c, options)
 }
 
+// runAdoptCRD hands the Automation CRD to the Helm release installing it, puts
+// the chart's copy of the schema live, and exits.
+//
+// It runs from a hook rather than from the operator, with its own
+// ServiceAccount: patching a CustomResourceDefinition is not a permission the
+// manager has or should ever be granted, and this needs it for as long as one
+// Job takes.
+func runAdoptCRD(manifest string) error {
+	ctx := ctrl.SetupSignalHandler()
+	c, err := client.New(ctrl.GetConfigOrDie(), client.Options{Scheme: scheme})
+	if err != nil {
+		return err
+	}
+	// The chart renders the release it is adopting into; the CRD's name comes
+	// from the API group, so the one object this may touch is never a string
+	// somebody has to keep in step by hand.
+	return adopt.CRD(logf.IntoContext(ctx, ctrl.Log.WithName("adopt-crd")), c, adopt.Options{
+		Name:         "automations." + reactorv1alpha1.GroupVersion.Group,
+		Release:      os.Getenv("RELEASE_NAME"),
+		Namespace:    os.Getenv("RELEASE_NAMESPACE"),
+		ManifestPath: manifest,
+	})
+}
+
 // nolint:gocyclo
 func main() {
 	var metricsAddr string
@@ -194,6 +219,8 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var releaseClaims bool
+	var adoptCRD bool
+	var crdManifest string
 	var dryRun bool
 	var detectHPA bool
 	var tlsOpts []func(*tls.Config)
@@ -212,6 +239,13 @@ func main() {
 	flag.BoolVar(&releaseClaims, "release-claims", false,
 		"Hand every target Reactor holds back to what the Automations referencing it want, drop the "+
 			"finalizers, and exit. Run this before removing the operator; the chart's pre-delete hook does it for you.")
+	flag.BoolVar(&adoptCRD, "adopt-crd", false,
+		"Hand an Automation CRD that belongs to no Helm release over to the release being installed, and "+
+			"exit. Only ever adopts a CRD nothing else claims; one owned by another release fails loudly "+
+			"instead. The chart's pre-upgrade hook does this for you on the one upgrade that needs it.")
+	flag.StringVar(&crdManifest, "crd-manifest", "",
+		"The chart's own copy of the CRD, applied in the same patch that adopts it. Only read with "+
+			"--adopt-crd; empty adopts the ownership metadata and leaves the live schema alone.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -302,6 +336,16 @@ func main() {
 		metricsServerOptions.CertDir = metricsCertPath
 		metricsServerOptions.CertName = metricsCertName
 		metricsServerOptions.KeyName = metricsCertKey
+	}
+
+	if adoptCRD {
+		// Runs before the release is applied, when there is no operator yet and
+		// nothing to elect a leader among.
+		if err := runAdoptCRD(crdManifest); err != nil {
+			setupLog.Error(err, "Failed to adopt the CustomResourceDefinition")
+			os.Exit(1)
+		}
+		return
 	}
 
 	if releaseClaims {

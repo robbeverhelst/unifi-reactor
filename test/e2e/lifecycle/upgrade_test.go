@@ -161,6 +161,11 @@ var _ = Describe("Upgrading from a chart that shipped the CRD under crds/", Orde
 		_, err = harness.Run(GinkgoWriter, harness.ProjectDir(), "cp", "-R", "charts/reactor", legacyChart)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(os.Remove(filepath.Join(legacyChart, "templates", "crds.yaml"))).To(Succeed())
+		// And no adoption hook, because 0.3.0 had none: it is what this upgrade
+		// brings. Leaving it in would let the old chart adopt its own CRD on
+		// install — Helm applies crds/ before it renders templates — and there
+		// would be nothing left for the upgrade to prove.
+		Expect(os.Remove(filepath.Join(legacyChart, "templates", "crd-adoption-hook.yaml"))).To(Succeed())
 		Expect(os.MkdirAll(filepath.Join(legacyChart, "crds"), 0o750)).To(Succeed())
 		Expect(os.WriteFile(filepath.Join(legacyChart, "crds", "automations.yaml"),
 			[]byte(legacyCRD), 0o600)).To(Succeed())
@@ -195,33 +200,42 @@ var _ = Describe("Upgrading from a chart that shipped the CRD under crds/", Orde
 		Expect(cluster.Apply(fmt.Sprintf(automationUnderOldSchema, storedBeforeUpgrade, namespace))).To(Succeed())
 	})
 
-	It("refuses the upgrade until the CRD is handed over to the release", func() {
+	// The whole point of #72, and the assertion that has to stay true: one
+	// `helm upgrade`, no kubectl, no flag, nothing for the person doing the
+	// upgrade to know. If this ever needs a manual step again, this fails.
+	It("upgrades with no manual step at all", func() {
 		out, err := cluster.Helm("upgrade", release, "charts/reactor", "--namespace", namespace,
 			set, "image.repository="+managerRepository,
 			set, "image.tag="+managerTag,
 			set, "image.pullPolicy=Never",
-			"--timeout=180s")
-		Expect(err).To(HaveOccurred(), "the upgrade succeeded where the documented one-time adoption is required")
-		Expect(out).To(ContainSubstring("invalid ownership metadata"),
-			"the upgrade failed for a reason the troubleshooting guide does not describe")
+			"--wait", "--timeout=180s")
+		Expect(err).NotTo(HaveOccurred(),
+			"the upgrade from the crds/ packaging still needs the CRD handed over by hand: "+out)
+
+		By("having taken ownership of the CRD rather than replacing it")
+		labels, err := cluster.Kubectl("get", "crd", crdName, "-o", "jsonpath={.metadata.labels}")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(labels).To(ContainSubstring(`"app.kubernetes.io/managed-by":"Helm"`))
+		annotations, err := cluster.Kubectl("get", "crd", crdName, "-o", "jsonpath={.metadata.annotations}")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(annotations).To(ContainSubstring(`"meta.helm.sh/release-name":"` + release + `"`))
+		Expect(annotations).To(ContainSubstring(`"meta.helm.sh/release-namespace":"` + namespace + `"`))
 	})
 
-	It("upgrades once the documented adoption has been done", func() {
-		By("running exactly what the chart README and troubleshooting guide tell people to run")
-		_, err := cluster.Kubectl("label", "crd", crdName,
-			"app.kubernetes.io/managed-by=Helm", "--overwrite")
-		Expect(err).NotTo(HaveOccurred())
-		_, err = cluster.Kubectl("annotate", "crd", crdName,
-			"meta.helm.sh/release-name="+release,
-			"meta.helm.sh/release-namespace="+namespace, "--overwrite")
-		Expect(err).NotTo(HaveOccurred())
-
-		_, err = cluster.Helm("upgrade", release, "charts/reactor", "--namespace", namespace,
-			set, "image.repository="+managerRepository,
-			set, "image.tag="+managerTag,
-			set, "image.pullPolicy=Never",
-			"--wait", "--timeout=180s")
-		Expect(err).NotTo(HaveOccurred())
+	// A hook that succeeds takes its own permissions with it. The grant it
+	// needs — patch on a CustomResourceDefinition — is one the operator does
+	// not have and must not be left holding.
+	It("leaves nothing of the hook behind", func() {
+		for _, kind := range []string{"job", "serviceaccount"} {
+			left, err := cluster.Kubectl("get", kind, adoptJob, "-n", namespace, "--ignore-not-found")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(left).To(BeEmpty(), "the adoption %s outlived the upgrade that needed it", kind)
+		}
+		for _, kind := range []string{"clusterrole", "clusterrolebinding"} {
+			left, err := cluster.Kubectl("get", kind, adoptJob, "--ignore-not-found")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(left).To(BeEmpty(), "a cluster-scoped %s over CRDs outlived the upgrade", kind)
+		}
 	})
 
 	It("puts the current schema live, not merely in the release", func() {
@@ -249,5 +263,79 @@ var _ = Describe("Upgrading from a chart that shipped the CRD under crds/", Orde
 		Expect(stored.Spec.When).NotTo(BeNil())
 		Expect(stored.Spec.When.State).To(HaveKeyWithValue("wan", "backup"),
 			"replacing the CRD did not preserve an Automation written under the old schema")
+	})
+
+	// Adoption happens once and then stops existing. From here the CRD is an
+	// ordinary part of the release, Helm maintains its schema, and no upgrade
+	// runs a Job or asks for a cluster-scoped permission it does not need.
+	It("does not render the adoption again on the next upgrade", func() {
+		_, err := cluster.Helm("upgrade", release, "charts/reactor", "--namespace", namespace,
+			set, "image.repository="+managerRepository,
+			set, "image.tag="+managerTag,
+			set, "image.pullPolicy=Never",
+			"--wait", "--timeout=180s")
+		Expect(err).NotTo(HaveOccurred())
+
+		hooks, err := cluster.Helm("get", "hooks", release, "--namespace", namespace)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(hooks).NotTo(ContainSubstring(adoptJob),
+			"the adoption hook is rendered on every upgrade, not only the one that needed it")
+
+		By("with the CRD now carried by the release itself")
+		manifest, err := cluster.Helm("get", "manifest", release, "--namespace", namespace)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(manifest).To(ContainSubstring("kind: CustomResourceDefinition"),
+			"the CRD never rejoined the release, so a later schema change would not reach the cluster")
+	})
+})
+
+// Adopting a resource is taking ownership of something, so the case that must
+// never work is as important as the one that must: a CRD another release
+// installed belongs to that release, and taking it would leave the release that
+// owns it unable to update its own object.
+var _ = Describe("A CRD that belongs to a different release", Ordered, func() {
+	const namespace = "reactor-foreign-crd"
+	const otherRelease = "platform-crds"
+	const otherNamespace = "platform"
+
+	BeforeAll(func() {
+		removeCRD()
+		_, _ = cluster.Kubectl("create", "namespace", namespace)
+
+		By("putting a CRD in the cluster that says it belongs to another release")
+		Expect(cluster.Apply(legacyCRD)).To(Succeed())
+		_, err := cluster.Kubectl("label", "crd", crdName,
+			"app.kubernetes.io/managed-by=Helm", "--overwrite")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = cluster.Kubectl("annotate", "crd", crdName,
+			"meta.helm.sh/release-name="+otherRelease,
+			"meta.helm.sh/release-namespace="+otherNamespace, "--overwrite")
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	AfterAll(func() {
+		_, _ = cluster.Helm("uninstall", release, "--namespace", namespace, "--ignore-not-found")
+		removeCRD()
+		_, _ = cluster.Kubectl("delete", "namespace", namespace, "--wait=false")
+	})
+
+	It("is refused, by a message naming the release that owns it", func() {
+		out, err := cluster.Helm("install", release, "charts/reactor", "--namespace", namespace,
+			set, "image.repository="+managerRepository,
+			set, "image.tag="+managerTag,
+			set, "image.pullPolicy=Never",
+			"--timeout=180s")
+		Expect(err).To(HaveOccurred(), "a CRD owned by another release was taken from it")
+		Expect(out).To(ContainSubstring(otherRelease),
+			"the failure does not say which release owns the CRD, which is the one thing it has to say")
+		Expect(out).To(ContainSubstring("will not take a CRD from another release"))
+	})
+
+	It("is left exactly as it was", func() {
+		annotations, err := cluster.Kubectl("get", "crd", crdName, "-o", "jsonpath={.metadata.annotations}")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(annotations).To(ContainSubstring(`"meta.helm.sh/release-name":"`+otherRelease+`"`),
+			"the other release's ownership was overwritten")
+		Expect(annotations).To(ContainSubstring(`"meta.helm.sh/release-namespace":"` + otherNamespace + `"`))
 	})
 })

@@ -362,11 +362,22 @@ Two ways out for a namespaced target, and the second is usually better in a home
 
 ## 6. The CRD: `invalid ownership metadata`, or a stale schema
 
-The `Automation` CRD is a chart **template**, so `helm upgrade` updates the schema like anything else, and `helm.sh/resource-policy: keep` means `helm uninstall` leaves the CRD and your Automations alone. Two things still go wrong, and the first one happens exactly once.
+The `Automation` CRD is a chart **template**, so `helm upgrade` updates the schema like anything else, and `helm.sh/resource-policy: keep` means `helm uninstall` leaves the CRD and your Automations alone.
 
-### `helm upgrade` fails with `invalid ownership metadata`
+### Upgrading from chart 0.3.0 or earlier
 
-**Symptom.** Upgrading from chart 0.3.0 or earlier, the upgrade refuses before changing anything:
+**There is nothing to do.** Those versions installed the CRD through the chart's `crds/` directory, which Helm applies but never records as part of the release — so the first upgrade to a chart that templates it meets a CRD owned by nobody, which Helm refuses to touch. The chart now adopts that CRD itself, on that one upgrade, and `helm upgrade` is the whole procedure.
+
+What it does, so that nothing about it is a surprise:
+
+- A hook Job — its own ServiceAccount, and a ClusterRole granting `get` and `patch` on that single CRD name — runs before the release is applied, sets the three keys Helm looks for (`app.kubernetes.io/managed-by=Helm`, `meta.helm.sh/release-name`, `meta.helm.sh/release-namespace`, taken from the release you are installing), and puts the chart's schema live in the same patch.
+- It is rendered **only** when there is something to adopt. A fresh install, and every upgrade after the first, renders no Job and no cluster-scoped permission at all.
+- The CRD is never deleted or recreated, and no `Automation` is read or written. The resources stored under it survive, as they do on any other upgrade.
+- It cleans up after itself when it succeeds, and stays put when it fails so you can read `kubectl logs job/<release>-adopt-crd`.
+
+A CRD that belongs to a **different** Helm release is never adopted. That upgrade stops before it changes anything, naming the release that owns it — take it from there deliberately, or upgrade with `--set crds.install=false` and leave the CRD to whoever manages it.
+
+**Doing it by hand instead.** With `--set crds.adopt=false` the chart renders no hook, and the upgrade fails the way it used to:
 
 ```text
 Error: UPGRADE FAILED: rendered manifests contain a resource that already
@@ -375,9 +386,7 @@ exists. Unable to continue with update: CustomResourceDefinition
 label validation error: missing key "app.kubernetes.io/managed-by" ...
 ```
 
-**Cause.** Those versions installed the CRD through the chart's `crds/` directory, which Helm applies but does not record as part of the release. The new chart renders the same object as a template, finds it already there owned by nobody, and stops. This is Helm protecting you, not a broken chart.
-
-**Fix.** Hand the existing CRD over to the release, then upgrade again. Nothing is deleted or recreated — the CRD stays live and your Automations with it:
+The fix is the pair of commands the hook runs for you — use your own release name and namespace, then upgrade again:
 
 ```sh
 kubectl label crd automations.reactor.robbeverhelst.com \
@@ -387,7 +396,7 @@ kubectl annotate crd automations.reactor.robbeverhelst.com \
   meta.helm.sh/release-namespace=reactor-system --overwrite
 ```
 
-Use your own release name and namespace — a mismatch here produces the same error with a different message, naming the release it thinks owns the object. Once adopted, this never recurs.
+The same commands are the fallback if the hook itself fails — its logs say why, and adopting by hand needs no more than this. Once adopted, by either route, it never recurs.
 
 ### A valid Automation is rejected, or a field is silently dropped
 

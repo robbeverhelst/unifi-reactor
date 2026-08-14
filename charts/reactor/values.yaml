@@ -8,6 +8,22 @@ crds:
   # what to apply and when.
   install: true
 
+  # Take over a CRD that belongs to no Helm release, which is what chart 0.3.0
+  # and earlier left behind by shipping it under crds/. Without this the first
+  # upgrade from those versions fails with "invalid ownership metadata" until
+  # the CRD is labelled and annotated by hand.
+  #
+  # It happens on exactly one upgrade per install, and only when there is
+  # something to adopt: a hook Job — with its own ServiceAccount and a
+  # ClusterRole granting get and patch on that single CRD name — is rendered
+  # only in that case, and cleans itself up when it succeeds. A CRD owned by
+  # another release is never adopted; that upgrade stops and says whose it is.
+  #
+  # Set to false to do it by hand instead (docs/troubleshooting.md has the two
+  # kubectl commands). Ignored when install is false, which already says the
+  # CRD is somebody else's to manage.
+  adopt: true
+
 image:
   repository: ghcr.io/robbeverhelst/unifi-reactor
   # Defaults to the chart's appVersion.

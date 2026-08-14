@@ -30,5 +30,5 @@ Generated notes alone are not considered sufficient for a change that alters the
 
 Read the release notes for **every** version between the one you are on and the one you are moving to, not just the newest. Two specific hazards are documented in the troubleshooting guide:
 
-- [the first upgrade from chart 0.3.0 or earlier fails until the CRD is adopted into the release](docs/troubleshooting.md#6-the-crd-invalid-ownership-metadata-or-a-stale-schema) — a one-time `kubectl label` and `annotate` pair, after which `helm upgrade` keeps the schema current on its own
+- [the first upgrade from chart 0.3.0 or earlier adopts the CRD into the release](docs/troubleshooting.md#6-the-crd-invalid-ownership-metadata-or-a-stale-schema) — the chart does it for you on that one upgrade, after which `helm upgrade` keeps the schema current on its own
 - [changes to reversal semantics](docs/troubleshooting.md#4-onexit-fired--or-did-not--when-you-did-not-expect-it) affect Automations that omit `onExit`
