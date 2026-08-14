@@ -119,6 +119,35 @@ func TestCRDCanBeManagedOutsideTheRelease(t *testing.T) {
 	}
 }
 
+// TestAdoptionIsRenderedOnlyWhenThereIsSomethingToAdopt is the cost side of the
+// CRD adoption hook: an install with nothing to take over — every fresh install,
+// and every upgrade after the first — renders no Job, no second ServiceAccount,
+// and above all no cluster-scoped permission over CustomResourceDefinitions.
+//
+// `helm template` has no cluster to look in, which is exactly the state this
+// asserts: the hook is gated on a lookup finding a CRD owned by nobody, so
+// rendering without one must produce none of it. The adopting path itself needs
+// a real cluster and is covered by test/e2e/lifecycle.
+func TestAdoptionIsRenderedOnlyWhenThereIsSomethingToAdopt(t *testing.T) {
+	absent := []string{"--adopt-crd", "-adopt-crd", `resources: ["customresourcedefinitions"]`}
+	for _, mode := range rbacModes {
+		t.Run(mode, func(t *testing.T) {
+			for _, values := range [][]string{
+				{unifiURL, mode},
+				{unifiURL, mode, "crds.install=false"},
+				{unifiURL, mode, "crds.adopt=false"},
+			} {
+				manifests := render(t, values...)
+				for _, hook := range absent {
+					if strings.Contains(manifests, hook) {
+						t.Errorf("%v rendered %q with no CRD to adopt", values, hook)
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestChartCRDMatchesGenerated fails when the chart's CRD was hand-edited or
 // `make manifests` was not run: the chart copy is generated from
 // config/crd/bases by hack/sync-chart-crds.sh.
@@ -145,8 +174,9 @@ func readSpec(t *testing.T, path string) string {
 	if !found {
 		t.Fatalf("no top-level spec block in %s", path)
 	}
-	// The chart copy ends with the Helm guard; the generated one does not.
-	spec, _, _ = strings.Cut(spec, "\n{{- end }}")
+	// The chart copy ends with the Helm guard closing the template it is
+	// defined in; the generated one does not.
+	spec, _, _ = strings.Cut(spec, "\n{{- end")
 	return strings.TrimSpace(spec)
 }
 

@@ -1,0 +1,169 @@
+{{- if eq (include "reactor.crdAdoption" .) "adopt" }}
+# Rendered only on the one upgrade that needs it: a cluster whose Automation CRD
+# was installed by chart 0.3.0 or earlier, through crds/, and so belongs to no
+# Helm release. Every other install and upgrade renders none of this — no Job,
+# no ServiceAccount, and no cluster-scoped permission over CRDs.
+#
+# Why the chart cannot simply let Helm apply the CRD here: Helm checks whether
+# it owns an object while it *prepares* the upgrade, before it runs any hook, so
+# an upgrade that renders the unowned CRD fails before this Job could exist. The
+# chart leaves the CRD out of the release on this one upgrade (reactor.crdAdoption
+# in _helpers.tpl), and this Job takes ownership and puts the chart's schema live
+# in the same patch. From the next upgrade on, Helm owns the CRD and maintains
+# the schema itself, exactly as it does for an install that never saw crds/.
+#
+# What it will not do: adopt a CRD another release owns — it fails, naming that
+# release — delete or recreate the CRD, or touch a single Automation. Set
+# crds.adopt=false to do it by hand instead; the troubleshooting guide has the
+# two kubectl commands.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "reactor.fullname" . }}-adopt-crd
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reactor.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: hook-succeeded,before-hook-creation
+data:
+  # The chart's own CRD, the same bytes the release applies once it owns it, so
+  # the schema this puts live is the one this chart version ships rather than a
+  # second copy that could drift from it.
+  crds.yaml: |
+{{ include "reactor.crdManifest" . | indent 4 }}
+---
+# The hook's own identity. It is deliberately not the manager's: patching a
+# CustomResourceDefinition is a permission the operator does not have and must
+# never gain, and this needs it for as long as one Job takes.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "reactor.fullname" . }}-adopt-crd
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reactor.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: hook-succeeded,before-hook-creation
+---
+# A ClusterRole in both RBAC modes, because a CustomResourceDefinition is
+# cluster-scoped and a namespaced Role cannot reach one at all. It is bounded
+# the only other way the API offers: one named resource, and the two verbs
+# adoption is — read what is there, patch what is missing. No list, no watch, no
+# create, and above all no delete: nothing here can remove the CRD, which is
+# what would take every Automation in the cluster with it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "reactor.fullname" . }}-adopt-crd
+  labels:
+    {{- include "reactor.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: hook-succeeded,before-hook-creation
+rules:
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    resourceNames: [{{ include "reactor.crdName" . | quote }}]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "reactor.fullname" . }}-adopt-crd
+  labels:
+    {{- include "reactor.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    # After the ClusterRole and the ServiceAccount it names, and before the Job
+    # that runs under it: a binding created after its Job would leave the first
+    # attempt Forbidden.
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: hook-succeeded,before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "reactor.fullname" . }}-adopt-crd
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "reactor.fullname" . }}-adopt-crd
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "reactor.fullname" . }}-adopt-crd
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reactor.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    # Cleaned up when it works, and left behind when it does not: a failed
+    # adoption is one whose logs somebody has to be able to read. The next
+    # attempt removes it before creating its own.
+    helm.sh/hook-delete-policy: hook-succeeded,before-hook-creation
+spec:
+  backoffLimit: 1
+  # One read and one patch. A hook that cannot manage that in two minutes is
+  # not going to manage it in ten, and it is holding up an upgrade meanwhile.
+  activeDeadlineSeconds: 120
+  template:
+    metadata:
+      labels:
+        {{- include "reactor.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "reactor.fullname" . }}-adopt-crd
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: adopt-crd
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --adopt-crd
+            - --crd-manifest=/etc/reactor/crd/crds.yaml
+          env:
+            # The release being installed, never a name the chart assumed: a
+            # user who installs under their own release name adopts into that
+            # one, and ownership metadata naming a release that does not exist
+            # would leave Helm refusing the upgrade for a second reason.
+            - name: RELEASE_NAME
+              value: {{ .Release.Name | quote }}
+            - name: RELEASE_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+          volumeMounts:
+            - name: crd
+              mountPath: /etc/reactor/crd
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: crd
+          configMap:
+            name: {{ include "reactor.fullname" . }}-adopt-crd
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

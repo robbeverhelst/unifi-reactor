@@ -36,8 +36,13 @@ fi
 	echo "Templated rather than shipped in crds/, because Helm never upgrades the"
 	echo "latter. helm.sh/resource-policy: keep means an uninstall leaves the CRD"
 	echo "and your Automations in place; delete it by hand if you mean to."
+	echo ""
+	echo "Defined rather than written out inline, because the chart needs these"
+	echo "same bytes in two places: the release itself, and the ConfigMap the"
+	echo "adoption hook patches from on the one upgrade where the CRD is not yet"
+	echo "part of any release. See reactor.crdAdoption in _helpers.tpl."
 	echo "*/}}"
-	echo "{{- if .Values.crds.install }}"
+	echo "{{- define \"reactor.crdManifest\" -}}"
 	for crd in "${crds[@]}"; do
 		echo "---"
 		# The keep policy belongs to the chart, not to the API type, so it is
@@ -59,6 +64,9 @@ fi
 			}
 		' "$crd"
 	done
+	echo "{{- end -}}"
+	echo "{{- if and .Values.crds.install (ne (include \"reactor.crdAdoption\" .) \"adopt\") }}"
+	echo "{{- include \"reactor.crdManifest\" . }}"
 	echo "{{- end }}"
 } >"$out"
 
