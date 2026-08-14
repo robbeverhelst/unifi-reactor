@@ -734,6 +734,7 @@ Each key is published only when the matching hardware is adopted by your control
 | `firmware` | `current`, `updates-available` | whether the console has an update waiting for anything adopted |
 | `temperature` | `normal`, `high` | the hottest adopted device against the configured threshold |
 | `wifi` | `ok`, `warning`, `error` | the WiFi subsystem as a whole, from the console's AP counts |
+| `poe` | `ok`, `insufficient` | PoE headroom on the worst switch, against the configured threshold |
 
 `isp` is the one key whose values are not a closed set: it is the carrier name your console geolocated your public address to, lowercased with everything non-alphanumeric turned into a hyphen. Look it up before matching on it —
 
@@ -980,6 +981,41 @@ interference — that counter rises instead of the derivation quietly being wron
 A site with **no** adopted access points publishes no `wifi` key: there is no WiFi
 there to be healthy, which is not the same as WiFi that is fine.
 
+### `poe` is headroom, before it becomes an outage
+
+An overloaded PoE budget silently drops APs and cameras. `poe` reports
+`insufficient` when the worst switch is delivering at or above a share of its
+budget **you configure**:
+
+```yaml
+unifi:
+  poe:
+    maxUtilizationPercent: 90
+```
+
+`insufficient` means *the headroom is gone*, not that a port has already been
+denied power — by the time the console refuses a port, the camera is off. The
+worst switch decides, because one switch out of headroom drops the cameras on
+that switch whatever the rest of the rack has spare.
+
+Another [bucketed measurement](#temperature-is-the-hottest-device-bucketed), with
+the watts in a `V(1)` log line:
+
+```sh
+kubectl -n reactor-system logs deploy/reactor | grep 'unifi-poe'   # needs log.level=debug
+# poe poe=ok worstUtilizationPercent=32.5 worstSwitch=switch-48 draws=switch-48=63.5/195W
+```
+
+The interesting rule here is what happens to a port that is **powering something
+and will not say how much**: it makes that whole switch unreadable, and the switch
+is left out rather than counted as drawing nothing. Counting it as 0 W would report
+headroom that is not there — under-counting the draw is the one direction that
+hides the exact failure this key exists to catch. Other switches are still
+measured, so one unreadable switch does not take the key with it.
+
+A switch reporting no budget is likewise not a switch with no budget, and never a
+denominator. A fleet with no readable PoE switch publishes no `poe` key at all.
+
 If a provider stops reporting a key at all — the hardware dropped off the controller — Reactor holds the last known state and reports `Ready=False` with `StateKeyUnavailable` rather than treating lost visibility as a condition that ended ([what to do about it](docs/troubleshooting.md#2-statekeyunavailable-and-held-state)).
 
 ### Settling a noisy signal
@@ -1002,6 +1038,7 @@ unifi:
       firmware: 3       # ...and nothing about an update is urgent
       temperature: 3    # ...and a measurement hovers on its threshold
       wifi: 2           # ...and an AP heartbeat can miss a beat
+      poe: 3            # ...and a PoE draw moves when a radio comes up
 ```
 
 Each extra sample costs one `pollInterval` of reaction time, so the default is `1`: a WAN failover and a power cut both deserve an immediate reaction, and neither flaps. `ups.battery` ships at `2` because it is a threshold crossing — a charge hovering at 30% would otherwise report `low`, `normal`, `low` — and because a battery drains over minutes, so spending one more poll to be sure costs nothing. At the default 30s poll that makes a battery-level escalation react in 60s worst case instead of 30s.
@@ -1023,6 +1060,8 @@ Debounce is also the whole of the flap control for `wan.quality`, and that is wo
 `temperature` ships at `3` because it is a measurement that hovers: thermals move with the room, the fan and the load, and a reading sitting near the threshold would otherwise report `high`, `normal`, `high`. Debounce is the whole of the flap control here, exactly as it is for `wan.quality` — three consecutive identical readings, or the key holds what it had.
 
 `wifi` ships at `2` for the same reason `devices` does, and from the same underlying fact: an AP count is the console's judgement about heartbeats, and one missed beat on a busy console must not fire an automation.
+
+`poe` ships at `3`, the same argument as `ups.load`: it is an instantaneous measurement, and an AP's radios or a camera's heater coming up move the draw by tens of watts within one poll. Its 90% default assumes those three samples — raise the threshold towards 100 and there is no headroom left to react in during them.
 
 `device.*` is the one entry here that is a pattern rather than a key. Per-device key names come from your hardware, so no list written here could name them; a trailing `*` matches every key with that prefix. An exact key always wins over a pattern, and the longest matching prefix wins between patterns, so `device.ap-attic: 5` pulls one device out of the group it belongs to.
 

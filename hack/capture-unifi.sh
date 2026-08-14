@@ -42,6 +42,8 @@ DEVICE='{
   model_in_eol, model_in_lts,
   has_temperature, has_fan, overheating, general_temperature,
   temperatures: (if .temperatures then [.temperatures[] | {name, type, value}] else null end),
+  total_max_power,
+  port_table: (if .port_table then [.port_table[] | {port_idx, poe_enable, poe_power, poe_class}] else null end),
   wan1: (if .wan1 then (.wan1 | '"$WAN"') else null end),
   wan2: (if .wan2 then (.wan2 | '"$WAN"') else null end),
   uplink: (if .uplink then {name: .uplink.name, type: .uplink.type} else null end),

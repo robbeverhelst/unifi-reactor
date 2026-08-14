@@ -481,6 +481,7 @@ func setupUniFi(
 	unifiClient.MinAvailabilityPercent = cfg.MinAvailabilityPercent
 	unifiClient.MaxLatencyMs = cfg.MaxLatencyMs
 	unifiClient.HighTemperatureCelsius = cfg.HighTemperatureCelsius
+	unifiClient.MaxPoEUtilizationPercent = cfg.MaxPoEUtilizationPercent
 	unifiClient.PerDeviceKeys = cfg.PerDeviceKeys
 
 	// What this provider's keys can hold, so reactor_state_info can report 0 for

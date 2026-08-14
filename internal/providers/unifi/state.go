@@ -34,6 +34,7 @@ const (
 	stateKeyFirmware    = "firmware"
 	stateKeyTemperature = "temperature"
 	stateKeyWiFi        = "wifi"
+	stateKeyPoE         = "poe"
 
 	// stateKeyDevicePrefix is what a per-device key is published under:
 	// device.<slugified name>. It is the first key on this list whose NAME is
@@ -156,6 +157,14 @@ const (
 	wifiOK      = "ok"
 	wifiWarning = "warning"
 	wifiError   = "error"
+
+	// poe buckets a budget, which is a measurement like temperature and
+	// ups.load. insufficient means the headroom is gone — the worst switch is
+	// delivering at or above the configured share of its budget — rather than
+	// that a port has already been denied power. By the time the console
+	// refuses a port, the camera is already off.
+	poeOK           = "ok"
+	poeInsufficient = "insufficient"
 )
 
 // The comparisons this provider makes between two independent signals for the
@@ -220,5 +229,6 @@ func StateVocabulary() map[string][]string {
 		stateKeyFirmware:    {firmwareCurrent, firmwareUpdatesAvailable},
 		stateKeyTemperature: {temperatureNormal, temperatureHigh},
 		stateKeyWiFi:        {wifiOK, wifiWarning, wifiError},
+		stateKeyPoE:         {poeOK, poeInsufficient},
 	}
 }

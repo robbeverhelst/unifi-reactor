@@ -52,6 +52,7 @@ const (
 	envMaxLatency         = "UNIFI_WAN_QUALITY_MAX_LATENCY_MS"
 	envPerDeviceKeys      = "UNIFI_PER_DEVICE_KEYS"
 	envHighTemperature    = "UNIFI_TEMPERATURE_HIGH_CELSIUS"
+	envMaxPoEUtilization  = "UNIFI_POE_MAX_UTILIZATION_PERCENT"
 
 	envWebhookEnabled     = "UNIFI_WEBHOOK_ENABLED"
 	envWebhookBindAddress = "UNIFI_WEBHOOK_BIND_ADDRESS"
@@ -75,18 +76,19 @@ type Config struct {
 	URL string
 	// APIKey is resolved per request, not held from startup, so rotating a
 	// mounted credential takes effect on the next poll.
-	APIKey                 APIKey
-	Site                   string
-	InsecureSkipVerify     bool
-	PollInterval           time.Duration
-	LowBatteryPercent      int
-	CriticalBatteryPercent int
-	ShortRuntimeSeconds    int
-	CriticalRuntimeSeconds int
-	HighLoadPercent        float64
-	MinAvailabilityPercent float64
-	MaxLatencyMs           float64
-	HighTemperatureCelsius float64
+	APIKey                   APIKey
+	Site                     string
+	InsecureSkipVerify       bool
+	PollInterval             time.Duration
+	LowBatteryPercent        int
+	CriticalBatteryPercent   int
+	ShortRuntimeSeconds      int
+	CriticalRuntimeSeconds   int
+	HighLoadPercent          float64
+	MinAvailabilityPercent   float64
+	MaxLatencyMs             float64
+	HighTemperatureCelsius   float64
+	MaxPoEUtilizationPercent float64
 	// PerDeviceKeys opts into a device.<name> key per adopted device. Off by
 	// default: it is the only setting that changes how many series an install
 	// publishes rather than what any of them mean.
@@ -147,19 +149,20 @@ type WebhookConfig struct {
 // mapping can be tested without mutating process state.
 func ConfigFromEnv(lookup func(string) string) (Config, bool, error) {
 	cfg := Config{
-		URL:                    lookup(envURL),
-		Site:                   lookup(envSite),
-		InsecureSkipVerify:     lookup(envInsecureSkipVerify) == envTrue,
-		PollInterval:           DefaultPollInterval,
-		LowBatteryPercent:      DefaultLowBatteryPercent,
-		CriticalBatteryPercent: DefaultCriticalBatteryPercent,
-		ShortRuntimeSeconds:    DefaultShortRuntimeSeconds,
-		CriticalRuntimeSeconds: DefaultCriticalRuntimeSeconds,
-		HighLoadPercent:        DefaultHighLoadPercent,
-		MinAvailabilityPercent: DefaultMinAvailabilityPercent,
-		MaxLatencyMs:           DefaultMaxLatencyMs,
-		HighTemperatureCelsius: DefaultHighTemperatureCelsius,
-		PerDeviceKeys:          lookup(envPerDeviceKeys) == envTrue,
+		URL:                      lookup(envURL),
+		Site:                     lookup(envSite),
+		InsecureSkipVerify:       lookup(envInsecureSkipVerify) == envTrue,
+		PollInterval:             DefaultPollInterval,
+		LowBatteryPercent:        DefaultLowBatteryPercent,
+		CriticalBatteryPercent:   DefaultCriticalBatteryPercent,
+		ShortRuntimeSeconds:      DefaultShortRuntimeSeconds,
+		CriticalRuntimeSeconds:   DefaultCriticalRuntimeSeconds,
+		HighLoadPercent:          DefaultHighLoadPercent,
+		MinAvailabilityPercent:   DefaultMinAvailabilityPercent,
+		MaxLatencyMs:             DefaultMaxLatencyMs,
+		HighTemperatureCelsius:   DefaultHighTemperatureCelsius,
+		MaxPoEUtilizationPercent: DefaultMaxPoEUtilizationPercent,
+		PerDeviceKeys:            lookup(envPerDeviceKeys) == envTrue,
 		Webhook: WebhookConfig{
 			Enabled:            lookup(envWebhookEnabled) == envTrue,
 			BindAddress:        DefaultWebhookBindAddress,
@@ -239,6 +242,7 @@ func ConfigFromEnv(lookup func(string) string) (Config, bool, error) {
 		{envMaxLatency, &cfg.MaxLatencyMs},
 		{envHighLoad, &cfg.HighLoadPercent},
 		{envHighTemperature, &cfg.HighTemperatureCelsius},
+		{envMaxPoEUtilization, &cfg.MaxPoEUtilizationPercent},
 	} {
 		raw := lookup(field.env)
 		if raw == "" {

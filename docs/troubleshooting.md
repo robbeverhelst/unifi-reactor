@@ -706,6 +706,31 @@ samples, and the 75 °C default assumes a normal operating range of 40–60 °C;
 the threshold into that range and 90 seconds of hysteresis stops meaning anything,
 because the reading crosses the line and stays there.
 
+## 10e. `poe` never appears
+
+The third parser written against fields no capture contains. Same first move:
+
+```sh
+kubectl -n reactor-system logs deploy/reactor | grep 'unifi-poe'   # needs log.level=debug
+# poe poe=ok worstUtilizationPercent=32.5 worstSwitch=switch-48 draws=switch-48=63.5/195W
+```
+
+| What you see | What it means |
+| --- | --- |
+| `No adopted switch reports a readable PoE budget` with an empty `switchesUnreadable` | Nothing reports `total_max_power` and a `port_table`. A gateway, an AP and a UniFi UPS all legitimately report neither; if a PoE switch is adopted, the field names differ on your firmware and [#14](https://github.com/robbeverhelst/unifi-reactor/issues/14) wants to know |
+| `switchesUnreadable=switch-48=port3(class Class 4) of 4 powered ports report no wattage` | A port is powering something and will not say how much, so that switch is left out entirely rather than counted as drawing nothing. Under-counting the draw would report headroom that is not there |
+| `poe: ok` on a switch you know is full | Check `draws` against what the UniFi UI shows for the same switch. If the watts are far too low, `poe_power` is arriving in a form this parser did not expect — it accepts a number and a numeric string, and treats anything else as no reading |
+
+```sh
+curl -sk -H "X-API-KEY: $UNIFI_API_KEY" \
+  "$UNIFI_URL/proxy/network/api/s/default/stat/device" \
+  | jq '[.data[] | select(.total_max_power) | {name, total_max_power,
+        ports: [.port_table[] | select(.poe_enable) | {port_idx, poe_power, poe_class}]}]'
+```
+
+That output is exactly what the parser reads. Post it on #14 — with the device
+name removed — if it does not match what Reactor logged.
+
 ---
 
 ## 11. Reactor warns about your UniFi Network version

@@ -95,6 +95,8 @@ spec:
               value: {{ .Values.unifi.wan.quality.maxLatencyMs | quote }}
             - name: UNIFI_TEMPERATURE_HIGH_CELSIUS
               value: {{ .Values.unifi.temperature.highCelsius | quote }}
+            - name: UNIFI_POE_MAX_UTILIZATION_PERCENT
+              value: {{ .Values.unifi.poe.maxUtilizationPercent | quote }}
             - name: UNIFI_PER_DEVICE_KEYS
               value: {{ .Values.unifi.devices.perDeviceKeys | quote }}
             - name: UNIFI_DEBOUNCE_DEFAULT

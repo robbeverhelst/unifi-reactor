@@ -255,6 +255,7 @@ hardware is adopted by the controller.
 | `firmware` | `current`, `updates-available` | whether the console has an update waiting for any adopted device |
 | `temperature` | `normal`, `high` | the hottest adopted device vs. the configured threshold |
 | `wifi` | `ok`, `warning`, `error` | the `wlan` subsystem's AP counts: some disconnected, or all of them |
+| `poe` | `ok`, `insufficient` | the worst switch's PoE draw vs. its budget and the configured threshold |
 
 `isp` is the only key with an open value set — it is your carrier's name, lowercased with
 non-alphanumerics turned into hyphens. Read it off a state transition line before matching on it.
@@ -382,6 +383,29 @@ inference. The status is still read and cross-checked — a mismatch is counted 
 signal disagreement and logged, rather than either being silently trusted.
 
 A site with no adopted access points publishes no key at all.
+
+### `poe`
+
+`insufficient` when the worst switch is delivering at or above a share of its PoE
+budget — meaning the headroom is gone, not that a port has already been denied
+power. By the time the console refuses a port, the camera is off.
+
+| Value | Default | Description |
+| --- | --- | --- |
+| `unifi.poe.maxUtilizationPercent` | `90` | draw at or above this share of the budget reports `insufficient` |
+
+Set against the debounce this key ships with: PoE draw is instantaneous, so it
+settles over 3 samples, and 90% leaves roughly one powered device's worth of
+headroom during those 90 seconds.
+
+A port that is powering something and reports no wattage makes that whole switch
+unreadable rather than contributing zero — under-counting the draw would report
+headroom that is not there. Other switches are still measured; a fleet with no
+readable switch publishes no key.
+
+> ⚠️ The PoE fields are **not in any committed capture** — no switch record exists
+> at all — so this parser is written to the shape UniFi documents and is
+> unverified, including that `poe_power` arrives as a string.
 
 ### `internet` and `wan.quality`
 
@@ -798,7 +822,7 @@ was told, while the workload was still scaled and the Automation is still
 
 `reactor_state_info{provider,key,value}` is published **only for state keys
 whose value set the provider declares closed** — `wan`, `wan.quality`,
-`internet`, `ups`, `ups.battery`, `ups.runtime`, `ups.load`, `devices`, `firmware`, `temperature`, `wifi`. `isp` is not one of them: its values are
+`internet`, `ups`, `ups.battery`, `ups.runtime`, `ups.load`, `devices`, `firmware`, `temperature`, `wifi`, `poe`. `isp` is not one of them: its values are
 carrier slugs derived from whatever public address your gateway holds, so
 labelling by them would add one permanent time series per carrier ever seen.
 `reactor_state_transitions_total` is not labelled by `from`/`to` for the same
@@ -910,8 +934,9 @@ publishing — which fails as silence rather than as an error.
 | `unifi.wan.quality.maxLatencyMs` | `150` | average latency above this reports `wan.quality: degraded` |
 | `unifi.devices.perDeviceKeys` | `false` | also publish a `device.<name>` key per adopted device; one more series per device |
 | `unifi.temperature.highCelsius` | `75` | hottest adopted device at or above this reports `temperature: high` |
+| `unifi.poe.maxUtilizationPercent` | `90` | a switch delivering at or above this share of its PoE budget reports `poe: insufficient` |
 | `unifi.debounce.default` | `1` | consecutive observations a changed value needs before Reactor acts; each extra sample costs one `pollInterval` of reaction time |
-| `unifi.debounce.keys` | `{ups.battery: 2, ups.runtime: 2, ups.load: 3, isp: 2, internet: 3, wan.quality: 3, devices: 2, device.*: 2, firmware: 3, temperature: 3, wifi: 2}` | per-key overrides for signals that settle rather than switch; an entry may end in `*` to cover keys named after your hardware |
+| `unifi.debounce.keys` | `{ups.battery: 2, ups.runtime: 2, ups.load: 3, isp: 2, internet: 3, wan.quality: 3, devices: 2, device.*: 2, firmware: 3, temperature: 3, wifi: 2, poe: 3}` | per-key overrides for signals that settle rather than switch; an entry may end in `*` to cover keys named after your hardware |
 | `unifi.webhook.enabled` | `false` | Run the webhook receiver; a delivery triggers a poll, never a state change |
 | `unifi.webhook.port` | `9090` | Port the receiver listens on inside the pod |
 | `unifi.webhook.path` | `/webhooks/unifi` | URL path deliveries are accepted on |

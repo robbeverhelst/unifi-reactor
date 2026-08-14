@@ -118,6 +118,10 @@ type Client struct {
 	// adopted device at or above this reports high.
 	HighTemperatureCelsius float64
 
+	// MaxPoEUtilizationPercent bounds the poe state key: a switch delivering at
+	// or above this share of its PoE budget reports insufficient.
+	MaxPoEUtilizationPercent float64
+
 	// PerDeviceKeys publishes a device.<name> key per adopted device alongside
 	// the aggregate devices key. It defaults off because it is the one setting
 	// here that changes how many things Reactor publishes rather than what they
@@ -146,17 +150,18 @@ func NewClient(baseURL string, apiKey APIKey, site string, insecureSkipVerify bo
 		apiKey = StaticAPIKey("")
 	}
 	return &Client{
-		baseURL:                baseURL,
-		apiKey:                 apiKey,
-		site:                   site,
-		LowBatteryPercent:      DefaultLowBatteryPercent,
-		CriticalBatteryPercent: DefaultCriticalBatteryPercent,
-		ShortRuntimeSeconds:    DefaultShortRuntimeSeconds,
-		CriticalRuntimeSeconds: DefaultCriticalRuntimeSeconds,
-		HighLoadPercent:        DefaultHighLoadPercent,
-		MinAvailabilityPercent: DefaultMinAvailabilityPercent,
-		MaxLatencyMs:           DefaultMaxLatencyMs,
-		HighTemperatureCelsius: DefaultHighTemperatureCelsius,
+		baseURL:                  baseURL,
+		apiKey:                   apiKey,
+		site:                     site,
+		LowBatteryPercent:        DefaultLowBatteryPercent,
+		CriticalBatteryPercent:   DefaultCriticalBatteryPercent,
+		ShortRuntimeSeconds:      DefaultShortRuntimeSeconds,
+		CriticalRuntimeSeconds:   DefaultCriticalRuntimeSeconds,
+		HighLoadPercent:          DefaultHighLoadPercent,
+		MinAvailabilityPercent:   DefaultMinAvailabilityPercent,
+		MaxLatencyMs:             DefaultMaxLatencyMs,
+		HighTemperatureCelsius:   DefaultHighTemperatureCelsius,
+		MaxPoEUtilizationPercent: DefaultMaxPoEUtilizationPercent,
 		http: &http.Client{
 			Timeout: 10 * time.Second,
 			Transport: &http.Transport{
@@ -197,6 +202,7 @@ type deviceRecord struct {
 	deviceHealthFields
 	firmwareFields
 	temperatureFields
+	poeFields
 }
 
 type wanPort struct {
@@ -265,6 +271,7 @@ type vbmsTable struct {
 //	firmware     current | updates-available
 //	temperature  normal  | high              (the hottest adopted device)
 //	wifi         ok | warning | error        (the WLAN subsystem as a whole)
+//	poe          ok | insufficient           (headroom on the worst switch)
 //
 // ups and ups.battery are deliberately independent: a `when: {ups: on-battery}`
 // automation must stay matched for the whole outage, including as the battery
@@ -353,6 +360,7 @@ func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse
 	fleet := newDeviceTally()
 	var firmware firmwareTally
 	var heat temperatureTally
+	var poe poeTally
 
 	for _, d := range parsed.Data {
 		// The fleet keys are about devices the console manages, so an unadopted
@@ -363,6 +371,7 @@ func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse
 			fleet.observe(ctx, d)
 			firmware.observe(d)
 			heat.observe(ctx, d)
+			poe.observe(d)
 		} else {
 			logf.FromContext(ctx).WithName("unifi-devices").V(1).Info(
 				"Skipping a device that is not adopted", "model", d.Model, "type", d.Type)
@@ -396,6 +405,7 @@ func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse
 	fleet.publish(ctx, state, c.PerDeviceKeys)
 	firmware.publish(ctx, state)
 	c.publishTemperature(ctx, state, heat)
+	c.publishPoE(ctx, state, poe)
 
 	if len(state) == 0 {
 		return nil, fmt.Errorf(

@@ -333,6 +333,44 @@ than as a fixture.
 > than silent, and the reason the debug line prints the raw number. Compare it
 > against what the UniFi UI shows for the same device before trusting the key.
 
+## PoE — parsed, not captured
+
+**No switch record exists in this repository at all.** The UPS 2U is reported as
+a switch-type device (`USWDA26`) and carries neither a `port_table` nor a PoE
+budget, so the `poe` key is written entirely to the shape UniFi's API documents
+and the field names issue [#14](https://github.com/robbeverhelst/unifi-reactor/issues/14)
+lists.
+
+| Field | In the captures | What the provider does with it |
+| --- | --- | --- |
+| `total_max_power` | **absent** | the switch's whole PoE budget in watts: the denominator |
+| `port_table[].poe_enable` | **absent** | whether the port is delivering power at all |
+| `port_table[].poe_power` | **absent** | the watts it is delivering, summed across powered ports |
+| `port_table[].poe_class` | **absent** | never derived from; names a port in the diagnostic line |
+| `port_table[].port_idx` | **absent** | never derived from; the same |
+
+Two decisions in the parser exist because of what is *not* known:
+
+`poe_power` is decoded by a type that accepts **a JSON number or a numeric
+string**. UniFi is documented to report it as `"3.90"` on several firmwares
+while other endpoints use a number, and committing to either would make an
+entire switch's draw unreadable on the half of the world that reports it the
+other way. Null, empty and unparseable all mean "no reading" — never 0 W.
+
+A port that is **powering something and reports no wattage makes the whole
+switch unreadable**, rather than contributing zero. This is "absent is not zero"
+at the one place on this key where it hides a failure: under-counting the draw
+reports headroom that is not there, which is exactly what #14 exists to catch.
+
+The whole `port_table` is projected down to those four fields in the capture
+script — a real one carries per-port names, MACs and client counts — and
+`internal/providers/unifi/poe_test.go` asserts the decode of the documented
+shape **in code**, as a hypothesis rather than as a fixture.
+
+> ⚠️ **Unverified.** A `stat-device-switch.json` from a US-8-60W or a US-48 is
+> the single capture that would settle this key, the PoE half of `temperature`,
+> and the firmware flags at once.
+
 ## What is not captured yet
 
 `hack/capture-unifi.sh` writes two files that **do not exist in this
