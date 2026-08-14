@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -55,16 +56,33 @@ func merged(t *testing.T, names ...string) []byte {
 	return b
 }
 
+// serve answers both endpoints an observation reads: the given device payload,
+// and the captured health response. Passing a nil health payload makes
+// stat/health fail, which is the case where the console answers about its
+// hardware but not about its own health.
 func serve(t *testing.T, payload []byte) *Client {
+	t.Helper()
+	return serveBoth(t, payload, captured(t, "stat-health.json"))
+}
+
+func serveBoth(t *testing.T, devices, health []byte) *Client {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("X-API-KEY"); got != "test-key" {
 			t.Errorf("expected X-API-KEY header, got %q", got)
 		}
-		if got := r.URL.Path; got != "/proxy/network/api/s/default/stat/device" {
-			t.Errorf("unexpected path %q", got)
+		switch r.URL.Path {
+		case "/proxy/network/api/s/default/stat/device":
+			_, _ = w.Write(devices)
+		case "/proxy/network/api/s/default/stat/health":
+			if health == nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			_, _ = w.Write(health)
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
 		}
-		_, _ = w.Write(payload)
 	}))
 	t.Cleanup(srv.Close)
 	return NewClient(srv.URL, StaticAPIKey("test-key"), "", false)
@@ -77,11 +95,14 @@ func TestObserveAgainstCapturedGatewayAndUPS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Observe: %v", err)
 	}
-	// The captures were taken with WAN1 active, Telenet as the carrier, and
-	// the UPS on mains at 100%.
+	// The captures were taken with WAN1 active, Telenet as the carrier, the
+	// UPS on mains at 97%, the www subsystem reporting ok, and WAN1 at 100%
+	// availability and 16 ms average latency.
 	for key, want := range map[string]string{
 		stateKeyWAN:        wanPrimary,
+		stateKeyWANQuality: wanQualityGood,
 		stateKeyISP:        capturedISP,
+		stateKeyInternet:   internetOK,
 		stateKeyUPS:        upsOnline,
 		stateKeyUPSBattery: batteryNormal,
 	} {
@@ -241,7 +262,12 @@ func TestFileAPIKeyPicksUpRotation(t *testing.T) {
 
 	var seen []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seen = append(seen, r.Header.Get("X-API-KEY"))
+		// One observation reads two endpoints; the key is resolved per request,
+		// so record it once per observation to keep the assertion about
+		// rotation rather than about how many calls a poll makes.
+		if strings.HasSuffix(r.URL.Path, "stat/device") {
+			seen = append(seen, r.Header.Get("X-API-KEY"))
+		}
 		_, _ = w.Write(captured(t, "stat-device-gateway.json"))
 	}))
 	t.Cleanup(srv.Close)

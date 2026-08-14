@@ -45,6 +45,7 @@ const (
 type fakeConsole struct {
 	mu          sync.Mutex
 	body        []byte
+	health      []byte
 	observation atomic.Int64
 }
 
@@ -85,12 +86,23 @@ func newFakeConsole(t *testing.T) (*fakeConsole, *httptest.Server) {
 	if err != nil {
 		t.Fatalf("reading the captured device payload: %v", err)
 	}
-	console := &fakeConsole{body: body}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		console.observation.Add(1)
+	health, err := os.ReadFile("../../testdata/unifi/api/stat-health.json")
+	if err != nil {
+		t.Fatalf("reading the captured health payload: %v", err)
+	}
+	console := &fakeConsole{body: body, health: health}
+	// An observation reads two endpoints, so the counter follows the device
+	// call only. What these tests measure is how many observations happened,
+	// not how many requests one costs.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		console.mu.Lock()
 		defer console.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "stat/health") {
+			_, _ = w.Write(console.health)
+			return
+		}
+		console.observation.Add(1)
 		_, _ = w.Write(console.body)
 	}))
 	t.Cleanup(server.Close)

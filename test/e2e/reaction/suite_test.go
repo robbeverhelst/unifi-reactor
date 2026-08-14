@@ -72,11 +72,16 @@ const (
 
 	// The state values the rehearsed console publishes, written the way an
 	// Automation's spec.when.state writes them.
-	keyWAN       = "wan"
-	keyUPS       = "ups"
-	wanPrimary   = "primary"
-	wanBackup    = "backup"
-	upsOnBattery = "on-battery"
+	keyWAN             = "wan"
+	keyWANQuality      = "wan.quality"
+	keyUPS             = "ups"
+	keyInternet        = "internet"
+	wanPrimary         = "primary"
+	wanBackup          = "backup"
+	wanQualityDegraded = "degraded"
+	upsOnBattery       = "on-battery"
+	internetOK         = "ok"
+	internetDown       = "down"
 
 	// settleWindow is how long a workload must hold a value for the suite to
 	// accept that nothing is going to move it. It spans several polls and at
@@ -173,6 +178,8 @@ var _ = AfterSuite(func() {
 func resetConsole() {
 	Expect(mock.WAN(wanPrimary)).To(Succeed())
 	Expect(mock.UPS("mode=mains&level=100&present=true")).To(Succeed())
+	Expect(mock.Internet("present=true&status=ok")).To(Succeed())
+	Expect(mock.Quality("reset=true")).To(Succeed())
 }
 
 // workload renders a target Deployment. The pods run the mock's image because

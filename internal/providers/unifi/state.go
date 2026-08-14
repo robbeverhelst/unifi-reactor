@@ -23,12 +23,32 @@ const (
 	ProviderName = "unifi"
 
 	stateKeyWAN        = "wan"
+	stateKeyWANQuality = "wan.quality"
 	stateKeyISP        = "isp"
+	stateKeyInternet   = "internet"
 	stateKeyUPS        = "ups"
 	stateKeyUPSBattery = "ups.battery"
 
 	wanPrimary = "primary"
 	wanBackup  = "backup"
+
+	// internet answers a question wan structurally cannot: wan says which
+	// uplink is selected, and stays primary while the link is up, the uplink is
+	// unchanged, and there is no internet. These values come from the console's
+	// own www subsystem, which is its judgement about reachability rather than
+	// about link state.
+	internetOK       = "ok"
+	internetDegraded = "degraded"
+	internetDown     = "down"
+
+	// wan.quality buckets a measurement rather than reporting a switch
+	// position. The numbers behind it — availability and average latency over
+	// the console's uptime window — are continuous, and a continuous value can
+	// be neither matched by spec.when (which compares strings) nor exported as
+	// a metric label (which needs a closed set). Two named levels are what
+	// survives both constraints.
+	wanQualityGood     = "good"
+	wanQualityDegraded = "degraded"
 
 	// ispUnknown is published when a gateway is visible but names no ISP —
 	// which is a real observation, not missing hardware, and is expected to
@@ -50,6 +70,21 @@ const (
 	wanStatusKeyPrimary = "WAN"
 	wanStatusKeyBackup  = "WAN2"
 
+	// The stat/health subsystems this provider reads. www is the console's own
+	// internet-reachability subsystem; wan carries the per-uplink uptime_stats.
+	healthSubsystemWWW = "www"
+	healthSubsystemWAN = "wan"
+
+	// The per-subsystem status values. ok, warning and unknown are all present
+	// in the committed capture — on wan, wlan and vpn respectively — so the
+	// vocabulary itself is observed. error is documented by UniFi and has never
+	// been captured, and no capture has ever caught the www subsystem saying
+	// anything but ok. Which value www takes when the internet is actually
+	// unreachable is therefore inferred; see testdata/unifi/README.md.
+	healthStatusOK      = "ok"
+	healthStatusWarning = "warning"
+	healthStatusError   = "error"
+
 	upsOnline    = "online"
 	upsOnBattery = "on-battery"
 
@@ -68,6 +103,7 @@ const (
 	signalWANNotOnline       = "wan-not-online"
 	signalWANMovedWithoutISP = "wan-moved-without-isp"
 	signalISPMovedWithoutWAN = "isp-moved-without-wan"
+	signalWANHealthDisagrees = "wan-health-disagrees"
 )
 
 // StateVocabulary is the closed value set of every key this provider publishes
@@ -85,9 +121,18 @@ const (
 // docs/adding-a-provider.md — and an open set is the one thing that must never
 // become a metric label. Its transitions are still counted, and its current
 // value is still in every referencing Automation's status.
+//
+// wan.quality is here, and it is here because it was bucketed. The console
+// reports the availability and average latency behind it as continuous
+// numbers, and neither could have appeared in this map: one series per
+// distinct latency reading is the same cardinality failure isp would have
+// been. Bucketing into two named levels is what makes it a state key at all —
+// a number is not something spec.when can match either.
 func StateVocabulary() map[string][]string {
 	return map[string][]string{
 		stateKeyWAN:        {wanPrimary, wanBackup},
+		stateKeyWANQuality: {wanQualityGood, wanQualityDegraded},
+		stateKeyInternet:   {internetOK, internetDegraded, internetDown},
 		stateKeyUPS:        {upsOnline, upsOnBattery},
 		stateKeyUPSBattery: {batteryNormal, batteryLow, batteryCritical},
 	}

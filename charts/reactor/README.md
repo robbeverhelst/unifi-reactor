@@ -161,7 +161,9 @@ hardware is adopted by the controller.
 | Key | Values | Source |
 | --- | --- | --- |
 | `wan` | `primary`, `backup` | which uplink the gateway is using |
+| `wan.quality` | `good`, `degraded` | that uplink's availability and average latency vs. the configured thresholds |
 | `isp` | a slug (`telenet`), or `unknown` | the carrier behind the live uplink |
+| `internet` | `ok`, `degraded`, `down` | the console's own `www` health subsystem |
 | `ups` | `online`, `on-battery` | whether a UniFi UPS is on mains or battery |
 | `ups.battery` | `normal`, `low`, `critical` | remaining charge vs. the configured thresholds |
 
@@ -183,6 +185,38 @@ escalation:
       ups: on-battery
       ups.battery: critical    # all keys must match
 ```
+
+### `internet` and `wan.quality`
+
+`wan` says which uplink is *selected*. It stays `primary` when the link is up, the
+uplink is unchanged, and there is no internet — the case your gateway's own failover
+may never act on. `internet` is the key for that, read from the console's `www`
+health subsystem rather than from any link state.
+
+`wan.quality` is a different question again: not *is the internet there* but *has
+this uplink been any good*. It buckets the availability and average latency the
+console measures against its uptime monitors into two levels:
+
+| Value | Default | Description |
+| --- | --- | --- |
+| `unifi.wan.quality.minAvailabilityPercent` | `99` | availability below this reports `degraded` |
+| `unifi.wan.quality.maxLatencyMs` | `150` | average latency above this reports `degraded` |
+
+Both numbers are averages the console keeps over its own uptime window — 24 hours
+on the hardware they were captured from — so `wan.quality` describes a link that
+*has been* bad rather than one that spiked, and a long outage keeps it `degraded`
+for the rest of that window. Only one link's numbers have ever been observed
+(100% available, 16 ms), so treat the defaults as starting points and tune them
+against your own uplink.
+
+Bucketing is not a convenience. `spec.when` matches strings, so a continuous value
+could not be a state value at all, and an unbucketed one could never be exported as
+a metric label without one series per distinct reading.
+
+Both keys ship with a debounce of `3` — the highest in the chart — because they are
+the two derived from probes to the outside world, where a single rate-limited target
+or blipped resolver must not shed a cluster's load. At the default 30s poll that is
+90 seconds before either an outage or a recovery is believed.
 
 ## Webhook fast path (optional, off by default)
 
@@ -532,11 +566,16 @@ was told, while the workload was still scaled and the Automation is still
 ### Cardinality
 
 `reactor_state_info{provider,key,value}` is published **only for state keys
-whose value set the provider declares closed** — `wan`, `ups`, `ups.battery`.
-`isp` is not one of them: its values are carrier slugs derived from whatever
-public address your gateway holds, so labelling by them would add one permanent
-time series per carrier ever seen. `reactor_state_transitions_total` is not
-labelled by `from`/`to` for the same reason.
+whose value set the provider declares closed** — `wan`, `wan.quality`,
+`internet`, `ups`, `ups.battery`. `isp` is not one of them: its values are
+carrier slugs derived from whatever public address your gateway holds, so
+labelling by them would add one permanent time series per carrier ever seen.
+`reactor_state_transitions_total` is not labelled by `from`/`to` for the same
+reason.
+
+`wan.quality` is in that list only because it was bucketed. The availability
+and latency behind it are continuous, and publishing them as values would have
+been the same cardinality failure — one series per distinct reading.
 
 Nothing is lost: what a key currently holds is in the Automation's
 `status.observedState` and in an Event on the resource. Prometheus keeps the
@@ -625,8 +664,10 @@ publishing — which fails as silence rather than as an error.
 | `podAnnotations` | `{}` | annotations on the pod |
 | `unifi.ups.lowBatteryPercent` | `30` | charge at or below this reports `ups.battery: low` |
 | `unifi.ups.criticalBatteryPercent` | `10` | charge at or below this reports `ups.battery: critical` |
+| `unifi.wan.quality.minAvailabilityPercent` | `99` | availability below this reports `wan.quality: degraded` |
+| `unifi.wan.quality.maxLatencyMs` | `150` | average latency above this reports `wan.quality: degraded` |
 | `unifi.debounce.default` | `1` | consecutive observations a changed value needs before Reactor acts; each extra sample costs one `pollInterval` of reaction time |
-| `unifi.debounce.keys` | `{ups.battery: 2, isp: 2}` | per-key overrides for signals that settle rather than switch |
+| `unifi.debounce.keys` | `{ups.battery: 2, isp: 2, internet: 3, wan.quality: 3}` | per-key overrides for signals that settle rather than switch |
 | `unifi.webhook.enabled` | `false` | Run the webhook receiver; a delivery triggers a poll, never a state change |
 | `unifi.webhook.port` | `9090` | Port the receiver listens on inside the pod |
 | `unifi.webhook.path` | `/webhooks/unifi` | URL path deliveries are accepted on |

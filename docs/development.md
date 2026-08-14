@@ -86,9 +86,19 @@ curl -X POST 'http://localhost:9443/ups?mode=battery&level=80' # power outage
 curl -X POST 'http://localhost:9443/ups?level=5'               # battery critical
 curl -X POST 'http://localhost:9443/ups?mode=mains&level=100'  # power restored
 curl -X POST 'http://localhost:9443/ups?present=false'         # UPS drops off the console
+
+curl -X POST 'http://localhost:9443/internet?status=error'     # no internet, link unchanged
+curl -X POST 'http://localhost:9443/internet?present=false'    # the www subsystem vanishes
+curl -X POST 'http://localhost:9443/quality?availability=97'   # the live uplink gets flaky
+curl -X POST 'http://localhost:9443/quality?latency=400'       # ...or just slow
+curl -X POST 'http://localhost:9443/quality?reset=true'        # back to the capture
 ```
 
-`present=false` removes the UPS from the device list rather than reporting a value for it, so the `ups` keys vanish entirely. That is the case an Automation has to distinguish from "the outage ended", and the one the reconciler answers with `StateKeyUnavailable`.
+`present=false` removes the UPS from the device list rather than reporting a value for it, so the `ups` keys vanish entirely. That is the case an Automation has to distinguish from "the outage ended", and the one the reconciler answers with `StateKeyUnavailable`. `/internet?present=false` does the same for the `www` health subsystem.
+
+`/internet` is the rehearsal you cannot reach through `/flip` or `/wan` at all, and that is the point of the key: the link stays up, the uplink is unchanged, and there is no internet. `/quality` drives the live uplink's `uptime_stats` — availability as a percentage and latency in milliseconds, which on real hardware are averages over the console's 24-hour uptime window and here move instantly. Both follow whichever uplink `/wan` says is live.
+
+> The statuses `/internet` will serve — `warning` and `error`, which map to `degraded` and `down` — have never been seen on a real console's `www` subsystem. Rehearsing them shows what Reactor does with them; it does not confirm a console ever sends them. See [the capture notes](../testdata/unifi/README.md#internet-reachability-and-link-quality-stathealth).
 
 ### Rehearsing a failover that has never been observed
 

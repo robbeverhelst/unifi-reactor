@@ -20,7 +20,9 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"strings"
@@ -81,6 +83,12 @@ type Client struct {
 	LowBatteryPercent      int
 	CriticalBatteryPercent int
 
+	// MinAvailabilityPercent and MaxLatencyMs bound the wan.quality state key.
+	// The live uplink is good while it is at least this available and no
+	// slower than this on average, over the console's own uptime window.
+	MinAvailabilityPercent float64
+	MaxLatencyMs           float64
+
 	// mu guards previous only.
 	mu sync.Mutex
 	// previous remembers the last WAN signals so that a change in one can be
@@ -106,6 +114,8 @@ func NewClient(baseURL string, apiKey APIKey, site string, insecureSkipVerify bo
 		site:                   site,
 		LowBatteryPercent:      DefaultLowBatteryPercent,
 		CriticalBatteryPercent: DefaultCriticalBatteryPercent,
+		MinAvailabilityPercent: DefaultMinAvailabilityPercent,
+		MaxLatencyMs:           DefaultMaxLatencyMs,
 		http: &http.Client{
 			Timeout: 10 * time.Second,
 			Transport: &http.Transport{
@@ -182,42 +192,87 @@ type vbmsTable struct {
 // Observe returns the normalized UniFi state map. Keys are only present when
 // the corresponding hardware is visible to the controller:
 //
-//	wan         primary | backup      (which uplink the gateway is using)
-//	isp         a slug, or unknown    (the carrier behind the live uplink)
-//	ups         online  | on-battery  (whether the UPS is running on mains)
-//	ups.battery normal  | low | critical
+//	wan          primary | backup      (which uplink the gateway is using)
+//	wan.quality  good    | degraded    (how well that uplink is performing)
+//	isp          a slug, or unknown    (the carrier behind the live uplink)
+//	internet     ok | degraded | down  (whether the outside world is reachable)
+//	ups          online  | on-battery  (whether the UPS is running on mains)
+//	ups.battery  normal  | low | critical
+//	ups.runtime  ample   | short | critical
+//	ups.load     normal  | high
 //
 // ups and ups.battery are deliberately independent: a `when: {ups: on-battery}`
 // automation must stay matched for the whole outage, including as the battery
 // drains, instead of flipping out of its matching state (which would run its
-// onExit actions in the middle of a power failure).
+// onExit actions in the middle of a power failure). wan and internet are
+// independent for the same kind of reason and a different one: they answer
+// different questions, and the case where the link is up, the uplink is
+// unchanged and there is no internet is precisely the one wan cannot express.
+//
+// Two endpoints are read, and either may fail without taking the other's keys
+// with it. Only observing nothing at all is an error.
 func (c *Client) Observe(ctx context.Context) (map[string]string, error) {
-	url := fmt.Sprintf("%s/proxy/network/api/s/%s/stat/device", c.baseURL, c.site)
+	log := logf.FromContext(ctx).WithName("unifi-observe")
+	state := map[string]string{}
+
+	var devices deviceStatResponse
+	deviceErr := c.get(ctx, "stat/device", &devices)
+	if deviceErr == nil {
+		var fromDevices map[string]string
+		fromDevices, deviceErr = c.stateFromDevices(ctx, devices)
+		maps.Copy(state, fromDevices)
+	}
+
+	// The health endpoint is a second call rather than a second parse of the
+	// first, so it fails separately. Losing it costs internet and wan.quality,
+	// which then vanish from the observation and are held as last known state
+	// by anything matching them — the same degradation a UPS dropping off the
+	// console produces, and the same reason it must not be an error here.
+	var health healthResponse
+	healthErr := c.get(ctx, "stat/health", &health)
+	if healthErr == nil {
+		c.mergeHealth(ctx, state, health, state[stateKeyWAN])
+	}
+
+	if len(state) == 0 {
+		return nil, errors.Join(deviceErr, healthErr)
+	}
+	if deviceErr != nil {
+		log.Error(deviceErr, "The device endpoint failed; the keys derived from it are unavailable this poll")
+	}
+	if healthErr != nil {
+		log.Error(healthErr, "The health endpoint failed; internet and wan.quality are unavailable this poll")
+	}
+	return state, nil
+}
+
+// get fetches one site-scoped endpoint and decodes it. The API key is resolved
+// per request, so a rotated credential takes effect on the next call.
+func (c *Client) get(ctx context.Context, endpoint string, out any) error {
+	url := fmt.Sprintf("%s/proxy/network/api/s/%s/%s", c.baseURL, c.site, endpoint)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	apiKey, err := c.apiKey()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	req.Header.Set("X-API-KEY", apiKey)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("polling unifi device state: %w", err)
+		return fmt.Errorf("polling unifi %s: %w", endpoint, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("polling unifi device state: unexpected status %d", resp.StatusCode)
+		return fmt.Errorf("polling unifi %s: unexpected status %d", endpoint, resp.StatusCode)
 	}
-
-	var parsed deviceStatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return nil, fmt.Errorf("decoding unifi device state: %w", err)
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("decoding unifi %s: %w", endpoint, err)
 	}
-	return c.stateFromDevices(ctx, parsed)
+	return nil
 }
 
 // stateFromDevices derives the state map from a device list. The first record
