@@ -193,7 +193,14 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var releaseClaims bool
+	var dryRun bool
 	var tlsOpts []func(*tls.Config)
+	flag.BoolVar(&dryRun, "dry-run", false,
+		"Evaluate every Automation and report what it would do, and write to no target and send no "+
+			"edge action. Arbitration runs unchanged, so status.targets[].effective is the value each "+
+			"target would be held at rather than a guess at one. Intended for a first rollout into a "+
+			"cluster; the chart withholds the write permissions alongside it, so the API server keeps "+
+			"the promise this flag makes.")
 	flag.BoolVar(&releaseClaims, "release-claims", false,
 		"Hand every target Reactor holds back to what the Automations referencing it want, drop the "+
 			"finalizers, and exit. Run this before removing the operator; the chart's pre-delete hook does it for you.")
@@ -393,11 +400,17 @@ func main() {
 			"http.request and notification.* actions will be refused")
 	}
 
+	if dryRun {
+		setupLog.Info("Dry run: automations are evaluated and arbitrated, and nothing is written " +
+			"to any target and no edge action is sent")
+	}
+
 	if err := (&controller.AutomationReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		Store:    store,
 		Wake:     wake,
+		DryRun:   dryRun,
 		Recorder: mgr.GetEventRecorder("automation"),
 		Outbound: actions.NewClient(destinations),
 		// Uncached on purpose: a cached Get on a Secret would start an informer

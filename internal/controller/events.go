@@ -17,6 +17,9 @@ limitations under the License.
 package controller
 
 import (
+	"fmt"
+	"strings"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 
@@ -60,6 +63,12 @@ const (
 	reasonRetryBudgetExhausted = "RetryBudgetExhausted"
 	// reasonReleaseFailed is raised when deletion gives up handing targets back.
 	reasonReleaseFailed = "ReleaseFailed"
+	// reasonDryRun is Normal, and is the whole output of a mode whose output is
+	// the point. It is raised on the transition a dry run would have acted on,
+	// because that is the moment worth telling somebody about and the one thing
+	// status cannot tell them: status is a poll, and nobody polls a resource at
+	// the second it becomes interesting.
+	reasonDryRun = "DryRun"
 )
 
 // The events.k8s.io "action" field: what the controller was doing, as a coarse
@@ -145,6 +154,46 @@ func (r *AutomationReconciler) reportTransition(
 	r.event(automation, corev1.EventTypeNormal, reason, actionEvaluate,
 		"%s moved from %q to %q, so the condition %s",
 		transition.Key, transition.From, transition.To, verb)
+}
+
+// reportPreview announces what a dry run would have done, at the moment it
+// would have done it. A suspended Automation announces nothing, for the same
+// reason it fires no edge action: it is not acting, and it is not pretending to.
+func (r *AutomationReconciler) reportPreview(
+	automation *reactorv1alpha1.Automation,
+	outcomes []targetOutcome,
+) {
+	if !automation.Spec.DryRun {
+		return
+	}
+	r.event(automation, corev1.EventTypeNormal, reasonDryRun, actionExecute,
+		"dry run: nothing was written. In force, this automation would %s", describePreviews(outcomes))
+}
+
+// describePreviews renders what an out-of-force Automation's targets would
+// become, in the words its levels are reported in rather than as bare numbers —
+// "0 replicas" and "suspended" survive being read at 3am, "0" does not.
+func describePreviews(outcomes []targetOutcome) string {
+	parts := make([]string, 0, len(outcomes))
+	for _, outcome := range outcomes {
+		preview := outcome.preview
+		if preview == nil || preview.Effective == nil {
+			continue
+		}
+		part := fmt.Sprintf("hold %s at %s", outcome.ref, preview.Level)
+		switch {
+		case len(preview.DeferredBy) > 0:
+			part = fmt.Sprintf("leave %s at %s, outvoted by %s",
+				outcome.ref, preview.Level, strings.Join(preview.DeferredBy, ", "))
+		case len(preview.WouldDefer) > 0:
+			part += ", outvoting " + strings.Join(preview.WouldDefer, ", ")
+		}
+		parts = append(parts, part)
+	}
+	if len(parts) == 0 {
+		return "change nothing: it claims no target"
+	}
+	return strings.Join(parts, "; ")
 }
 
 // eventsForTargets announces the writes this reconcile actually made. Only

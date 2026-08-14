@@ -114,11 +114,22 @@ func (r *AutomationReconciler) runEdgeActions(
 	results := make([]reactorv1alpha1.EdgeExecutionStatus, 0, len(edges))
 	for _, action := range edges {
 		entry := reactorv1alpha1.EdgeExecutionStatus{Type: action.Type, OnExit: !matching}
-		if ctx.Err() != nil {
+		switch {
+		case r.DryRun:
+			// A dry run has to be one for the actions that leave the cluster
+			// too. A notification is not a rehearsal of a notification, and a
+			// restart least of all: an edge action that fired would be the
+			// install's promise broken by the half of it nobody was watching.
+			// Recorded rather than dropped, because what it would have sent is
+			// the report this mode exists to produce.
+			entry.Status = executionSkipped
+			entry.Reason = "dry run: this action was not sent"
+			metrics.ActionSkipped(action.Type, metrics.KindEdge, !matching)
+		case ctx.Err() != nil:
 			entry.Status = executionSkipped
 			entry.Reason = "ran out of time for the remaining actions on this transition"
 			metrics.ActionSkipped(action.Type, metrics.KindEdge, !matching)
-		} else {
+		default:
 			started := time.Now()
 			result, err := r.runEdgeAction(ctx, automation, action, data)
 			// Counted as an edge action, which is what keeps a failure here from

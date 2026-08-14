@@ -59,6 +59,7 @@ status:
 | --- | --- | --- |
 | `Reconciled` | Normal. Evaluated against observed state. | — |
 | `Suspended` | `spec.suspend: true`. State is still observed; no target is claimed. | [§1](#1-nothing-happens-when-the-state-changes) |
+| `DryRun` | `spec.dryRun: true`, or the whole install runs with `safety.dryRun`. Everything is evaluated; nothing is written. | [§14](#14-an-automation-is-not-acting-and-is-telling-you-what-it-would-do) |
 | `ProviderStateUnavailable` | No state has been observed yet for this provider. | [§1](#1-nothing-happens-when-the-state-changes) |
 | `StateKeyUnavailable` | A key this Automation needs vanished from the observation. Last known matching state is held. | [§2](#2-statekeyunavailable-and-held-state) |
 | `ActionFailed` | An action returned an error. `status.lastExecution.reason` has the message. | [§5](#5-rbac-refuses-a-cross-namespace-target), [§6](#6-the-crd-invalid-ownership-metadata-or-a-stale-schema) |
@@ -99,6 +100,7 @@ kubectl -n media describe automation pause-downloads-on-backup-wan | tail -20
 | `EdgeActionFailed` / `EdgeActionSkipped` | Warning | an edge action did not happen — [§12](#12-a-notification-or-http-request-did-not-arrive) |
 | `ReleaseFailed` | Warning | deletion could not hand a target back and let the object go anyway — [§8](#8-a-workload-is-stuck-down-after-an-automation-was-deleted) |
 | `EventTriggerRemoved` | Warning | a leftover `spec.trigger` automation that does nothing; delete it |
+| `DryRun` | Normal | a dry run reached the transition it would have acted on; the message says what it would have done — [§14](#14-an-automation-is-not-acting-and-is-telling-you-what-it-would-do) |
 
 **Being outvoted is `Normal`, not a Warning.** Two Automations sharing a
 workload and one of them losing is the arbitration working as designed.
@@ -714,7 +716,39 @@ somebody to read the logs during an outage.
 
 ---
 
-## 14. Still stuck
+## 14. An automation is not acting, and is telling you what it would do
+
+`Ready=True` with reason `DryRun` is not a fault. Something asked this automation to describe itself rather than run, and there are two separate things that could have:
+
+```sh
+# Is it this automation?
+kubectl -n media get automation shed-on-battery -o jsonpath='{.spec.dryRun}'
+
+# Or the whole install?
+kubectl -n reactor-system get deploy reactor \
+  -o jsonpath='{.spec.template.spec.containers[0].args}' | grep -o '\-\-dry-run'
+```
+
+They report differently, and the difference tells you which one you are looking at:
+
+| | `spec.dryRun` on the automation | `safety.dryRun` on the install |
+| --- | --- | --- |
+| Where the answer is | `status.targets[].preview` | `status.targets[].effective`, unwritten |
+| `Applied` message | "a dry run claims no target" | "this install runs as a dry run" |
+| Effect on peers | none — it is out of force, so it is arbitrated as if absent | none — everything is in force and nothing is written |
+| Metrics | — | `reactor_arbitrations_total{outcome="withheld"}` is the only outcome published |
+
+`increase(reactor_arbitrations_total{outcome="withheld"}[1h])` is the fleet-wide version of the same question: a live install publishes none of these, and an install that thinks it is live but is not publishes nothing else.
+
+**Reading a preview.** `preview.effective` is what the target would be held at with this automation's claim folded in; `preview.deferredBy` is who would still outvote it, `preview.wouldDefer` is who it would outvote, and `preview.onExit` is what it would hand back when its condition ended. It is computed whether or not the condition currently holds, on purpose — the automation you most want to check is the one for an outage.
+
+It is not a forecast. The peers, the observed state and the target can all change before the condition holds, and nothing in a fold can predict whether the write would be *accepted*: RBAC, an admission webhook, and a target that has since been deleted are all outside what it knows.
+
+**Nothing was written, but the workload is still down.** Turning the install-wide dry run on does not release what Reactor was already holding, because releasing is a write too. Those workloads freeze where they are with their annotations intact — [§8](#8-a-workload-is-stuck-down-after-an-automation-was-deleted) is how to get them back, and the fix is to suspend or delete those automations before enabling `safety.dryRun`, not after.
+
+---
+
+## 15. Still stuck
 
 Collect these and open an issue — the [bug report template](https://github.com/robbeverhelst/unifi-reactor/issues/new/choose) asks for exactly this, and without it nothing is reproducible:
 

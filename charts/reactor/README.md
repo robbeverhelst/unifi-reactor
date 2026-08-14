@@ -142,6 +142,47 @@ kubectl patch automation <name> -n <namespace> \
   --type=merge -p '{"metadata":{"finalizers":[]}}'
 ```
 
+## Dry run (optional, off by default)
+
+`safety.dryRun: true` is the mode to bring a new install up in. Every Automation
+is observed, evaluated and arbitrated exactly as it otherwise would be, and
+nothing is written:
+
+```sh
+helm install reactor oci://ghcr.io/robbeverhelst/charts/reactor \
+  --namespace reactor-system \
+  --set unifi.url=https://192.0.2.1 \
+  --set safety.dryRun=true
+```
+
+Each Automation reports what its targets *would* be held at in
+`status.targets[].effective` — the real fold, just unwritten — says
+`Applied=False` with reason `DryRun`, and records every edge action as `Skipped`
+rather than sending it. `reactor_arbitrations_total{outcome="withheld"}` is the
+only arbitration outcome such an install publishes, which is how a dashboard
+tells a dry run from a live install that has nothing to do.
+
+**Two locks, not one.** `--dry-run` is the operator promising not to write. The
+chart holds it to that by withholding every verb that could: with `dryRun` on,
+the manager's rules carry `get` on the workload kinds and their `/scale`
+subresources and nothing else, and no `patch` on nodes even when
+`rbac.allowNodeActions` is set. "It cannot touch your workloads" is enforced by
+the API server rather than promised by a flag.
+
+Two things worth knowing before turning it on:
+
+- **It is not the same as `spec.dryRun` on one Automation.** That takes a single
+  Automation out of force so it can be applied beside policies that are live
+  without perturbing them, and reports the counterfactual in
+  `status.targets[].preview`. This one stops the whole operator writing. Use
+  `spec.dryRun` to try one policy on a working install, and this to bring up an
+  install that has never acted.
+- **Turning it on for an install that is already holding workloads down freezes
+  them there**, because releasing a claim is a write too. Suspend or delete
+  those Automations first, or uninstall with the pre-delete hook, which hands
+  every target back. That hook is not rendered for a dry-run install — it would
+  have nothing to release and no permission to release it with.
+
 ## Pod Security
 
 The controller pod satisfies the **`restricted`** Pod Security Standard with no exemptions — it sets `runAsNonRoot`, `seccompProfile: RuntimeDefault`, drops all capabilities, and runs with `allowPrivilegeEscalation: false` and a read-only root filesystem. You can label its namespace accordingly without any trial and error:
@@ -646,5 +687,6 @@ publishing — which fails as silence rather than as an error.
 | `uninstall.releaseClaims` | `true` | Run a pre-delete Job that hands every held workload back before the operator is removed |
 | `uninstall.timeoutSeconds` | `120` | Hard bound on that Job, so a stuck release delays rather than blocks the uninstall |
 | `rbac.clusterWide` | `true` | `false` restricts the operator to watching and acting on the release namespace only (cross-namespace `target.namespace` stops working, and Automations elsewhere are not reconciled at all) |
+| `safety.dryRun` | `false` | Evaluate and arbitrate everything, write nothing, and withhold the permissions that could; see [Dry run](#dry-run-optional-off-by-default) |
 | `image.repository` | `ghcr.io/robbeverhelst/unifi-reactor` | Manager image |
 | `image.tag` | chart `appVersion` | Image tag |

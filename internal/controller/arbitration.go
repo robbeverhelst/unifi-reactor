@@ -223,6 +223,33 @@ type targetOutcome struct {
 	deferredBy []string
 	// changed reports whether this reconcile actually wrote to the target.
 	changed bool
+	// preview is what would happen here if this Automation were in force,
+	// computed only when it deliberately is not.
+	preview *reactorv1alpha1.TargetPreview
+	// withheld reports an outcome that was resolved and then not written,
+	// because the whole install is running as a dry run.
+	withheld bool
+}
+
+// stance is how the Automation being reconciled takes part in one target's
+// arbitration this pass.
+//
+// The first two fields are not the same question, and the difference is the
+// whole of a dry run: matching says the condition holds, claiming says that
+// condition currently counts for anything. An Automation held out of force by a
+// policy can be matching without claiming, which is exactly the state a preview
+// describes.
+type stance struct {
+	// matching is whether this Automation's condition currently holds.
+	matching bool
+	// claiming is whether that condition puts a claim on the target. False
+	// while the Automation is out of force, however it got there.
+	claiming bool
+	// preview asks for the counterfactual alongside the outcome: what
+	// arbitration would resolve to if this Automation's claim did count. Set
+	// for an Automation deliberately out of force, and not for one being
+	// deleted — that one has no future to describe.
+	preview bool
 }
 
 // reconcileTarget resolves one target across every Automation referencing it
@@ -233,7 +260,7 @@ func (r *AutomationReconciler) reconcileTarget(
 	ctx context.Context,
 	key targetKey,
 	self *reactorv1alpha1.Automation,
-	selfMatching bool,
+	s stance,
 ) (targetOutcome, error) {
 	log := logf.FromContext(ctx)
 	outcome := targetOutcome{ref: key.String()}
@@ -241,7 +268,7 @@ func (r *AutomationReconciler) reconcileTarget(
 	// Bounded per action, so a target that has stopped answering fails and is
 	// retried rather than holding this reconcile — and, with concurrent
 	// reconciles, rather than starving every other Automation.
-	ctx, cancel := context.WithTimeout(ctx, timeoutFor(self, key, selfMatching))
+	ctx, cancel := context.WithTimeout(ctx, timeoutFor(self, key, s.claiming))
 	defer cancel()
 
 	handler, err := handlerFor(key.Kind)
@@ -267,7 +294,7 @@ func (r *AutomationReconciler) reconcileTarget(
 
 	var claims, reversals []engine.Intent
 	for _, peer := range peers {
-		matching := selfMatching
+		matching := s.claiming
 		if claimantOf(peer) != claimantOf(self) {
 			// A peer that is being deleted or is suspended has stopped
 			// claiming, exactly as this Automation does when it is the one
@@ -288,9 +315,12 @@ func (r *AutomationReconciler) reconcileTarget(
 		}
 	}
 
-	if level, ok := selfLevel(self, key, selfMatching, baseline); ok {
+	if level, ok := selfLevel(self, key, s.claiming, baseline); ok {
 		value := int32(level)
 		outcome.desired = &value
+	}
+	if s.preview {
+		outcome.preview = r.previewFor(ctx, handler, self, key, target, claims, baseline)
 	}
 
 	resolution, claimed := engine.Resolve(claims)
@@ -301,6 +331,9 @@ func (r *AutomationReconciler) reconcileTarget(
 		outcome.level = handler.describe(resolution.Level)
 		if outcome.desired != nil && *outcome.desired != value {
 			outcome.deferredBy = withoutClaimant(resolution.Winners, claimantOf(self))
+		}
+		if r.DryRun {
+			return withhold(outcome), nil
 		}
 		metrics.ArbitrationResolved(outcomeOf(outcome))
 		changed, err := claimTarget(ctx, r.Client, handler, target, resolution, claims)
@@ -313,6 +346,9 @@ func (r *AutomationReconciler) reconcileTarget(
 		var level *int64
 		if release, ok := engine.Resolve(reversals); ok {
 			level = &release.Level
+		}
+		if r.DryRun {
+			return withhold(outcome), nil
 		}
 		metrics.ArbitrationResolved(metrics.OutcomeReleased)
 		changed, err := releaseTarget(ctx, r.Client, handler, target, level)
@@ -327,6 +363,121 @@ func (r *AutomationReconciler) reconcileTarget(
 		// this workload by hand.
 		return outcome, nil
 	}
+}
+
+// withhold marks an outcome that was resolved and then not written.
+//
+// A global dry run runs the arbitration exactly as it otherwise would and stops
+// one line short of the write, which is what makes the report it produces worth
+// reading: status.targets[].effective is the value the target would have, not a
+// guess at one.
+func withhold(outcome targetOutcome) targetOutcome {
+	outcome.withheld = true
+	metrics.ArbitrationResolved(metrics.OutcomeWithheld)
+	return outcome
+}
+
+// previewFor answers "what would this do?" without doing it.
+//
+// Arbitration is a pure function of the claims that hold, so the counterfactual
+// is the same fold run once more with this Automation's claim added to it. No
+// write happens and nothing is read that a claim would not have read anyway,
+// which is why a preview costs the reconcile that was going to happen regardless
+// — and why it is reported continuously rather than asked for out of band.
+//
+// It deliberately previews the condition holding, whether or not it currently
+// does. The question someone writes an automation to answer is what happens
+// during the power cut, and they are writing it on an afternoon when the power
+// is fine. While the condition does hold, the two readings are the same answer.
+func (r *AutomationReconciler) previewFor(
+	ctx context.Context,
+	handler targetHandler,
+	self *reactorv1alpha1.Automation,
+	key targetKey,
+	target *unstructured.Unstructured,
+	claims []engine.Intent,
+	baseline *int64,
+) *reactorv1alpha1.TargetPreview {
+	preview := &reactorv1alpha1.TargetPreview{
+		OnExit: r.previewOnExit(ctx, handler, self, key, target, baseline),
+	}
+
+	claim, ok := claimFor(self, key, true)
+	if !ok {
+		// Nothing to add to the fold: this Automation asks for no level here,
+		// so putting it in force would change nothing about this target.
+		return preview
+	}
+	desired := int32(claim.Level)
+	preview.Desired = &desired
+
+	// Cloned rather than appended in place: claims is the slice the live
+	// resolution below is taken over, and growing it here would be a
+	// counterfactual leaking into the real answer.
+	resolution, resolved := engine.Resolve(append(slices.Clone(claims), claim))
+	if !resolved {
+		return preview
+	}
+	effective := int32(resolution.Level)
+	preview.Effective = &effective
+	preview.Level = handler.describe(resolution.Level)
+	if resolution.Level != claim.Level {
+		preview.DeferredBy = withoutClaimant(resolution.Winners, claim.Claimant)
+	}
+	current, _ := engine.Resolve(claims)
+	preview.WouldDefer = newlyDeferred(current.Deferred, resolution.Deferred, claim.Claimant)
+	return preview
+}
+
+// previewOnExit says what this Automation would hand a target back to once its
+// condition stopped holding.
+//
+// Under reversal Baseline on a target nothing has ever claimed there is no
+// recorded baseline to name, because the baseline is captured by the claim that
+// would not have happened yet. What such a claim would capture is whatever the
+// target is at now, so that is what the preview reports — the one read here
+// that a claim would also have made.
+//
+// Reading can fail, and a preview is never allowed to be the reason a reconcile
+// does: an unreadable level is left unsaid rather than raised.
+func (r *AutomationReconciler) previewOnExit(
+	ctx context.Context,
+	handler targetHandler,
+	self *reactorv1alpha1.Automation,
+	key targetKey,
+	target *unstructured.Unstructured,
+	baseline *int64,
+) string {
+	if baseline == nil && self.Spec.EffectiveReversal() == reactorv1alpha1.ReversalBaseline {
+		found, err := handler.read(ctx, r.Client, target)
+		if err != nil {
+			return ""
+		}
+		baseline = &found
+	}
+	intent, ok := reversalFor(self, key, baseline)
+	if !ok {
+		return describeLevel(handler, nil)
+	}
+	return handler.describe(intent.Level)
+}
+
+// newlyDeferred names the claimants that stop getting what they want because of
+// one added claim. A peer already outvoted by a third automation is deferred
+// either way, and naming it here would credit this claim with something it did
+// not do.
+func newlyDeferred(before, after []string, self string) []string {
+	out := make([]string, 0, len(after))
+	for _, claimant := range after {
+		if claimant == self || slices.Contains(before, claimant) {
+			continue
+		}
+		out = append(out, claimant)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // describeLevel renders a level that may be absent, which is what a release

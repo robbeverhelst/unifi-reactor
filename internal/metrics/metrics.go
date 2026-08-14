@@ -97,6 +97,12 @@ const (
 	OutcomeClaimed  = "claimed"
 	OutcomeDeferred = "deferred"
 	OutcomeReleased = "released"
+	// OutcomeWithheld is a target that was arbitrated and then not written,
+	// because the install is running as a dry run. It is the one series that
+	// answers "is this install actually doing anything?" without reading a
+	// single Automation: a dry run publishes only these, and a live one
+	// publishes none.
+	OutcomeWithheld = "withheld"
 
 	// DeliveryAccepted is a delivery that caused a re-observation,
 	// DeliveryCoalesced one that arrived while another was already pending, and
@@ -167,7 +173,8 @@ var (
 
 	arbitrations = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "reactor_arbitrations_total",
-		Help: "Arbitrated target outcomes: claimed, deferred to a more restrictive peer, or released.",
+		Help: "Arbitrated target outcomes: claimed, deferred to a more restrictive peer, released, " +
+			"or withheld because the install runs as a dry run.",
 	}, []string{labelOutcome})
 
 	actions = prometheus.NewCounterVec(prometheus.CounterOpts{

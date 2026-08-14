@@ -52,6 +52,12 @@ spec:
             - --health-probe-bind-address=:8081
             - --zap-log-level={{ .Values.log.level }}
             - --zap-encoder={{ .Values.log.format }}
+            {{- if .Values.safety.dryRun }}
+            # Paired with withholding the write permissions in rbac.yaml: this
+            # is what makes the operator report cleanly rather than fail every
+            # write with a Forbidden that reads as a broken install.
+            - --dry-run
+            {{- end }}
             {{- if .Values.metrics.enabled }}
             # Left unset, the binary defaults to 0 — no listener at all.
             - --metrics-bind-address=:{{ .Values.metrics.port }}
