@@ -18,6 +18,7 @@ package controller
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -54,6 +55,22 @@ const (
 	// claim is how two Automations sharing a workload are meant to behave, and
 	// reporting it as a fault would train people to ignore it.
 	reasonDeferred = "DeferredToOtherAutomation"
+	// reasonReversalDisagreement is a Warning, and it is the one place that
+	// distinction is worth arguing next to reasonDeferred above.
+	//
+	// Being outvoted on a live claim is Normal because both Automations are
+	// right: two conditions hold, both want the workload down, and the fold is
+	// how they were always meant to compose. Two Automations declaring
+	// different levels for one target once NOTHING claims it cannot both be
+	// right — a workload has one normal size — so nothing Reactor does resolves
+	// this, and min is a tie-break rather than an answer. Somebody has to
+	// change one of the specs, which is precisely the line this file draws
+	// Warning at.
+	//
+	// The failure it predicts is also the quiet kind: the workload comes back
+	// at the wrong number after the incident, when nobody is watching, and the
+	// cause is in a spec written weeks earlier.
+	reasonReversalDisagreement = "ReversalDisagreement"
 	// reasonStateKeyUnavailable is a Warning because holding state indefinitely
 	// is not a resting place: the hardware publishing a key has gone, and
 	// somebody has to decide whether it is coming back.
@@ -225,11 +242,82 @@ func describePreviews(outcomes []targetOutcome) string {
 	return strings.Join(parts, "; ")
 }
 
+// reportDisagreements announces the Automations sharing a target that do not
+// agree on what its level should be once nothing claims it.
+//
+// It fires while the disagreement EXISTS, not when the target is released,
+// which is the whole of its value: the specs contradict each other from the
+// moment both are applied, and finding out at release means finding out after
+// the workload has already come back at the wrong number.
+//
+// The memory is the status this reconcile is about to overwrite, so an
+// unchanged contradiction is announced once rather than every fifteen seconds
+// for as long as it stands — the same rule eventOnNewReason follows, using the
+// field that already persists the fact rather than a second one that a restart
+// would lose. It cannot use eventOnNewReason itself: this changes no condition,
+// because both Ready and Applied describe what is true NOW and this is a
+// disagreement about a value the target does not have yet. Reporting an
+// automation whose claim is in effect as not applied would be a fault where
+// there is none.
+func (r *AutomationReconciler) reportDisagreements(
+	automation *reactorv1alpha1.Automation,
+	outcomes []targetOutcome,
+) {
+	for _, outcome := range outcomes {
+		if len(outcome.disagreement) == 0 ||
+			slices.Equal(reportedDisagreement(automation, outcome.ref), outcome.disagreement) {
+			continue
+		}
+		r.event(automation, corev1.EventTypeWarning, reasonReversalDisagreement, actionExecute,
+			"%s: %s. They cannot both be its normal level — Reactor takes the most restrictive, %s, "+
+				"and changing one of the specs is the only thing that resolves it",
+			outcome.ref, describeDisagreement(outcome.disagreement),
+			mostRestrictive(outcome.disagreement))
+	}
+}
+
+// reportedDisagreement is what this Automation last said about one target,
+// read before the status write that replaces it.
+func reportedDisagreement(
+	automation *reactorv1alpha1.Automation,
+	ref string,
+) []reactorv1alpha1.ReversalIntent {
+	for i := range automation.Status.Targets {
+		if automation.Status.Targets[i].Ref == ref {
+			return automation.Status.Targets[i].ReversalDisagreement
+		}
+	}
+	return nil
+}
+
+// describeDisagreement spells out who wants what, in words rather than levels,
+// because "0" and "1" do not read as a disagreement about a CronJob.
+func describeDisagreement(intents []reactorv1alpha1.ReversalIntent) string {
+	parts := make([]string, 0, len(intents))
+	for _, intent := range intents {
+		parts = append(parts, fmt.Sprintf("%s wants %s", intent.Claimant, intent.Level))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// mostRestrictive names the level the fold will take, which is the one thing
+// the reader of this Event needs that the list above does not give them.
+func mostRestrictive(intents []reactorv1alpha1.ReversalIntent) string {
+	winner := intents[0]
+	for _, intent := range intents[1:] {
+		if intent.Desired < winner.Desired {
+			winner = intent
+		}
+	}
+	return winner.Level
+}
+
 // eventsForTargets announces the writes this reconcile actually made. Only
 // changed outcomes produce one: a target already at the value it should be is
 // the steady state, and reporting it every fifteen seconds would bury the two
 // that matter.
 func (r *AutomationReconciler) eventsForTargets(automation *reactorv1alpha1.Automation, outcomes []targetOutcome) {
+	r.reportDisagreements(automation, outcomes)
 	for _, outcome := range outcomes {
 		if !outcome.changed {
 			continue

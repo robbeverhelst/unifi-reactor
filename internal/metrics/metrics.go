@@ -220,6 +220,22 @@ var (
 			"carries the detail, and a rising count is how a wrong derivation announces itself.",
 	}, []string{labelProvider, labelSignal})
 
+	// reversalDisagreements is the arbitration sibling of providerSignals above:
+	// two sources of one fact that do not agree, counted rather than resolved.
+	// There the fact is what the network is doing; here it is what a workload's
+	// normal size is, and the disagreeing sources are two Automations.
+	//
+	// Unlabelled on purpose. Which target and which claimants is exactly the
+	// unbounded half — a target reference and a claimant are not labels here —
+	// and both are already in status.targets[].reversalDisagreement and in the
+	// Event, attached to the objects they describe.
+	reversalDisagreements = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "reactor_reversal_disagreements_total",
+		Help: "Times the Automations sharing one target declared different reversal levels for it, so they " +
+			"disagree about that workload's normal size. Reactor still takes the most restrictive; the " +
+			"Automation's status and its Event name both claimants and both levels.",
+	})
+
 	// staleDecisions is the other half of lastObservation, and the half that is
 	// attributable. The gauge says Reactor has gone blind; this says automations
 	// were still deciding while it was, which is the part that reaches a
@@ -259,6 +275,7 @@ func init() {
 		actions,
 		actionDuration,
 		providerSignals,
+		reversalDisagreements,
 		staleDecisions,
 		reactionLatency,
 		webhookDeliveries,
@@ -390,6 +407,14 @@ func ActionSkipped(actionType, kind string, onExit bool) {
 // the outside world and would be unbounded here.
 func SignalsDisagreed(provider, signal string) {
 	providerSignals.WithLabelValues(provider, signal).Inc()
+}
+
+// ReversalDisagreement records one target whose Automations do not agree on
+// what its normal level is. Like ArbitrationResolved it is called per reconcile
+// that resolved the target, so the series describes how long a contradiction
+// has been standing rather than how many times somebody noticed it.
+func ReversalDisagreement() {
+	reversalDisagreements.Inc()
 }
 
 // StaleDecision records one reconcile taken against state older than the age

@@ -151,3 +151,96 @@ var _ = Describe("Arbitrating one workload between two Automations", Ordered, fu
 		Expect(annotationsOf(Default, shared)).NotTo(HaveKey(annotationBaseline))
 	})
 })
+
+// The same two automations, one workload — and now they do not agree on what
+// that workload's normal size is.
+//
+// Reactor cannot resolve that and does not try: min still wins, exactly as it
+// does for a live claim. What it must not do is take min silently, and it must
+// say so while the disagreement EXISTS. The whole value is knowing before the
+// outage ends rather than after the workload has come back at the wrong number,
+// which is why the first assertion here runs before anything is claimed at all.
+var _ = Describe("Two automations disagreeing about a workload's normal size", Ordered, func() {
+	const (
+		disputed = "disputed"
+		wanShed  = "wan-wants-one"
+		upsShed  = "ups-wants-three"
+		baseline = 5
+		wanExit  = 1
+		upsExit  = 3
+	)
+
+	onBackup := map[string]string{keyWAN: wanBackup}
+	onBattery := map[string]string{keyUPS: upsOnBattery}
+	wanPolicy := declaringExit(wanShed, onBackup, disputed, 0, wanExit)
+	upsPolicy := declaringExit(upsShed, onBattery, disputed, 0, upsExit)
+
+	BeforeAll(func() {
+		Expect(cluster.Apply(workload(disputed, baseline))).To(Succeed())
+		Expect(cluster.Apply(wanPolicy)).To(Succeed())
+		Expect(cluster.Apply(upsPolicy)).To(Succeed())
+	})
+
+	AfterAll(func() {
+		resetConsole()
+		Expect(cluster.Delete(wanPolicy)).To(Succeed())
+		Expect(cluster.Delete(upsPolicy)).To(Succeed())
+	})
+
+	It("says so before anything has claimed the workload at all", func() {
+		for _, name := range []string{wanShed, upsShed} {
+			Eventually(func(g Gomega) {
+				entry := targetStatus(automationOf(g, name), disputed)
+				g.Expect(entry).NotTo(BeNil())
+				g.Expect(entry.ReversalDisagreement).To(HaveLen(2))
+				g.Expect(entry.ReversalDisagreement).To(ContainElements(
+					HaveField("Claimant", claimant(wanShed)),
+					HaveField("Claimant", claimant(upsShed)),
+				))
+				g.Expect(entry.ReversalDisagreement).To(ContainElements(
+					HaveField("Level", "1 replicas"),
+					HaveField("Level", "3 replicas"),
+				))
+			}).Should(Succeed(), "%s did not report that its onExit contradicts its peer's", name)
+		}
+
+		By("out loud, as a Warning, because nothing Reactor does resolves it")
+		Eventually(func(g Gomega) {
+			out, err := eventsWithReason("ReversalDisagreement")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(ContainSubstring("Warning"))
+			g.Expect(out).To(ContainSubstring("1 replicas"))
+			g.Expect(out).To(ContainSubstring("3 replicas"))
+		}).Should(Succeed())
+	})
+
+	It("keeps saying so while the workload is down, which is when it can still be fixed", func() {
+		Expect(mock.WAN(wanBackup)).To(Succeed())
+		Expect(mock.UPS("mode=battery&level=80")).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			g.Expect(replicasOf(g, disputed)).To(BeEquivalentTo(0))
+		}).Should(Succeed())
+
+		entry := targetStatus(automationOf(Default, wanShed), disputed)
+		Expect(entry.ReversalDisagreement).To(HaveLen(2))
+
+		By("without making an automation that is getting exactly what it asked for look unhealthy")
+		Expect(entry.DeferredBy).To(BeEmpty())
+		Expect(conditionOf(automationOf(Default, wanShed), conditionApplied)).
+			To(HaveField("Status", metav1.ConditionTrue))
+	})
+
+	It("still resolves it the documented way: most restrictive wins", func() {
+		Expect(mock.WAN(wanPrimary)).To(Succeed())
+		Expect(mock.UPS("mode=mains&level=100")).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			g.Expect(replicasOf(g, disputed)).To(BeEquivalentTo(wanExit))
+		}).Should(Succeed(), "reporting the disagreement changed which value the fold took")
+
+		Consistently(func(g Gomega) {
+			g.Expect(replicasOf(g, disputed)).To(BeEquivalentTo(wanExit))
+		}).Should(Succeed())
+	})
+})

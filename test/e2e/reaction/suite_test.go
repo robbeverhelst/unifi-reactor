@@ -403,6 +403,17 @@ spec:
 `, name, appsNamespace, state.String(), target, replicas)
 }
 
+// declaringExit is scaleAutomation with an explicit onExit level, which is how
+// an automation says what it thinks its target's normal size is rather than
+// deferring to the baseline Reactor recorded.
+func declaringExit(name string, when map[string]string, target string, replicas, onExit int) string {
+	return scaleAutomation(name, when, target, replicas) + fmt.Sprintf(`  onExit:
+    - type: kubernetes.scale
+      target: {kind: Deployment, name: %s}
+      replicas: %d
+`, target, onExit)
+}
+
 // replicasOf reads what a target is currently scaled to.
 func replicasOf(g Gomega, name string) int32 {
 	var deployment appsv1.Deployment

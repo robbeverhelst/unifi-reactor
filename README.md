@@ -245,6 +245,44 @@ The baseline annotation is named for what it records, so a CronJob carries `base
 
 > **GitOps:** Reactor writes `spec.replicas` and the three annotations above onto target Deployments. If Flux or Argo CD manages those Deployments it will report drift and revert them. Exclude the fields on any workload you let Reactor act on — Argo CD `ignoreDifferences` on `/spec/replicas` and the `reactor.robbeverhelst.com` annotations, or a Flux `patch` with the same exclusions.
 
+### When they disagree about coming back
+
+Two automations can share a workload and still not agree on what its normal size is:
+
+```yaml
+# shed-a                          # shed-b
+onExit:                           onExit:
+  - type: kubernetes.scale          - type: kubernetes.scale
+    target: {kind: Deployment, name: qbittorrent}
+    replicas: 1                       replicas: 3
+```
+
+While either matches, the workload sits at 0 and everything above applies. When both stop matching, the reversals are folded the same way live claims are — `min(1, 3) = 1` — and the workload comes back at 1 and stays there.
+
+**Reactor keeps taking `min`, and does not try to resolve this.** It cannot know which number was meant, and picking the more restrictive one is defensible, documented and order-independent, exactly as it is for a live claim.
+
+**What it will not do is resolve it silently.** Two automations declaring different reversal levels for one target is a contradiction visible in the specs themselves — no intent has to be guessed to see it — so it is reported from the moment it exists, not at the moment the workload comes back at the wrong number:
+
+```sh
+kubectl -n media get automation shed-a -o jsonpath='{.status.targets[0].reversalDisagreement}'
+# [{"claimant":"media/shed-a","desired":1,"level":"1 replicas"},
+#  {"claimant":"media/shed-b","desired":3,"level":"3 replicas"}]
+```
+
+```sh
+kubectl -n media describe automation shed-a | tail -3
+# Warning  ReversalDisagreement  Deployment/media/qbittorrent: media/shed-a wants 1 replicas,
+#          media/shed-b wants 3 replicas. They cannot both be its normal level — Reactor takes
+#          the most restrictive, 1 replicas, and changing one of the specs is the only thing
+#          that resolves it
+```
+
+and `reactor_reversal_disagreements_total` for the fleet-wide version.
+
+It is a **Warning**, unlike being outvoted on a live claim, and the difference is not severity for its own sake. Two automations wanting a workload down for different reasons are both right, and arbitration between them is the design working — that is `Normal`. Two automations declaring different normal sizes for one workload cannot both be right; nothing Reactor does resolves it, and the number it picks is only a tie-break. Somebody has to change one of the specs.
+
+`reversal: None` contributes no level at all, so it is never part of a disagreement. Two automations both on `Baseline` agree by construction — they resolve to the same recorded baseline — so the cases this catches are `Declared` against `Declared`, and `Declared` against `Baseline`.
+
 ### When an action fails
 
 Each action is bounded by `timeoutSeconds` (default 30), so a target that has stopped answering fails and is retried rather than occupying the reconciler. Retries back off exponentially from 2s to a 1-minute cap and stop after five consecutive failures — at which point the automation says so and waits for the next state change instead of retrying forever:
@@ -1238,6 +1276,7 @@ helm upgrade reactor ... \
 | `reactor_reaction_latency_seconds` | histogram | observation → action, end to end |
 | `reactor_webhook_deliveries_total` | counter | fast-path deliveries accepted, coalesced, refused |
 | `reactor_provider_signal_disagreements_total` | counter | two independent signals for one fact disagreeing |
+| `reactor_reversal_disagreements_total` | counter | two automations disagreeing about a workload's normal size ([above](#when-they-disagree-about-coming-back)) |
 
 Reconcile counts, queue depth and reconcile latency are controller-runtime's own `controller_runtime_*` series on the same endpoint. Reactor does not reimplement them. It also deliberately **does not re-export UniFi telemetry** — a UniFi exporter covers that better, and Reactor's unique vantage point is the decision layer.
 
@@ -1416,6 +1455,7 @@ Nothing is required, and no workload changes what it does. Two things become vis
 
 - **`unifi.maxObservationAge` is new and empty, which is exactly what you have today** — unbounded, and silent, if the console stops answering. Setting it makes every automation report `Ready=False` with reason `ObservationStale` past that age, raise a Warning `Event`, and publish `reactor_stale_decisions_total`. It changes nothing about what is written: no claim is released and no `onExit` runs, because going blind must not scale workloads back up mid-outage ([why](#how-long-reactor-may-act-on-state-that-has-already-changed)). Start at four or five poll intervals.
 - **`status.observedAt` is new on every Automation**, additive and always populated once anything has been observed. If you have alerting or scripts that treat an unexpected status field as drift, this is the one to expect.
+- **Two automations that declare different `onExit` levels for one target now say so** — a Warning `Event` with reason `ReversalDisagreement`, `status.targets[].reversalDisagreement`, and `reactor_reversal_disagreements_total`. **Nothing about the resolved value changes**: `min` still wins, and the workload comes back at exactly the number it came back at before ([why it is reported and not resolved](#when-they-disagree-about-coming-back)). This is not gated behind a value, because a contradiction between two of your own specs is not something to opt into being told about — but if you have such a pair today, expect one Warning per automation involved on the first reconcile after the upgrade. Fixing it is a one-line spec edit.
 
 **`spec.trigger` — the event-shaped trigger kind — has been removed from `v1alpha1`.** Up to v0.3.0 the CRD accepted it, CEL-validated it, and then ignored it: no version of the engine has ever processed an event trigger. A v1 whose API accepts configuration it silently drops is worse than one that does not offer the field at all, so it is gone until it is real. Two things had to exist before it could come back, and one of them now does:
 

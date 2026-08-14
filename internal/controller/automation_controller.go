@@ -710,13 +710,14 @@ func targetStatuses(outcomes []targetOutcome) []reactorv1alpha1.TargetStatus {
 	statuses := make([]reactorv1alpha1.TargetStatus, 0, len(outcomes))
 	for _, outcome := range outcomes {
 		statuses = append(statuses, reactorv1alpha1.TargetStatus{
-			Ref:        outcome.ref,
-			Desired:    outcome.desired,
-			Effective:  outcome.effective,
-			Level:      outcome.level,
-			DeferredBy: outcome.deferredBy,
-			Preview:    outcome.preview,
-			ManagedBy:  outcome.managedBy,
+			Ref:                  outcome.ref,
+			Desired:              outcome.desired,
+			Effective:            outcome.effective,
+			Level:                outcome.level,
+			DeferredBy:           outcome.deferredBy,
+			Preview:              outcome.preview,
+			ManagedBy:            outcome.managedBy,
+			ReversalDisagreement: outcome.disagreement,
 		})
 	}
 	return statuses
