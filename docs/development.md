@@ -23,7 +23,7 @@ hack/dev/              demo Automations used by `make dev-hello`
 testdata/unifi/        real captured API responses — the parsers' ground truth
 ```
 
-`internal/actions/` is provider-agnostic for the same reason the engine is: a notification action must have no idea what `wan` means. It is also where Reactor's outbound reach is bounded — read the package comment before changing anything in it, and [SECURITY.md](../SECURITY.md#outbound-actions-http-request-and-notification) for why the bounds are where they are.
+`internal/actions/` is provider-agnostic for the same reason the engine is: a notification action must have no idea what `wan` means. It is also where Reactor's outbound reach is bounded — read the package comment before changing anything in it, and [SECURITY.md](../SECURITY.md#outbound-actions) for why the bounds are where they are.
 
 The engine must never contain provider-specific logic. Providers translate vendor reality into normalized state; the engine only ever sees that. Keeping the seam clean is what lets new providers arrive without touching the core — see [Adding a provider](adding-a-provider.md) for the contract and a walkthrough of the UniFi one.
 

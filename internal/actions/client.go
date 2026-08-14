@@ -35,13 +35,19 @@ const (
 	TypeNtfy        = "notification.ntfy"
 	TypeDiscord     = "notification.discord"
 	TypeSlack       = "notification.slack"
+	// TypeHomeAssistant calls one Home Assistant service. It is a shape over
+	// http.request rather than a second transport: the same allowlist, the same
+	// dialer floor, the same Secret rules. What it adds is that the path is
+	// built from a domain and a service rather than written out, so the action
+	// says what it is and cannot become a general request to an allowed host.
+	TypeHomeAssistant = "homeassistant.service"
 )
 
-// IsOutbound reports whether an action type leaves the cluster, and is what the
-// controller uses to decide an action belongs to this package.
+// IsOutbound reports whether an action type leaves the cluster, and so whether
+// it is one this package sends.
 func IsOutbound(actionType string) bool {
 	switch actionType {
-	case TypeHTTPRequest, TypeNtfy, TypeDiscord, TypeSlack:
+	case TypeHTTPRequest, TypeNtfy, TypeDiscord, TypeSlack, TypeHomeAssistant:
 		return true
 	}
 	return false

@@ -243,10 +243,40 @@ func (r *AutomationReconciler) buildRequest(
 	if action.TimeoutSeconds != nil {
 		timeout = time.Duration(*action.TimeoutSeconds) * time.Second
 	}
-	if action.Type == actions.TypeHTTPRequest {
+	switch action.Type {
+	case actions.TypeHTTPRequest:
 		return r.buildHTTPRequest(ctx, automation, action, data, timeout)
+	case actions.TypeHomeAssistant:
+		return r.buildHomeAssistantRequest(ctx, automation, action, data, timeout)
+	default:
+		return r.buildNotification(ctx, automation, action, data, timeout)
 	}
-	return r.buildNotification(ctx, automation, action, data, timeout)
+}
+
+// destinationFrom resolves where an action sends, from the field on the
+// Automation or the url key of its Secret.
+//
+// Exactly one of the two must supply it, and having both is an error rather
+// than a precedence rule: someone who has written a URL in two places is
+// telling Reactor two things, and quietly picking one is how a request ends up
+// somewhere nobody meant.
+//
+// actionType and field are both named because the two callers spell the field
+// differently, and an error that says "set the url field" without saying which
+// action's is not worth reading at 3am.
+func destinationFrom(actionType, field, fromAutomation, fromSecret, secretName string) (string, error) {
+	switch {
+	case fromAutomation != "" && fromSecret != "":
+		return "", fmt.Errorf(
+			"%s is set and secret %q also holds a %q key; exactly one must supply the destination",
+			field, secretName, actions.SecretKeyURL)
+	case fromAutomation != "":
+		return fromAutomation, nil
+	case fromSecret != "":
+		return fromSecret, nil
+	}
+	return "", fmt.Errorf("%s has no destination: set %s, or a %q key in the referenced secret",
+		actionType, field, actions.SecretKeyURL)
 }
 
 func (r *AutomationReconciler) buildHTTPRequest(
@@ -266,19 +296,10 @@ func (r *AutomationReconciler) buildHTTPRequest(
 		return actions.Request{}, err
 	}
 
-	target := spec.URL
-	switch {
-	case target != "" && credentials.URL != "":
-		return actions.Request{}, fmt.Errorf(
-			"request.url is set and secret %q also holds a %q key; exactly one must supply the destination",
-			secretNameOf(spec.SecretRef), actions.SecretKeyURL)
-	case target == "":
-		target = credentials.URL
-	}
-	if target == "" {
-		return actions.Request{}, fmt.Errorf(
-			"http.request has no destination: set request.url, or a %q key in the referenced secret",
-			actions.SecretKeyURL)
+	target, err := destinationFrom(
+		actions.TypeHTTPRequest, "request.url", spec.URL, credentials.URL, secretNameOf(spec.SecretRef))
+	if err != nil {
+		return actions.Request{}, err
 	}
 
 	header := credentials.Header.Clone()
@@ -312,6 +333,82 @@ func (r *AutomationReconciler) buildHTTPRequest(
 		Header:    header,
 		Body:      []byte(body),
 		Retryable: retryable(method, spec.Idempotent),
+		Timeout:   timeout,
+	}, nil
+}
+
+// buildHomeAssistantRequest turns one homeassistant.service action into the
+// POST that calls it.
+//
+// It goes through the same outbound client as everything else here, which is
+// the whole design: the destination allowlist, the address floor in the dialer,
+// the refusal to follow redirects and the origin-only reporting are properties
+// of that client, and an integration that wanted its own transport would be
+// opting out of all four. What is specific to Home Assistant is two things —
+// the path is built rather than written, and the token is a bearer credential
+// that has to be present before anything is sent.
+func (r *AutomationReconciler) buildHomeAssistantRequest(
+	ctx context.Context,
+	automation *reactorv1alpha1.Automation,
+	action reactorv1alpha1.Action,
+	data actions.Context,
+	timeout time.Duration,
+) (actions.Request, error) {
+	spec := action.HomeAssistant
+	if spec == nil {
+		return actions.Request{}, errors.New("homeassistant.service needs a homeAssistant block")
+	}
+
+	credentials, err := r.credentialsFor(ctx, automation, spec.SecretRef.Name)
+	if err != nil {
+		return actions.Request{}, err
+	}
+	if credentials.Header.Get("Authorization") == "" {
+		// Checked before anything is sent, because Home Assistant answers an
+		// unauthenticated call with a 401 that says nothing about which
+		// Automation produced it or what it was missing.
+		return actions.Request{}, fmt.Errorf(
+			"secret %q has no %q key; a Home Assistant long-lived access token travels as %q: Bearer <token>",
+			spec.SecretRef.Name, actions.SecretKeyAuthorization, actions.SecretKeyAuthorization)
+	}
+
+	base, err := destinationFrom(
+		actions.TypeHomeAssistant, "homeAssistant.url", spec.URL, credentials.URL, spec.SecretRef.Name)
+	if err != nil {
+		return actions.Request{}, err
+	}
+	target, err := actions.HomeAssistantURL(base, spec.Domain, spec.Service)
+	if err != nil {
+		return actions.Request{}, err
+	}
+
+	// The service data is the only part a template may reach, for the same
+	// reason the body is on http.request: the domain and the service decide
+	// what is being called, and observed state does not get to choose that.
+	rendered, err := actions.Render(spec.Data, data)
+	if err != nil {
+		return actions.Request{}, fmt.Errorf("homeAssistant.data: %w", err)
+	}
+	payload, err := actions.HomeAssistantPayload(rendered)
+	if err != nil {
+		return actions.Request{}, err
+	}
+
+	header := credentials.Header.Clone()
+	if header == nil {
+		header = http.Header{}
+	}
+	maps.Copy(header, payload.Header)
+
+	return actions.Request{
+		Method: http.MethodPost,
+		URL:    target,
+		Header: header,
+		Body:   payload.Body,
+		// At most once unless the author says otherwise. See Idempotent on the
+		// API type: a service call is a command, and Reactor cannot tell
+		// light.turn_on from script.run_the_thing.
+		Retryable: spec.Idempotent != nil && *spec.Idempotent,
 		Timeout:   timeout,
 	}, nil
 }

@@ -116,6 +116,12 @@ const (
 	//                       failure the feature exists to prevent.
 	//   - http.request      retried only when the method is idempotent by RFC
 	//                       9110, or the author declares it so. See retryable().
+	//   - homeassistant.service
+	//                       AT-MOST-ONCE unless the author sets idempotent.
+	//                       light.turn_on is safe to repeat; script.turn_on,
+	//                       notify.* and button.press are not, and the action
+	//                       cannot tell which one it was handed. The author can,
+	//                       which is why the declaration is theirs to make.
 	//   - kubernetes.restart AT-MOST-ONCE, unconditionally. Every execution rolls
 	//                       the workload, so a retry after an ambiguous failure
 	//                       is a second outage rather than a correction — and

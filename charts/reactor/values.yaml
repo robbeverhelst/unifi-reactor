@@ -106,8 +106,9 @@ unifi:
       existingSecret: unifi-reactor-console
 
 actions:
-  # Where Reactor may send the outbound edge actions — http.request and the
-  # notification.* types.
+  # Where Reactor may send the outbound edge actions — http.request, the
+  # notification.* types, and the named integrations (homeassistant.service).
+  # They all go through one client, so this one list governs every one of them.
   #
   # Empty is the default and it means "nowhere": every outbound action is
   # refused with a reason in the Automation's status naming the destination to

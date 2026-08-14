@@ -39,6 +39,15 @@ import (
 const (
 	testWebhookURL = "https://ntfy.example.com/reactor"
 	secretName     = "ntfy-credentials"
+	// The Home Assistant fixtures. The address resolves nowhere and is never
+	// dialled: the outbound transport is stubbed here.
+	haURL        = "https://home-assistant.example.com"
+	haSecretName = "home-assistant-credentials"
+	haToken      = "Bearer tk_example"
+	// The service every Home Assistant fixture calls unless it is testing the
+	// path rules themselves.
+	haDomain  = "light"
+	haService = "turn_on"
 )
 
 // recordingDoer stands in for the outbound transport. No test here opens a
@@ -419,6 +428,17 @@ var _ = Describe("Edge actions", func() {
 					SecretRef: reactorv1alpha1.SecretReference{Name: secretName}, Message: "x",
 				},
 			})
+			rejects("no-home-assistant", reactorv1alpha1.Action{Type: actions.TypeHomeAssistant})
+			rejects("home-assistant-on-http", reactorv1alpha1.Action{
+				Type:    actions.TypeHTTPRequest,
+				Request: &reactorv1alpha1.HTTPRequest{URL: "https://example.com/hook"},
+				HomeAssistant: &reactorv1alpha1.HomeAssistantService{
+					URL:       haURL,
+					SecretRef: reactorv1alpha1.SecretReference{Name: haSecretName},
+					Domain:    haDomain,
+					Service:   haService,
+				},
+			})
 		})
 
 		It("rejects a target or replicas on an action that owns no target", func() {
@@ -488,6 +508,140 @@ var _ = Describe("Edge actions", func() {
 
 			Expect(outbound.requests()).To(BeEmpty())
 			Expect(statusOf(name).EdgeActions[0].Reason).To(ContainSubstring("belongs in the referenced secret"))
+		})
+	})
+
+	Context("homeassistant.service", func() {
+		homeAssistant := func(spec *reactorv1alpha1.HomeAssistantService) reactorv1alpha1.Action {
+			return reactorv1alpha1.Action{Type: actions.TypeHomeAssistant, HomeAssistant: spec}
+		}
+
+		callService := func(name string, spec *reactorv1alpha1.HomeAssistantService) {
+			createAutomation(name, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
+				},
+				Actions: []reactorv1alpha1.Action{homeAssistant(spec)},
+			})
+			observe(map[string]string{keyWAN: wanBackup})
+			reconcileOnce(name)
+		}
+
+		It("posts to the service endpoint with the token and the rendered data", func() {
+			const name = "edge-ha"
+			createSecret(haSecretName, map[string][]byte{
+				actions.SecretKeyAuthorization: []byte(haToken),
+			})
+			callService(name, &reactorv1alpha1.HomeAssistantService{
+				URL:       haURL,
+				SecretRef: reactorv1alpha1.SecretReference{Name: haSecretName},
+				Domain:    "notify",
+				Service:   "persistent_notification",
+				Data:      `{"message": {{ json .To }}}`,
+			})
+
+			sent := outbound.requests()
+			Expect(sent).To(HaveLen(1))
+			Expect(sent[0].URL).To(Equal(haURL + "/api/services/notify/persistent_notification"))
+			Expect(sent[0].Header.Get("Authorization")).To(Equal(haToken))
+			Expect(sent[0].Header.Get("Content-Type")).To(Equal("application/json"))
+			Expect(string(sent[0].Body)).To(Equal(`{"message": "backup"}`))
+			Expect(sent[0].Retryable).To(BeFalse(),
+				"a service call is a command, and Reactor cannot tell which ones repeat safely")
+			Expect(statusOf(name).EdgeActions[0].Status).To(Equal(executionSuccess))
+		})
+
+		It("takes the base address from the secret when the automation does not name one", func() {
+			const name = "edge-ha-secret-url"
+			createSecret(haSecretName, map[string][]byte{
+				actions.SecretKeyURL:           []byte(haURL),
+				actions.SecretKeyAuthorization: []byte(haToken),
+			})
+			callService(name, &reactorv1alpha1.HomeAssistantService{
+				SecretRef: reactorv1alpha1.SecretReference{Name: haSecretName},
+				Domain:    haDomain,
+				Service:   haService,
+			})
+
+			sent := outbound.requests()
+			Expect(sent).To(HaveLen(1))
+			Expect(sent[0].URL).To(Equal(haURL + "/api/services/" + haDomain + "/" + haService))
+			Expect(string(sent[0].Body)).To(Equal("{}"), "a service with no data still wants an object")
+		})
+
+		It("retries only when the author declares the service safe to repeat", func() {
+			const name = "edge-ha-idempotent"
+			createSecret(haSecretName, map[string][]byte{
+				actions.SecretKeyAuthorization: []byte(haToken),
+			})
+			idempotent := true
+			callService(name, &reactorv1alpha1.HomeAssistantService{
+				URL:        haURL,
+				SecretRef:  reactorv1alpha1.SecretReference{Name: haSecretName},
+				Domain:     haDomain,
+				Service:    haService,
+				Data:       `{"entity_id": "light.hall"}`,
+				Idempotent: &idempotent,
+			})
+
+			sent := outbound.requests()
+			Expect(sent).To(HaveLen(1))
+			Expect(sent[0].Retryable).To(BeTrue())
+		})
+
+		It("refuses to send without a token rather than collecting a 401", func() {
+			const name = "edge-ha-no-token"
+			createSecret(haSecretName, map[string][]byte{actions.SecretKeyURL: []byte(haURL)})
+			callService(name, &reactorv1alpha1.HomeAssistantService{
+				SecretRef: reactorv1alpha1.SecretReference{Name: haSecretName},
+				Domain:    haDomain,
+				Service:   haService,
+			})
+
+			Expect(outbound.requests()).To(BeEmpty())
+			Expect(statusOf(name).EdgeActions[0].Reason).To(
+				ContainSubstring(actions.SecretKeyAuthorization))
+		})
+
+		It("reports data that did not render to a JSON object rather than posting it", func() {
+			const name = "edge-ha-bad-data"
+			createSecret(haSecretName, map[string][]byte{
+				actions.SecretKeyAuthorization: []byte(haToken),
+			})
+			callService(name, &reactorv1alpha1.HomeAssistantService{
+				URL:       haURL,
+				SecretRef: reactorv1alpha1.SecretReference{Name: haSecretName},
+				Domain:    haDomain,
+				Service:   haService,
+				Data:      `["light.hall"]`,
+			})
+
+			Expect(outbound.requests()).To(BeEmpty())
+			Expect(statusOf(name).EdgeActions[0].Reason).To(ContainSubstring("JSON object"))
+		})
+
+		// The domain and the service are the only part of the path an
+		// Automation chooses. The API server rejects a traversal at admission;
+		// this asserts the rule is on the schema rather than only in Go.
+		It("rejects a domain or service that is not a bare slug", func() {
+			for _, spec := range []*reactorv1alpha1.HomeAssistantService{
+				{Domain: "../../auth", Service: haService},
+				{Domain: haDomain, Service: haService + "?x=1"},
+				{Domain: "Light", Service: haService},
+			} {
+				spec.URL = haURL
+				spec.SecretRef = reactorv1alpha1.SecretReference{Name: haSecretName}
+				automation := &reactorv1alpha1.Automation{
+					ObjectMeta: metav1.ObjectMeta{Name: "ha-path", Namespace: testNamespace},
+					Spec: reactorv1alpha1.AutomationSpec{
+						When: &reactorv1alpha1.StateTrigger{
+							Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
+						},
+						Actions: []reactorv1alpha1.Action{homeAssistant(spec)},
+					},
+				}
+				Expect(k8sClient.Create(ctx, automation)).NotTo(Succeed())
+			}
 		})
 	})
 })

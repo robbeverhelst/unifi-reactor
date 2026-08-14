@@ -157,7 +157,7 @@ So the RBAC that would make it possible is not granted under any setting: `rbac.
 | | Declares | Arbitrated? | Types |
 | --- | --- | --- | --- |
 | **Desired-state** | a *level* — what a target should be | yes, continuously across every automation sharing the target | `kubernetes.scale`, `kubernetes.cronjob.suspend`, `kubernetes.cordon` |
-| **Edge** | an *occurrence* | no — fires on this automation's own transition and owns nothing | `kubernetes.restart`, `http.request`, `notification.*` |
+| **Edge** | an *occurrence* | no — fires on this automation's own transition and owns nothing | `kubernetes.restart`, `http.request`, `notification.*`, `homeassistant.service` |
 
 `kubernetes.scale` works through the [scale subresource](https://kubernetes.io/docs/reference/using-api/api-concepts/#subresources), so `kind: Deployment` and `kind: StatefulSet` take the same path and Reactor never has to know where a kind keeps its replicas. `target.kind` is still a closed list, on purpose: a kind is only reachable if the chart granted RBAC for it, and RBAC has to name resources explicitly — so an open field would turn a typo into a `Forbidden` discovered *during* the outage, instead of a rejected write at admission.
 
@@ -352,7 +352,7 @@ actions:
     - https://discord.com
 ```
 
-This is the security boundary and it is worth understanding rather than pasting: anyone who can create an `Automation` in their own namespace can ask Reactor to make a request, and that request goes out from inside the cluster with the operator's network position rather than theirs. [SECURITY.md](SECURITY.md#outbound-actions-http-request-and-notification) has the reasoning and what is refused whatever you list.
+This is the security boundary and it is worth understanding rather than pasting: anyone who can create an `Automation` in their own namespace can ask Reactor to make a request, and that request goes out from inside the cluster with the operator's network position rather than theirs. [SECURITY.md](SECURITY.md#outbound-actions) has the reasoning and what is refused whatever you list.
 
 **2. Put the destination in a Secret.** For every transport shipped, the webhook URL *is* the credential — so a notification has no URL field at all:
 
@@ -425,6 +425,43 @@ Ordering and delivery, stated plainly because they are choices rather than accid
 - **Retries happen inside the one reconcile.** A notification is a publish, so it is tried three times against a timeout, a 5xx or a 429. `http.request` is not: `GET` and `PUT` retry ([RFC 9110](https://www.rfc-editor.org/rfc/rfc9110#name-idempotent-methods) calls them idempotent), and `POST` and `PATCH` are attempted exactly once unless you set `request.idempotent: true`. Reactor cannot tell your webhook from your order API, and a duplicate side effect is worse than a missed one when nobody knows what the side effect is.
 - **A suspended automation sends nothing**, the same way a deleted one does not. Suspending is a reversible delete.
 - **Nothing fires on deletion.** Deleting an automation is not a state transition, and a "WAN recovered" message caused by a `kubectl delete` would be a lie.
+
+## Acting on things outside the cluster
+
+`http.request` can already reach anything with an HTTP API, and for a one-off webhook that is the right tool. The action types below exist because two integrations are worth naming: they are used often enough that writing the URL out every time is a papercut, and — more importantly — a named action can constrain the request in ways a generic one cannot.
+
+They are **the same transport**. The same install-level `actions.allowedDestinations` allowlist, the same address floor enforced in the dialer, the same refusal to follow redirects, the same rule that credentials come only from a Secret in the automation's own namespace, and the same origin-only reporting. There is one outbound HTTP client in Reactor and everything here goes through it. [SECURITY.md](SECURITY.md#outbound-actions) has the reasoning.
+
+### Home Assistant
+
+```yaml
+  actions:
+    - type: homeassistant.service
+      homeAssistant:
+        url: https://home-assistant.example.com
+        secretRef: {name: home-assistant-credentials}
+        domain: notify
+        service: persistent_notification
+        data: '{"message": "the cluster is on battery", "title": "Reactor"}'
+```
+
+It calls `POST /api/services/<domain>/<service>` — `light.turn_on`, `script.turn_on`, `notify.mobile_app_phone`, anything Home Assistant exposes as a service. The credential is a [long-lived access token](https://www.home-assistant.io/docs/authentication/#your-account-profile):
+
+```sh
+kubectl -n media create secret generic home-assistant-credentials \
+  --from-literal=authorization="Bearer eyJhbGci..."
+# the base address may live in the secret instead, under url
+```
+
+**The direction is the point.** Home Assistant can already see UniFi — it has an integration for it, and it does presence better than Reactor ever would. What it cannot see is the cluster. So the interesting flow is not Reactor learning that a phone came home; it is Reactor telling Home Assistant that the uplink failed over, the UPS is on battery, or a node was cordoned, and letting Home Assistant do the physical thing. That is why [#10 (`client.<name>`) and #26 (`unifi.client.block`)](https://github.com/robbeverhelst/unifi-reactor/issues/27) were closed rather than built, and this action is the seam that decision rests on.
+
+Three things are narrower than `http.request` on purpose:
+
+- **The path is built, not written.** `domain` and `service` are the only part an automation chooses, and both are restricted to a bare slug — lowercase letters, digits and underscores — at admission *and* again when the URL is built. Without that, "call a service" would quietly be "make any request to an allowed host", which is a real action with a real name and this is not it. A base URL carrying a path is fine (an instance behind a reverse proxy keeps its prefix); a query or fragment on it is refused.
+- **`data` must render to a JSON object.** It is templated like any other body, and checked before it is sent — a template that rendered to a list, a bare string or nothing is reported against the automation rather than collected as a 400 from Home Assistant with nothing naming who produced it. Omit it and Reactor sends `{}`.
+- **It is attempted exactly once.** `light.turn_on` is idempotent; `script.turn_on`, `notify.*` and `button.press` are not, and Reactor cannot tell which one it was handed. You can: set `idempotent: true` and it retries a timeout or a 5xx like a notification does.
+
+A missing `authorization` key is refused before anything is sent, because Home Assistant answers an unauthenticated call with a 401 that says nothing about which automation produced it.
 
 ## State keys
 

@@ -662,7 +662,34 @@ Credentials should come from Kubernetes Secrets rather than being stored directl
 > - **Destinations are allowlisted at install time and refused by default.** `spec.actions` is writable by anyone who can create an `Automation`, and the request goes out with the operator's network position rather than the author's, so which hosts that is worth is not a per-Automation decision. The loopback interface and link-local addresses are refused whatever the allowlist says, and redirects are not followed.
 > - **Only the body is templated.** The URL and the headers are literal, because letting observed state edit the destination would give back the choice the allowlist exists to take away.
 >
-> Credentials come from a Secret in the `Automation`'s own namespace — never inline, never cross-namespace. See [SECURITY.md](../SECURITY.md#outbound-actions-http-request-and-notification) for the threat model and the [README](../README.md#telling-you-what-happened) for the shape.
+> Credentials come from a Secret in the `Automation`'s own namespace — never inline, never cross-namespace. See [SECURITY.md](../SECURITY.md#outbound-actions) for the threat model and the [README](../README.md#telling-you-what-happened) for the shape.
+
+#### Named integrations over the generic action
+
+`homeassistant.service` is shipped, and is the first action to sit *on top of*
+`http.request` rather than beside it. This section's instinct — prefer the
+generic action, do not build a provider per service — is right, and the shape
+that follows from taking it seriously is not "no integration" but "an
+integration that is a shape over the one transport".
+
+There is exactly one outbound HTTP client. A named integration decides two
+things — what the URL is and what the body is — and inherits the destination
+allowlist, the address floor in the dialer, the redirect refusal, the
+origin-only reporting and the Secret rules. Adding a second client would be the
+actual mistake this section is warning about, because each of those is a place
+to get security wrong once per client.
+
+The bar for naming an integration, from the two that cleared it:
+
+1. **It constrains the request.** `homeassistant.service` builds its path from a
+   `domain` and a `service`, each a bare slug. That is strictly less reach than
+   the `http.request` the same allowlist entry already permits, and it makes the
+   action state what it is.
+2. **Or the exchange is not one request.** See qBittorrent below.
+
+Neither "it is convenient" nor "it is popular" is on that list. An integration
+that would be a `url` and a `body` an author could have written themselves is a
+documented example, not an action type.
 
 ### qBittorrent
 

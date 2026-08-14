@@ -170,6 +170,70 @@ type HTTPRequest struct {
 	Idempotent *bool `json:"idempotent,omitempty"`
 }
 
+// HomeAssistantService is one Home Assistant service call.
+//
+// It is a shape over the same outbound transport http.request uses — the same
+// install-level destination allowlist, the same address floor in the dialer,
+// the same rule that credentials come only from a Secret in this Automation's
+// own namespace. What it adds is that the request path is built from a domain
+// and a service rather than written out, so the action states what it is and
+// cannot be turned into an arbitrary request to an allowed host.
+//
+// The direction matters and is the reason this exists. Home Assistant can
+// already see UniFi; what it cannot see is the cluster. This is the seam
+// Reactor reaches it through, and it is also why Reactor does not observe
+// presence itself.
+type HomeAssistantService struct {
+	// URL is the base address of the Home Assistant instance, e.g.
+	// https://home-assistant.example.com. It may carry a path, for an instance
+	// behind a reverse proxy, and takes no query or fragment. The service path
+	// is appended by Reactor and is not expressible here.
+	//
+	// Omit it to take the base address from the Secret's url key instead.
+	// Exactly one of the two must supply it.
+	// +kubebuilder:validation:MaxLength=2048
+	// +optional
+	URL string `json:"url,omitempty"`
+
+	// SecretRef names a Secret in this Automation's namespace holding the
+	// long-lived access token, under the authorization key and in the form
+	// "Bearer <token>". It may also hold the base address under url.
+	//
+	// A token is required: Home Assistant authenticates every API call, and
+	// there is no unauthenticated shape of this action to fall back to.
+	SecretRef SecretReference `json:"secretRef"`
+
+	// Domain of the service being called, e.g. "light", "script", "notify".
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern="^[a-z0-9_]+$"
+	Domain string `json:"domain"`
+
+	// Service to call within the domain, e.g. "turn_on".
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern="^[a-z0-9_]+$"
+	Service string `json:"service"`
+
+	// Data is the service data, rendered as a Go text/template against the
+	// transition and sent as the JSON request body. It must render to a JSON
+	// object; omitting it sends an empty one. Available fields are Automation,
+	// Namespace, Name, Provider, Matching, Key, From, To, State and Time, and a
+	// json function quotes a value safely for embedding. See the README.
+	// +kubebuilder:validation:MaxLength=4096
+	// +optional
+	Data string `json:"data,omitempty"`
+
+	// Idempotent declares that calling this service twice is the same as
+	// calling it once, which is what lets Reactor retry it after a timeout or a
+	// 5xx. It defaults to false, and has to: light.turn_on is idempotent and
+	// script.turn_on, notify.mobile_app and button.press are not, and Reactor
+	// cannot tell which one it was handed. A duplicate announcement or a second
+	// press is worse than a missed one when nobody knows what was pressed.
+	// +optional
+	Idempotent *bool `json:"idempotent,omitempty"`
+}
+
 // Notification is the message a notification.* action sends.
 //
 // The destination is not expressible here at all: it comes from the referenced
@@ -200,14 +264,16 @@ type Notification struct {
 // Types divide into two kinds. A desired-state action (kubernetes.scale,
 // kubernetes.cronjob.suspend) declares a level and is arbitrated continuously
 // across every Automation sharing its target. An edge action (kubernetes.restart,
-// http.request, notification.*) expresses an occurrence: it fires on this
-// Automation's own transitions, owns no target and arbitrates with nothing.
+// http.request, notification.*, homeassistant.service) expresses an occurrence:
+// it fires on this Automation's own transitions, owns no target and arbitrates
+// with nothing.
 //
 // A desired-state action's level is an integer the arbiter orders and nothing
 // more, so a boolean level is carried as its own field — replicas for a count,
 // suspended and cordoned for a switch — rather than by overloading one of them.
 // The units differ; the ordering does not.
 // +kubebuilder:validation:XValidation:rule="(self.type == 'http.request') == has(self.request)",message="spec.actions: request is required by http.request and rejected on every other type"
+// +kubebuilder:validation:XValidation:rule="(self.type == 'homeassistant.service') == has(self.homeAssistant)",message="spec.actions: homeAssistant is required by homeassistant.service and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type.startsWith('notification.') == has(self.notification)",message="spec.actions: notification is required by the notification.* types and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type.startsWith('kubernetes.') == has(self.target)",message="spec.actions: target is required by the kubernetes.* actions and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type == 'kubernetes.scale' || !has(self.replicas)",message="spec.actions: replicas belongs to kubernetes.scale"
@@ -219,7 +285,7 @@ type Notification struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.target) || self.type != 'kubernetes.restart' || self.target.kind in ['Deployment', 'StatefulSet']",message="spec.actions: kubernetes.restart targets a kind with a pod template: Deployment or StatefulSet"
 type Action struct {
 	// Type of the action, e.g. "kubernetes.scale".
-	// +kubebuilder:validation:Enum=kubernetes.scale;kubernetes.cronjob.suspend;kubernetes.cordon;kubernetes.restart;http.request;notification.ntfy;notification.discord;notification.slack
+	// +kubebuilder:validation:Enum=kubernetes.scale;kubernetes.cronjob.suspend;kubernetes.cordon;kubernetes.restart;http.request;notification.ntfy;notification.discord;notification.slack;homeassistant.service
 	Type string `json:"type"`
 
 	// Target of a kubernetes.* action.
@@ -265,6 +331,10 @@ type Action struct {
 	// Notification is the message a notification.* action sends.
 	// +optional
 	Notification *Notification `json:"notification,omitempty"`
+
+	// HomeAssistant is the service call a homeassistant.service action makes.
+	// +optional
+	HomeAssistant *HomeAssistantService `json:"homeAssistant,omitempty"`
 
 	// TimeoutSeconds bounds a single attempt at this action, so an
 	// unreachable target or endpoint cannot occupy a reconcile indefinitely.

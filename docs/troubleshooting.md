@@ -600,12 +600,14 @@ kubectl -n media describe automation notify-on-failover | grep EdgeAction
 | --- | --- | --- |
 | `outbound actions are disabled on this install` | `actions.allowedDestinations` is empty, which is the default | Add the destination to the chart value |
 | `is not allowed by this install` | The destination is not on the allowlist. The message names it as `scheme://host:port` | Add exactly that, port included |
-| `refusing to dial ... loopback` / `link-local` | The host resolved to an address that is refused whatever the allowlist says | Not a misconfiguration to work around; see [SECURITY.md](../SECURITY.md#outbound-actions-http-request-and-notification) |
+| `refusing to dial ... loopback` / `link-local` | The host resolved to an address that is refused whatever the allowlist says | Not a misconfiguration to work around; see [SECURITY.md](../SECURITY.md#outbound-actions) |
 | `refusing to follow a redirect to` | The endpoint answered with a redirect. Redirects name a destination the allowlist never approved | Point the action at the final URL |
 | `reading secret ... not found` | No credential Secret of that name in the **Automation's** namespace | Create it there; there is no cross-namespace read |
 | `has no "url" key` | The Secret exists but carries no destination | Add `url` to it |
 | `responded 4xx` | The endpoint rejected it. A 401 or 403 is a credential problem | Check the Secret's `url` and `authorization` |
 | `rendering template` | A message referenced a field or state key that does not exist | `{{ .State.wan }}` errors on a typo, by design |
+| `has no "authorization" key` | `homeassistant.service` found no token, and refuses to collect a 401 to find out | Add `authorization=Bearer <long-lived-token>` to the Secret |
+| `did not render to a JSON object` | `homeAssistant.data` rendered to a list, a bare string or nothing | Service data is an object: `{"entity_id": "light.hall"}` |
 
 An empty `status.edgeActions` when you expected one means the action never fired rather than failed. That is one of:
 
