@@ -52,11 +52,135 @@ type TargetRef struct {
 	Namespace string `json:"namespace,omitempty"`
 }
 
+// SecretReference names a Secret in the Automation's own namespace.
+//
+// There is deliberately no namespace field. An Automation may only ever read
+// credentials from the namespace it lives in, because anyone able to create an
+// Automation can already create a Secret there — while a cross-namespace read
+// would let them borrow the operator's cluster-wide reach to pull a credential
+// they have no access to themselves.
+type SecretReference struct {
+	// Name of the Secret in this Automation's namespace.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+}
+
+// HTTPHeader is one header sent with an http.request action.
+//
+// Values are literal and never templated, and this is not where credentials
+// go: everything here is readable by anyone who can read the Automation.
+// Authorization and API-key headers come from the referenced Secret.
+type HTTPHeader struct {
+	// Name of the header. Authorization is rejected here — it comes from the
+	// Secret.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:Pattern="^[A-Za-z0-9!#$%&'*+.^_|~-]+$"
+	Name string `json:"name"`
+
+	// Value of the header. Literal, never templated.
+	// +kubebuilder:validation:MaxLength=1024
+	// +optional
+	Value string `json:"value,omitempty"`
+}
+
+// HTTPRequest describes an outbound request for an http.request action.
+//
+// The destination is constrained twice over, because an operator that issues
+// requests on demand is reachable by anyone who can create an Automation: the
+// install-level allowlist decides which hosts Reactor may talk to at all, and
+// loopback and link-local addresses are refused whatever the allowlist says.
+type HTTPRequest struct {
+	// Method of the request. Defaults to POST.
+	// +kubebuilder:validation:Enum=GET;POST;PUT;PATCH
+	// +kubebuilder:default=POST
+	// +optional
+	Method string `json:"method,omitempty"`
+
+	// URL to request. Must be http or https, must carry no user information,
+	// and must be allowed by the install's destination allowlist. Never
+	// templated: the destination is a fixed decision, not something observed
+	// state gets to influence.
+	//
+	// Omit it to take the URL from the Secret's url key instead, which is how
+	// a URL that is itself a credential stays out of the Automation. Exactly
+	// one of the two must supply it.
+	// +kubebuilder:validation:MaxLength=2048
+	// +optional
+	URL string `json:"url,omitempty"`
+
+	// SecretRef names a Secret in this Automation's namespace holding the
+	// credentials for this request. Recognised keys: url, authorization, and
+	// any key prefixed header- whose remainder is the header name.
+	// +optional
+	SecretRef *SecretReference `json:"secretRef,omitempty"`
+
+	// Headers sent with the request, in addition to those from the Secret.
+	// Literal values only.
+	// +kubebuilder:validation:MaxItems=16
+	// +optional
+	Headers []HTTPHeader `json:"headers,omitempty"`
+
+	// Body of the request, rendered as a Go text/template against the
+	// transition. Available fields are Automation, Namespace, Name, Provider,
+	// Matching, Key, From, To, State and Time; a json function quotes a value
+	// safely for embedding in JSON. See the README for the syntax.
+	//
+	// The body is the only part of the request state can reach, and it only
+	// ever carries values this Automation already observes, to a destination
+	// the operator allowed.
+	// +kubebuilder:validation:MaxLength=4096
+	// +optional
+	Body string `json:"body,omitempty"`
+
+	// Idempotent declares that repeating this request is harmless, which is
+	// what lets Reactor retry it after a timeout or a 5xx. GET and PUT are
+	// treated as idempotent without saying so; POST and PATCH are not, and are
+	// attempted exactly once so a transient failure cannot turn into a second
+	// order, message or payment.
+	// +optional
+	Idempotent *bool `json:"idempotent,omitempty"`
+}
+
+// Notification is the message a notification.* action sends.
+//
+// The destination is not expressible here at all: it comes from the referenced
+// Secret, because for every transport shipped the URL is itself the credential.
+type Notification struct {
+	// SecretRef names a Secret in this Automation's namespace holding the
+	// destination. Required keys: url. Optional: authorization, sent as the
+	// Authorization header.
+	SecretRef SecretReference `json:"secretRef"`
+
+	// Title of the notification, rendered as a Go text/template against the
+	// transition. Transports without a title concept prepend it to the message.
+	// +kubebuilder:validation:MaxLength=256
+	// +optional
+	Title string `json:"title,omitempty"`
+
+	// Message body, rendered as a Go text/template against the transition.
+	// Available fields are Automation, Namespace, Name, Provider, Matching,
+	// Key, From, To, State and Time. See the README for the syntax.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=2048
+	Message string `json:"message"`
+}
+
 // Action is a single normalized action. Type selects the action provider;
 // the provider-specific fields are flat and validated per type.
+//
+// Types divide into two kinds. A desired-state action (kubernetes.scale)
+// declares a level and is arbitrated continuously across every Automation
+// sharing its target. An edge action (http.request, notification.*) expresses
+// an occurrence: it fires on this Automation's own transitions, owns no target
+// and arbitrates with nothing.
+// +kubebuilder:validation:XValidation:rule="(self.type == 'http.request') == has(self.request)",message="spec.actions: request is required by http.request and rejected on every other type"
+// +kubebuilder:validation:XValidation:rule="self.type.startsWith('notification.') == has(self.notification)",message="spec.actions: notification is required by the notification.* types and rejected on every other type"
+// +kubebuilder:validation:XValidation:rule="self.type == 'kubernetes.scale' || !has(self.target)",message="spec.actions: target belongs to kubernetes.* actions; the outbound actions have no target"
+// +kubebuilder:validation:XValidation:rule="self.type == 'kubernetes.scale' || !has(self.replicas)",message="spec.actions: replicas belongs to kubernetes.scale"
 type Action struct {
 	// Type of the action, e.g. "kubernetes.scale".
-	// +kubebuilder:validation:Enum=kubernetes.scale
+	// +kubebuilder:validation:Enum=kubernetes.scale;http.request;notification.ntfy;notification.discord;notification.slack
 	Type string `json:"type"`
 
 	// Target of a kubernetes.* action.
@@ -68,10 +192,19 @@ type Action struct {
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
 
+	// Request describes the outbound call an http.request action makes.
+	// +optional
+	Request *HTTPRequest `json:"request,omitempty"`
+
+	// Notification is the message a notification.* action sends.
+	// +optional
+	Notification *Notification `json:"notification,omitempty"`
+
 	// TimeoutSeconds bounds a single attempt at this action, so an
-	// unreachable target cannot occupy a reconcile indefinitely. Defaults to
-	// 30. Exceeding it is recorded as a failed execution and retried with
-	// bounded backoff, not held open.
+	// unreachable target or endpoint cannot occupy a reconcile indefinitely.
+	// Defaults to 30 for kubernetes.scale and to 10 for the outbound actions,
+	// which may retry within the same reconcile. Exceeding it is recorded as a
+	// failed execution, not held open.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=600
 	// +optional
@@ -196,6 +329,48 @@ type ExecutionStatus struct {
 	Attempts int32 `json:"attempts,omitempty"`
 }
 
+// EdgeExecutionStatus records what one edge action did on this Automation's
+// last transition.
+//
+// Edge actions are reported separately from LastExecution because they fail
+// differently: a desired-state action that fails is corrected by the next
+// reconcile, so its failure is the Automation's problem. An edge action fires
+// on an occurrence that has already passed, so a failure is a thing that did
+// not happen — worth reporting, but not a reason to call an Automation whose
+// workload was scaled correctly unhealthy.
+type EdgeExecutionStatus struct {
+	// Type is the action type this entry describes, e.g. "notification.ntfy".
+	Type string `json:"type"`
+
+	// Status is "Success", "Failed", or "Skipped".
+	Status string `json:"status"`
+
+	// Reason explains a failure or a skip. It never contains a credential: a
+	// destination is reported as scheme, host and port only, with the path and
+	// query — the part of a webhook URL that is the secret — left out, and a
+	// response body is never included.
+	// +optional
+	Reason string `json:"reason,omitempty"`
+
+	// Destination is the scheme, host and port the request went to, for the
+	// same reason and with the same omissions.
+	// +optional
+	Destination string `json:"destination,omitempty"`
+
+	// Attempts counts how many times this action was tried. More than one only
+	// happens for actions declared safe to repeat.
+	// +optional
+	Attempts int32 `json:"attempts,omitempty"`
+
+	// OnExit is true when this action ran from spec.onExit.
+	// +optional
+	OnExit bool `json:"onExit,omitempty"`
+
+	// Time is when the attempt finished.
+	// +optional
+	Time metav1.Time `json:"time,omitempty"`
+}
+
 // TargetStatus reports what this Automation wants for one target and what the
 // arbitration across every Automation sharing that target actually resolved
 // to. When the two differ, DeferredBy names who is holding it there.
@@ -242,10 +417,17 @@ type AutomationStatus struct {
 	// +optional
 	LastTransition *StateTransition `json:"lastTransition,omitempty"`
 
-	// LastExecution is the outcome of the most recent action run, including
-	// onExit runs (recorded for auditability).
+	// LastExecution is the outcome of the most recent desired-state action run,
+	// including onExit runs (recorded for auditability).
 	// +optional
 	LastExecution *ExecutionStatus `json:"lastExecution,omitempty"`
+
+	// EdgeActions is what the edge actions did on the last transition, one
+	// entry per action that fired, in spec order. It is replaced wholesale on
+	// each transition rather than appended to: it answers "what happened when
+	// this last changed", not "what has ever happened".
+	// +optional
+	EdgeActions []EdgeExecutionStatus `json:"edgeActions,omitempty"`
 
 	// Targets reports the arbitrated outcome per target, explaining why an
 	// Automation that wants something is not getting it.

@@ -1,0 +1,52 @@
+apiVersion: reactor.robbeverhelst.com/v1alpha1
+kind: Automation
+metadata:
+  labels:
+    app.kubernetes.io/name: unifi-reactor
+    app.kubernetes.io/managed-by: kustomize
+  name: notify-on-backup-wan
+spec:
+  when:
+    provider: unifi
+    state:
+      wan: backup
+
+  # Both actions run on the same edge, but they are different kinds. The scale
+  # declares a level and is arbitrated across every Automation sharing the
+  # Deployment; the notification expresses an occurrence and fires on this
+  # Automation's own transition.
+  actions:
+    - type: kubernetes.scale
+      target:
+        kind: Deployment
+        name: qbittorrent
+      replicas: 0
+    - type: notification.ntfy
+      notification:
+        # The destination is not expressible here: for every transport shipped
+        # the URL is itself the credential, so it comes from the Secret's url
+        # key. The Secret must be in this Automation's own namespace.
+        #
+        #   kubectl create secret generic ntfy-credentials \
+        #     --from-literal=url=https://ntfy.example.com/your-topic \
+        #     --from-literal=authorization="Bearer tk_example"
+        #
+        # The host also has to be in the install's actions.allowedDestinations,
+        # which is empty by default and refuses everything.
+        secretRef:
+          name: ntfy-credentials
+        title: "Reactor: {{ .Name }}"
+        message: "{{ .Key }} moved from {{ .From }} to {{ .To }}; qbittorrent paused"
+      timeoutSeconds: 10
+
+  onExit:
+    - type: kubernetes.scale
+      target:
+        kind: Deployment
+        name: qbittorrent
+      replicas: 1
+    - type: notification.ntfy
+      notification:
+        secretRef:
+          name: ntfy-credentials
+        message: "{{ .Key }} back to {{ .To }}; qbittorrent resumed"

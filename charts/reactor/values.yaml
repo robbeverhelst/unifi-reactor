@@ -105,6 +105,39 @@ unifi:
       # the API key the poller uses, so this is a second, separate credential.
       existingSecret: unifi-reactor-console
 
+actions:
+  # Where Reactor may send the outbound edge actions — http.request and the
+  # notification.* types.
+  #
+  # Empty is the default and it means "nowhere": every outbound action is
+  # refused with a reason in the Automation's status naming the destination to
+  # add here. That is deliberate. An Automation is writable by anyone who can
+  # create one in their own namespace, and the request it asks for goes out from
+  # inside the cluster with this operator's network position — reaching
+  # ClusterIP Services, your gateway, and anything else this pod can route to.
+  # Deciding which destinations that is worth is yours, not theirs.
+  #
+  # Entries are scheme, host and optional port. No port means the scheme's
+  # default port only, so an unusual port has to be written out. One leading
+  # "*." label is allowed. The single entry "*" allows any host and is an
+  # explicit choice to run without this control.
+  #
+  #   allowedDestinations:
+  #     - https://ntfy.example.com
+  #     - https://discord.com
+  #     - http://hooks.example.com:8080
+  #     - https://*.example.com
+  #
+  # Two things this never permits, whatever is listed: the loopback interface,
+  # and link-local addresses (169.254.0.0/16, fe80::/10) — where cloud instance
+  # metadata services and the credentials they hand out live. Redirects are
+  # never followed, for the same reason.
+  #
+  # Setting this also grants the operator "get" on Secrets, because action
+  # credentials come from Secrets in the Automation's own namespace. Leave it
+  # empty and that permission is not granted at all.
+  allowedDestinations: []
+
 log:
   # Verbosity: "debug", "info", "error", or a V-level number ("1", "2").
   # debug turns on the per-observation lines you want while working out why a

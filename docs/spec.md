@@ -549,6 +549,13 @@ Support:
 
 Credentials should come from Kubernetes Secrets rather than being stored directly in Automation resources.
 
+> **As shipped.** `http.request` and `notification.ntfy` / `notification.discord` / `notification.slack` exist, and are the first *edge* actions — they fire on a transition rather than declaring a level, so they take no part in target arbitration. Two things about them are narrower than this section implies, and deliberately so:
+>
+> - **Destinations are allowlisted at install time and refused by default.** `spec.actions` is writable by anyone who can create an `Automation`, and the request goes out with the operator's network position rather than the author's, so which hosts that is worth is not a per-Automation decision. The loopback interface and link-local addresses are refused whatever the allowlist says, and redirects are not followed.
+> - **Only the body is templated.** The URL and the headers are literal, because letting observed state edit the destination would give back the choice the allowlist exists to take away.
+>
+> Credentials come from a Secret in the `Automation`'s own namespace — never inline, never cross-namespace. See [SECURITY.md](../SECURITY.md#outbound-actions-http-request-and-notification) for the threat model and the [README](../README.md#telling-you-what-happened) for the shape.
+
 ### qBittorrent
 
 Do not initially create a qBittorrent-specific action provider unless it is necessary.
@@ -623,6 +630,8 @@ Duplicate webhook deliveries should not cause duplicate destructive actions. For
 ### Retry
 
 Failed actions should be retried with bounded exponential backoff.
+
+> **As shipped**, the policy differs by action kind, because the kinds fail differently. A desired-state action is idempotent by construction, so the reconcile loop is itself the retry, bounded at five consecutive failures. An edge action fires on an occurrence that has already passed, so it is never retried across reconciles — a later reconcile has no new transition, and re-sending there would be a duplicate rather than a retry. Whether it may be repeated *within* its one reconcile is decided per type: notifications are publishes and retry three times, and an `http.request` retries only when the method is idempotent (`GET`, `PUT`) or the author declares it so.
 
 ### Timeouts
 
@@ -1089,8 +1098,9 @@ HTTP
 └── PATCH
 
 Notifications
-├── Discord
-├── Slack
+├── Discord      (shipped)
+├── Slack        (shipped)
+├── ntfy         (shipped)
 ├── Telegram
 └── Email
 

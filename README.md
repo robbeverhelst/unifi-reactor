@@ -31,7 +31,7 @@ Your UniFi gear already knows all of this. **UniFi Reactor** is a Kubernetes ope
 - **State, not events** — Reactor polls the UniFi Network API and reconciles against what it observes. A dropped webhook, a network blip, or a controller restart can't strand your cluster in the wrong mode, because the next observation corrects it. Webhooks are an optimization, never the mechanism of record.
 - **Reversal is explicit** — an automation says what to do when a condition starts holding, and separately what it wants once it stops. Nothing is inferred, undoing is never guessed, and every execution is recorded in the resource's status.
 - **One workload, many automations** — a target's replica count is arbitrated across every automation pointing at it, not written by whichever one saw a transition last. Two automations can pause the same workload for unrelated reasons, and it stays paused until *neither* wants it down.
-- **Safe by default** — a dedicated ServiceAccount with exactly the verbs it needs, no `cluster-admin`, no arbitrary shell execution, and credentials read from Kubernetes Secrets. Actions are desired-state (`replicas = 0`), so retrying one is harmless.
+- **Safe by default** — a dedicated ServiceAccount with exactly the verbs it needs, no `cluster-admin`, no arbitrary shell execution, and credentials read from Kubernetes Secrets. Scaling is desired-state (`replicas = 0`), so retrying it is harmless; the actions that leave the cluster are refused until you say where they may go.
 - **Boring to operate** — one static binary in a distroless image, no database, no queue, no UI. Small enough to forget about in a homelab.
 
 ## How it works
@@ -218,6 +218,132 @@ kubectl patch automation <name> -n <namespace> \
   --type=merge -p '{"metadata":{"finalizers":[]}}'
 ```
 
+## Telling you what happened
+
+Everything above is invisible unless someone is reading controller logs — including the cases where Reactor deliberately did *nothing*, like holding state when the console went quiet. Two action types fix that by leaving the cluster: `notification.*` sends a message, `http.request` calls anything with an HTTP API.
+
+Both are **edge actions**. They fire on this automation's own transitions and own nothing — unlike `kubernetes.scale`, which declares a level that is arbitrated across every automation sharing a target. An edge action in an `onExit` block still fires on this automation's own edge.
+
+```yaml
+apiVersion: reactor.robbeverhelst.com/v1alpha1
+kind: Automation
+metadata:
+  name: pause-downloads-on-backup-wan
+  namespace: media
+spec:
+  when:
+    provider: unifi
+    state:
+      wan: backup
+
+  actions:
+    - type: kubernetes.scale
+      target: {kind: Deployment, name: qbittorrent}
+      replicas: 0
+    - type: notification.ntfy
+      notification:
+        secretRef: {name: ntfy-credentials}
+        title: "Reactor: {{ .Name }}"
+        message: "{{ .Key }} moved from {{ .From }} to {{ .To }}; qbittorrent paused"
+
+  onExit:
+    - type: kubernetes.scale
+      target: {kind: Deployment, name: qbittorrent}
+      replicas: 1
+    - type: notification.ntfy
+      notification:
+        secretRef: {name: ntfy-credentials}
+        message: "{{ .Key }} back to {{ .To }}; qbittorrent resumed"
+```
+
+Transports shipped: `notification.ntfy`, `notification.discord`, `notification.slack`. Telegram is not shipped — its bot token lives in the URL path alongside a separate chat id, which does not fit the "the URL is the credential" shape the others share.
+
+### Two things you have to set up first
+
+**1. Allow the destination.** Outbound actions are refused by default and the allowlist is an install value, not something an automation can set:
+
+```yaml
+# values.yaml
+actions:
+  allowedDestinations:
+    - https://ntfy.example.com
+    - https://discord.com
+```
+
+This is the security boundary and it is worth understanding rather than pasting: anyone who can create an `Automation` in their own namespace can ask Reactor to make a request, and that request goes out from inside the cluster with the operator's network position rather than theirs. [SECURITY.md](SECURITY.md#outbound-actions-http-request-and-notification) has the reasoning and what is refused whatever you list.
+
+**2. Put the destination in a Secret.** For every transport shipped, the webhook URL *is* the credential — so a notification has no URL field at all:
+
+```sh
+kubectl -n media create secret generic ntfy-credentials \
+  --from-literal=url=https://ntfy.example.com/your-topic \
+  --from-literal=authorization="Bearer tk_example"
+```
+
+| Secret key | Used for |
+| --- | --- |
+| `url` | the destination. Required for `notification.*`; for `http.request`, an alternative to `request.url` |
+| `authorization` | sent as the `Authorization` header |
+| `header-<Name>` | sent as the header `<Name>`, e.g. `header-X-Api-Key` |
+
+The Secret must be in the automation's own namespace, and nothing from it is ever logged, put in status, or attached to an Event.
+
+### Messages
+
+`title`, `message` and `http.request`'s `body` are Go [`text/template`](https://pkg.go.dev/text/template) — the standard library, no Sprig:
+
+| | |
+| --- | --- |
+| `.Automation` `.Namespace` `.Name` | who reacted |
+| `.Provider` `.Matching` | which provider, and which direction the edge went |
+| `.Key` `.From` `.To` | the transition that flipped `matching` |
+| `.State` | every key this automation watches, e.g. `{{ .State.wan }}` |
+| `.Time` | when the transition was observed, RFC 3339 |
+| `json` | quotes a value for embedding in JSON: `{"wan": {{ json .To }}}` |
+
+Only the message and the body are templated. The URL and the headers are literal on purpose — the destination is what the allowlist decided, and letting observed state edit it would hand back exactly the choice the allowlist exists to take away.
+
+A key that does not exist is an error rather than the words `no value`, so a typo fails loudly at the moment the notification would have gone out. That covers `{{ .State.wan }}`; the `index` builtin (which you need for a dotted key, `{{ index .State "ups.battery" }}`) returns an empty string instead.
+
+Values are treated as data, not structure, whatever they contain — which matters most for [`isp`](#state-keys), the one key whose values are an open set rather than an enum. Notification bodies are built with a JSON encoder rather than by string formatting, `json` is there so an `http.request` body can embed a value without hand-quoting it, and anything travelling in a header is reduced to printable ASCII.
+
+### `http.request`
+
+```yaml
+- type: http.request
+  request:
+    method: POST                       # GET, POST, PUT or PATCH; defaults to POST
+    url: https://example.com/hook      # or omit it and put url in the Secret
+    secretRef: {name: hook-credentials}
+    headers:
+      - name: X-Reactor-Source
+        value: homelab
+    body: '{"automation": {{ json .Automation }}, "wan": {{ json .To }}}'
+  timeoutSeconds: 10
+```
+
+### When a notification fails
+
+**A failed notification never fails the automation.** The scale is the thing that had to happen; the notification is the report of it. So a failure is recorded in `status.edgeActions` and raised as a Warning `Event`, and `Ready` stays whatever the target reconciliation made it:
+
+```sh
+kubectl -n media get automation pause-downloads-on-backup-wan -o jsonpath='{.status.edgeActions}'
+# [{"type":"notification.ntfy","status":"Failed","attempts":3,
+#   "destination":"https://ntfy.example.com:443",
+#   "reason":"https://ntfy.example.com:443: responded 502 Bad Gateway",...}]
+
+kubectl -n media describe automation pause-downloads-on-backup-wan
+# Warning  EdgeActionFailed  notification.ntfy was not delivered: ...
+```
+
+Ordering and delivery, stated plainly because they are choices rather than accidents:
+
+- **The scale happens first.** A transition whose target could not be written is not committed, so nothing announces a workload was paused while it is still running. It is announced on the retry that succeeds.
+- **At most once per transition.** The transition is written to status *before* anything is sent, so a failed or conflicting status write cannot send the same message twice. Nothing is re-sent on a later reconcile — that reconcile has no new transition, so a re-send would be a duplicate, not a retry.
+- **Retries happen inside the one reconcile.** A notification is a publish, so it is tried three times against a timeout, a 5xx or a 429. `http.request` is not: `GET` and `PUT` retry ([RFC 9110](https://www.rfc-editor.org/rfc/rfc9110#name-idempotent-methods) calls them idempotent), and `POST` and `PATCH` are attempted exactly once unless you set `request.idempotent: true`. Reactor cannot tell your webhook from your order API, and a duplicate side effect is worse than a missed one when nobody knows what the side effect is.
+- **A suspended automation sends nothing**, the same way a deleted one does not. Suspending is a reversible delete.
+- **Nothing fires on deletion.** Deleting an automation is not a state transition, and a "WAN recovered" message caused by a `kubectl delete` would be a lie.
+
 ## State keys
 
 Each key is published only when the matching hardware is adopted by your controller.
@@ -318,6 +444,7 @@ Chart values ([full reference](charts/reactor/README.md)):
 | `unifi.ups.lowBatteryPercent` | `30` | charge at or below this reports `ups.battery: low` |
 | `unifi.ups.criticalBatteryPercent` | `10` | charge at or below this reports `ups.battery: critical` |
 | `unifi.webhook.enabled` | `false` | webhook fast path (below) |
+| `actions.allowedDestinations` | `[]` | where outbound actions may go. Empty refuses all of them, and withholds the operator's read access to Secrets ([why](#telling-you-what-happened)) |
 | `rbac.clusterWide` | `true` | when `false`, restricts the operator to its own namespace |
 
 `Automation` resources are namespaced. An action targets its own namespace by default; naming a different one in `target.namespace` requires `rbac.clusterWide: true`.
@@ -340,16 +467,16 @@ See the [chart reference](charts/reactor/README.md#webhook-fast-path-optional-of
 - [UniFi Alarm Manager API](docs/unifi-alarm-manager-api.md) — reverse-engineered notes on configuring UniFi's outbound webhooks programmatically
 - [Development](docs/development.md) — building, testing, and running against a local cluster
 - [Contributing](CONTRIBUTING.md) — the dev loop, conventional commits, and the fixture capture policy
-- [Security policy](SECURITY.md) — how to report a vulnerability, and how to verify a signed release
+- [Security policy](SECURITY.md) — the outbound-action threat model, how to report a vulnerability, and how to verify a signed release
 
 ## Stability
 
 Early days: the API group is `v1alpha1` and the project is pre-1.0, so expect breaking changes between minor versions.
 
-**`spec.trigger` — the event-shaped trigger kind — has been removed from `v1alpha1`.** Up to v0.3.0 the CRD accepted it, CEL-validated it, and then ignored it: no version of the engine has ever processed an event trigger. A v1 whose API accepts configuration it silently drops is worse than one that does not offer the field at all, so it is gone until it is real. Two things have to exist before it comes back:
+**`spec.trigger` — the event-shaped trigger kind — has been removed from `v1alpha1`.** Up to v0.3.0 the CRD accepted it, CEL-validated it, and then ignored it: no version of the engine has ever processed an event trigger. A v1 whose API accepts configuration it silently drops is worse than one that does not offer the field at all, so it is gone until it is real. Two things had to exist before it could come back, and one of them now does:
 
-- **a captured delivery to match against.** `trigger.match` matched on payload fields, and no UniFi Alarm Manager payload has ever been captured — [`testdata/unifi/webhooks/`](testdata/unifi/README.md) is empty, and the webhook fast path deliberately never reads a delivery body. Parsers here are written against real captures, never against an assumed shape, and an event matcher is a parser.
-- **an action that expresses an occurrence.** Every action type today is a *desired-state* action: it declares a level that is arbitrated continuously across the automations sharing a target. An event trigger has no level to contribute — it needs an edge action (`kubernetes.restart`, a notification, an HTTP call), and none of those exist yet.
+- **an action that expresses an occurrence** — *met.* `http.request` and `notification.*` are edge actions: they fire on a transition rather than declaring a level, so an event trigger now has something to run.
+- **a captured delivery to match against** — *still missing, and the blocker.* `trigger.match` matched on payload fields, and no UniFi Alarm Manager payload has ever been captured — [`testdata/unifi/webhooks/`](testdata/unifi/README.md) is empty, and the webhook fast path deliberately never reads a delivery body. Parsers here are written against real captures, never against an assumed shape, and an event matcher is a parser.
 
 The two-kind split itself is unchanged and still the design. `when` is what that promise protects: nothing with an observable current value will be re-modelled as an event, and no state automation has to migrate when `trigger` returns in `v1alpha2` with the shape it always had.
 
@@ -366,7 +493,7 @@ And the webhook fast path has been exercised against the mock console, not a rea
 ## Roadmap
 
 - Event triggers for genuinely point-in-time things, like a client connecting — returning as `spec.trigger` in `v1alpha2`, once a real delivery payload has been captured and there is an edge action to run ([why it is not in `v1alpha1`](#stability))
-- More actions: HTTP requests, notifications, `restart`, CronJob suspend
+- More actions: `restart`, CronJob suspend, and the UniFi write actions
 - Prometheus metrics and richer status conditions
 - More providers, driven by demand: NUT, Proxmox, Prometheus alerts, Home Assistant
 

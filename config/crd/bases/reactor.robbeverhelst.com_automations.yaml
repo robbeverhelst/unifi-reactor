@@ -71,12 +71,143 @@ spec:
                   description: |-
                     Action is a single normalized action. Type selects the action provider;
                     the provider-specific fields are flat and validated per type.
+
+                    Types divide into two kinds. A desired-state action (kubernetes.scale)
+                    declares a level and is arbitrated continuously across every Automation
+                    sharing its target. An edge action (http.request, notification.*) expresses
+                    an occurrence: it fires on this Automation's own transitions, owns no target
+                    and arbitrates with nothing.
                   properties:
+                    notification:
+                      description: Notification is the message a notification.* action
+                        sends.
+                      properties:
+                        message:
+                          description: |-
+                            Message body, rendered as a Go text/template against the transition.
+                            Available fields are Automation, Namespace, Name, Provider, Matching,
+                            Key, From, To, State and Time. See the README for the syntax.
+                          maxLength: 2048
+                          minLength: 1
+                          type: string
+                        secretRef:
+                          description: |-
+                            SecretRef names a Secret in this Automation's namespace holding the
+                            destination. Required keys: url. Optional: authorization, sent as the
+                            Authorization header.
+                          properties:
+                            name:
+                              description: Name of the Secret in this Automation's
+                                namespace.
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        title:
+                          description: |-
+                            Title of the notification, rendered as a Go text/template against the
+                            transition. Transports without a title concept prepend it to the message.
+                          maxLength: 256
+                          type: string
+                      required:
+                      - message
+                      - secretRef
+                      type: object
                     replicas:
                       description: Replicas is the desired replica count for kubernetes.scale.
                       format: int32
                       minimum: 0
                       type: integer
+                    request:
+                      description: Request describes the outbound call an http.request
+                        action makes.
+                      properties:
+                        body:
+                          description: |-
+                            Body of the request, rendered as a Go text/template against the
+                            transition. Available fields are Automation, Namespace, Name, Provider,
+                            Matching, Key, From, To, State and Time; a json function quotes a value
+                            safely for embedding in JSON. See the README for the syntax.
+
+                            The body is the only part of the request state can reach, and it only
+                            ever carries values this Automation already observes, to a destination
+                            the operator allowed.
+                          maxLength: 4096
+                          type: string
+                        headers:
+                          description: |-
+                            Headers sent with the request, in addition to those from the Secret.
+                            Literal values only.
+                          items:
+                            description: |-
+                              HTTPHeader is one header sent with an http.request action.
+
+                              Values are literal and never templated, and this is not where credentials
+                              go: everything here is readable by anyone who can read the Automation.
+                              Authorization and API-key headers come from the referenced Secret.
+                            properties:
+                              name:
+                                description: |-
+                                  Name of the header. Authorization is rejected here — it comes from the
+                                  Secret.
+                                maxLength: 128
+                                minLength: 1
+                                pattern: ^[A-Za-z0-9!#$%&'*+.^_|~-]+$
+                                type: string
+                              value:
+                                description: Value of the header. Literal, never templated.
+                                maxLength: 1024
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          maxItems: 16
+                          type: array
+                        idempotent:
+                          description: |-
+                            Idempotent declares that repeating this request is harmless, which is
+                            what lets Reactor retry it after a timeout or a 5xx. GET and PUT are
+                            treated as idempotent without saying so; POST and PATCH are not, and are
+                            attempted exactly once so a transient failure cannot turn into a second
+                            order, message or payment.
+                          type: boolean
+                        method:
+                          default: POST
+                          description: Method of the request. Defaults to POST.
+                          enum:
+                          - GET
+                          - POST
+                          - PUT
+                          - PATCH
+                          type: string
+                        secretRef:
+                          description: |-
+                            SecretRef names a Secret in this Automation's namespace holding the
+                            credentials for this request. Recognised keys: url, authorization, and
+                            any key prefixed header- whose remainder is the header name.
+                          properties:
+                            name:
+                              description: Name of the Secret in this Automation's
+                                namespace.
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        url:
+                          description: |-
+                            URL to request. Must be http or https, must carry no user information,
+                            and must be allowed by the install's destination allowlist. Never
+                            templated: the destination is a fixed decision, not something observed
+                            state gets to influence.
+
+                            Omit it to take the URL from the Secret's url key instead, which is how
+                            a URL that is itself a credential stays out of the Automation. Exactly
+                            one of the two must supply it.
+                          maxLength: 2048
+                          type: string
+                      type: object
                     target:
                       description: Target of a kubernetes.* action.
                       properties:
@@ -103,9 +234,10 @@ spec:
                     timeoutSeconds:
                       description: |-
                         TimeoutSeconds bounds a single attempt at this action, so an
-                        unreachable target cannot occupy a reconcile indefinitely. Defaults to
-                        30. Exceeding it is recorded as a failed execution and retried with
-                        bounded backoff, not held open.
+                        unreachable target or endpoint cannot occupy a reconcile indefinitely.
+                        Defaults to 30 for kubernetes.scale and to 10 for the outbound actions,
+                        which may retry within the same reconcile. Exceeding it is recorded as a
+                        failed execution, not held open.
                       format: int32
                       maximum: 600
                       minimum: 1
@@ -114,10 +246,26 @@ spec:
                       description: Type of the action, e.g. "kubernetes.scale".
                       enum:
                       - kubernetes.scale
+                      - http.request
+                      - notification.ntfy
+                      - notification.discord
+                      - notification.slack
                       type: string
                   required:
                   - type
                   type: object
+                  x-kubernetes-validations:
+                  - message: 'spec.actions: request is required by http.request and
+                      rejected on every other type'
+                    rule: (self.type == 'http.request') == has(self.request)
+                  - message: 'spec.actions: notification is required by the notification.*
+                      types and rejected on every other type'
+                    rule: self.type.startsWith('notification.') == has(self.notification)
+                  - message: 'spec.actions: target belongs to kubernetes.* actions;
+                      the outbound actions have no target'
+                    rule: self.type == 'kubernetes.scale' || !has(self.target)
+                  - message: 'spec.actions: replicas belongs to kubernetes.scale'
+                    rule: self.type == 'kubernetes.scale' || !has(self.replicas)
                 minItems: 1
                 type: array
               onExit:
@@ -131,12 +279,143 @@ spec:
                   description: |-
                     Action is a single normalized action. Type selects the action provider;
                     the provider-specific fields are flat and validated per type.
+
+                    Types divide into two kinds. A desired-state action (kubernetes.scale)
+                    declares a level and is arbitrated continuously across every Automation
+                    sharing its target. An edge action (http.request, notification.*) expresses
+                    an occurrence: it fires on this Automation's own transitions, owns no target
+                    and arbitrates with nothing.
                   properties:
+                    notification:
+                      description: Notification is the message a notification.* action
+                        sends.
+                      properties:
+                        message:
+                          description: |-
+                            Message body, rendered as a Go text/template against the transition.
+                            Available fields are Automation, Namespace, Name, Provider, Matching,
+                            Key, From, To, State and Time. See the README for the syntax.
+                          maxLength: 2048
+                          minLength: 1
+                          type: string
+                        secretRef:
+                          description: |-
+                            SecretRef names a Secret in this Automation's namespace holding the
+                            destination. Required keys: url. Optional: authorization, sent as the
+                            Authorization header.
+                          properties:
+                            name:
+                              description: Name of the Secret in this Automation's
+                                namespace.
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        title:
+                          description: |-
+                            Title of the notification, rendered as a Go text/template against the
+                            transition. Transports without a title concept prepend it to the message.
+                          maxLength: 256
+                          type: string
+                      required:
+                      - message
+                      - secretRef
+                      type: object
                     replicas:
                       description: Replicas is the desired replica count for kubernetes.scale.
                       format: int32
                       minimum: 0
                       type: integer
+                    request:
+                      description: Request describes the outbound call an http.request
+                        action makes.
+                      properties:
+                        body:
+                          description: |-
+                            Body of the request, rendered as a Go text/template against the
+                            transition. Available fields are Automation, Namespace, Name, Provider,
+                            Matching, Key, From, To, State and Time; a json function quotes a value
+                            safely for embedding in JSON. See the README for the syntax.
+
+                            The body is the only part of the request state can reach, and it only
+                            ever carries values this Automation already observes, to a destination
+                            the operator allowed.
+                          maxLength: 4096
+                          type: string
+                        headers:
+                          description: |-
+                            Headers sent with the request, in addition to those from the Secret.
+                            Literal values only.
+                          items:
+                            description: |-
+                              HTTPHeader is one header sent with an http.request action.
+
+                              Values are literal and never templated, and this is not where credentials
+                              go: everything here is readable by anyone who can read the Automation.
+                              Authorization and API-key headers come from the referenced Secret.
+                            properties:
+                              name:
+                                description: |-
+                                  Name of the header. Authorization is rejected here — it comes from the
+                                  Secret.
+                                maxLength: 128
+                                minLength: 1
+                                pattern: ^[A-Za-z0-9!#$%&'*+.^_|~-]+$
+                                type: string
+                              value:
+                                description: Value of the header. Literal, never templated.
+                                maxLength: 1024
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          maxItems: 16
+                          type: array
+                        idempotent:
+                          description: |-
+                            Idempotent declares that repeating this request is harmless, which is
+                            what lets Reactor retry it after a timeout or a 5xx. GET and PUT are
+                            treated as idempotent without saying so; POST and PATCH are not, and are
+                            attempted exactly once so a transient failure cannot turn into a second
+                            order, message or payment.
+                          type: boolean
+                        method:
+                          default: POST
+                          description: Method of the request. Defaults to POST.
+                          enum:
+                          - GET
+                          - POST
+                          - PUT
+                          - PATCH
+                          type: string
+                        secretRef:
+                          description: |-
+                            SecretRef names a Secret in this Automation's namespace holding the
+                            credentials for this request. Recognised keys: url, authorization, and
+                            any key prefixed header- whose remainder is the header name.
+                          properties:
+                            name:
+                              description: Name of the Secret in this Automation's
+                                namespace.
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        url:
+                          description: |-
+                            URL to request. Must be http or https, must carry no user information,
+                            and must be allowed by the install's destination allowlist. Never
+                            templated: the destination is a fixed decision, not something observed
+                            state gets to influence.
+
+                            Omit it to take the URL from the Secret's url key instead, which is how
+                            a URL that is itself a credential stays out of the Automation. Exactly
+                            one of the two must supply it.
+                          maxLength: 2048
+                          type: string
+                      type: object
                     target:
                       description: Target of a kubernetes.* action.
                       properties:
@@ -163,9 +442,10 @@ spec:
                     timeoutSeconds:
                       description: |-
                         TimeoutSeconds bounds a single attempt at this action, so an
-                        unreachable target cannot occupy a reconcile indefinitely. Defaults to
-                        30. Exceeding it is recorded as a failed execution and retried with
-                        bounded backoff, not held open.
+                        unreachable target or endpoint cannot occupy a reconcile indefinitely.
+                        Defaults to 30 for kubernetes.scale and to 10 for the outbound actions,
+                        which may retry within the same reconcile. Exceeding it is recorded as a
+                        failed execution, not held open.
                       format: int32
                       maximum: 600
                       minimum: 1
@@ -174,10 +454,26 @@ spec:
                       description: Type of the action, e.g. "kubernetes.scale".
                       enum:
                       - kubernetes.scale
+                      - http.request
+                      - notification.ntfy
+                      - notification.discord
+                      - notification.slack
                       type: string
                   required:
                   - type
                   type: object
+                  x-kubernetes-validations:
+                  - message: 'spec.actions: request is required by http.request and
+                      rejected on every other type'
+                    rule: (self.type == 'http.request') == has(self.request)
+                  - message: 'spec.actions: notification is required by the notification.*
+                      types and rejected on every other type'
+                    rule: self.type.startsWith('notification.') == has(self.notification)
+                  - message: 'spec.actions: target belongs to kubernetes.* actions;
+                      the outbound actions have no target'
+                    rule: self.type == 'kubernetes.scale' || !has(self.target)
+                  - message: 'spec.actions: replicas belongs to kubernetes.scale'
+                    rule: self.type == 'kubernetes.scale' || !has(self.replicas)
                 type: array
               reversal:
                 description: |-
@@ -298,10 +594,65 @@ spec:
                   - type
                   type: object
                 type: array
+              edgeActions:
+                description: |-
+                  EdgeActions is what the edge actions did on the last transition, one
+                  entry per action that fired, in spec order. It is replaced wholesale on
+                  each transition rather than appended to: it answers "what happened when
+                  this last changed", not "what has ever happened".
+                items:
+                  description: |-
+                    EdgeExecutionStatus records what one edge action did on this Automation's
+                    last transition.
+
+                    Edge actions are reported separately from LastExecution because they fail
+                    differently: a desired-state action that fails is corrected by the next
+                    reconcile, so its failure is the Automation's problem. An edge action fires
+                    on an occurrence that has already passed, so a failure is a thing that did
+                    not happen — worth reporting, but not a reason to call an Automation whose
+                    workload was scaled correctly unhealthy.
+                  properties:
+                    attempts:
+                      description: |-
+                        Attempts counts how many times this action was tried. More than one only
+                        happens for actions declared safe to repeat.
+                      format: int32
+                      type: integer
+                    destination:
+                      description: |-
+                        Destination is the scheme, host and port the request went to, for the
+                        same reason and with the same omissions.
+                      type: string
+                    onExit:
+                      description: OnExit is true when this action ran from spec.onExit.
+                      type: boolean
+                    reason:
+                      description: |-
+                        Reason explains a failure or a skip. It never contains a credential: a
+                        destination is reported as scheme, host and port only, with the path and
+                        query — the part of a webhook URL that is the secret — left out, and a
+                        response body is never included.
+                      type: string
+                    status:
+                      description: Status is "Success", "Failed", or "Skipped".
+                      type: string
+                    time:
+                      description: Time is when the attempt finished.
+                      format: date-time
+                      type: string
+                    type:
+                      description: Type is the action type this entry describes, e.g.
+                        "notification.ntfy".
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
               lastExecution:
                 description: |-
-                  LastExecution is the outcome of the most recent action run, including
-                  onExit runs (recorded for auditability).
+                  LastExecution is the outcome of the most recent desired-state action run,
+                  including onExit runs (recorded for auditability).
                 properties:
                   attempts:
                     description: |-

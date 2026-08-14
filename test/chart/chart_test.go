@@ -39,6 +39,10 @@ const (
 	// A UniFi URL has to be set for the provider — and so its credentials —
 	// to be part of the rendered Deployment at all.
 	unifiURL = "unifi.url=https://192.0.2.1"
+	// envAllowedDestinations and secretsRule are how the outbound-action
+	// allowlist and the permission it implies appear in the rendered release.
+	envAllowedDestinations = "REACTOR_ACTION_ALLOWED_DESTINATIONS"
+	secretsRule            = `resources: ["secrets"]`
 )
 
 func chartDir() string { return filepath.Join("..", "..", "charts", "reactor") }
@@ -246,4 +250,40 @@ func renderFails(t *testing.T, values ...string) string {
 		return ""
 	}
 	return string(out)
+}
+
+// TestOutboundActionsAreOffByDefault is the render-time half of the outbound
+// story: with no destination allowed, the operator is not even granted read
+// access to the Secrets those actions would authenticate with.
+func TestOutboundActionsAreOffByDefault(t *testing.T) {
+	manifests := render(t, unifiURL)
+	if strings.Contains(manifests, envAllowedDestinations) {
+		t.Fatal("an allowlist was rendered without one being configured")
+	}
+	if strings.Contains(manifests, secretsRule) {
+		t.Fatal("read access to Secrets is granted by default; it should follow actions.allowedDestinations")
+	}
+}
+
+// TestAllowedDestinationsGrantSecretReads pairs the two: configuring where
+// outbound actions may go is what turns on the permission they need.
+func TestAllowedDestinationsGrantSecretReads(t *testing.T) {
+	manifests := render(t, unifiURL,
+		"actions.allowedDestinations={https://ntfy.example.com,https://discord.com}")
+	if !strings.Contains(manifests, `value: "https://ntfy.example.com,https://discord.com"`) {
+		t.Fatal("the allowlist was not passed to the operator")
+	}
+	if !strings.Contains(manifests, secretsRule) {
+		t.Fatal("outbound actions need get on Secrets, which was not granted")
+	}
+}
+
+// TestOutboundActionsWorkWithoutAConsole proves the outbound actions are
+// provider-agnostic at the packaging level too: an install with no UniFi
+// console still gets its allowlist.
+func TestOutboundActionsWorkWithoutAConsole(t *testing.T) {
+	manifests := render(t, "actions.allowedDestinations={https://ntfy.example.com}")
+	if !strings.Contains(manifests, envAllowedDestinations) {
+		t.Fatal("the allowlist is only rendered when a UniFi console is configured")
+	}
 }
