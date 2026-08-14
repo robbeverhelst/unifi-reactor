@@ -757,7 +757,6 @@ cluster-admin
 
 unless there is a compelling reason.
 
-Document how users can restrict Reactor's permissions.
 
 ## Observability
 

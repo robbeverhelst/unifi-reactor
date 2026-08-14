@@ -606,6 +606,7 @@ An empty `status.edgeActions` when you expected one means the action never fired
 
 A destination is only ever reported as `scheme://host:port`. That is not a truncation bug: for every notification transport the path is the credential, so it is kept out of status, logs and Events on purpose.
 
+
 ---
 
 ## 13. Reactor is running but nothing is reacting
