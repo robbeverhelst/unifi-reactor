@@ -77,6 +77,58 @@ Delete it. Event triggers never ran on any version, so nothing is lost, and noth
 
 ---
 
+## Reading the Event stream
+
+`kubectl describe automation <name>` ends with an Event list, and for most
+questions it is faster than anything else on this page — it needs no log
+access, and it is already in chronological order:
+
+```sh
+kubectl -n media describe automation pause-downloads-on-backup-wan | tail -20
+```
+
+| Reason | Type | Means |
+| --- | --- | --- |
+| `StateEntered` / `StateExited` | Normal | the condition started or stopped holding; the message names the key that moved |
+| `TargetScaled` / `TargetReleased` | Normal | a write to a target actually happened |
+| `DeferredToOtherAutomation` | Normal | a peer's more restrictive claim won — [§7](#7-two-automations-fighting-over-one-target) |
+| `EdgeActionSent` | Normal | a notification or HTTP request was delivered |
+| `StateKeyUnavailable` | Warning | a key vanished and state is being held — [§2](#2-statekeyunavailable-and-held-state) |
+| `ActionFailed` | Warning | a desired-state action could not be applied — [§5](#5-rbac-refuses-a-cross-namespace-target) |
+| `RetryBudgetExhausted` | Warning | Reactor stopped retrying and is waiting for the next state change |
+| `EdgeActionFailed` / `EdgeActionSkipped` | Warning | a notification or HTTP request did not go out — [§12](#12-a-notification-or-http-request-did-not-arrive) |
+| `ReleaseFailed` | Warning | deletion could not hand a target back and let the object go anyway — [§8](#8-a-workload-is-stuck-down-after-an-automation-was-deleted) |
+| `EventTriggerRemoved` | Warning | a leftover `spec.trigger` automation that does nothing; delete it |
+
+**Being outvoted is `Normal`, not a Warning.** Two Automations sharing a
+workload and one of them losing is the arbitration working as designed.
+
+**Events fire on edges, not on states.** A condition that has been held for an
+hour raised one Event when it started, not one every fifteen seconds — so an
+old timestamp on a Warning means "still true since then", not "stale". Read the
+Age column with that in mind, and read `status.conditions` for what is true
+*now*.
+
+**No Events at all** on an Automation that is clearly doing things has one
+likely cause: the operator's RBAC does not grant `create` and `patch` on
+`events` in the **`events.k8s.io`** API group. A rule naming only the core
+group (`""`) is refused on every emission, and the refusal is logged by the
+event broadcaster and surfaced nowhere else:
+
+```sh
+kubectl auth can-i create events.events.k8s.io \
+  --namespace media \
+  --as system:serviceaccount:reactor-system:reactor
+```
+
+Charts from this release on grant it. An operator installed from an older chart,
+or with hand-written RBAC copied from one, will be silent.
+
+**They expire.** Events live on your cluster's retention, an hour by default.
+They are for the incident you are in; `status` is the durable record.
+
+---
+
 ## 1. Nothing happens when the state changes
 
 Work down this list; it is ordered by likelihood.

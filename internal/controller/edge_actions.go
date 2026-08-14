@@ -152,28 +152,17 @@ func (r *AutomationReconciler) reportEdgeAction(
 	case executionSuccess:
 		log.Info("edge action sent", "automation", claimantOf(automation),
 			"action", entry.Type, "destination", entry.Destination, "attempts", entry.Attempts)
-		r.event(automation, corev1.EventTypeNormal, reasonEdgeActionSent,
+		r.event(automation, corev1.EventTypeNormal, reasonEdgeActionSent, actionEdge,
 			"%s delivered to %s after %d attempt(s)", entry.Type, entry.Destination, entry.Attempts)
 	case executionFailed:
 		log.Info("edge action failed", "automation", claimantOf(automation),
 			"action", entry.Type, "destination", entry.Destination, "reason", entry.Reason)
-		r.event(automation, corev1.EventTypeWarning, reasonEdgeActionFailed,
+		r.event(automation, corev1.EventTypeWarning, reasonEdgeActionFailed, actionEdge,
 			"%s was not delivered: %s", entry.Type, entry.Reason)
 	default:
-		r.event(automation, corev1.EventTypeWarning, reasonEdgeActionSkipped,
+		r.event(automation, corev1.EventTypeWarning, reasonEdgeActionSkipped, actionEdge,
 			"%s did not run: %s", entry.Type, entry.Reason)
 	}
-}
-
-func (r *AutomationReconciler) event(
-	automation *reactorv1alpha1.Automation,
-	eventType, reason, note string,
-	args ...any,
-) {
-	if r.Recorder == nil {
-		return
-	}
-	r.Recorder.Eventf(automation, nil, eventType, reason, "EdgeAction", note, args...)
 }
 
 // runEdgeAction resolves one action into a request and sends it.

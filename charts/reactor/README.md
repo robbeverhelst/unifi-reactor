@@ -412,6 +412,43 @@ networkPolicy:
         - { protocol: TCP, port: 8443 }
 ```
 
+## Events
+
+Every transition, every write to a target, every action that failed is raised as
+a Kubernetes Event on the Automation, so `kubectl describe automation` tells the
+story of a failover without anyone needing log access:
+
+```sh
+kubectl -n media describe automation pause-qbittorrent-on-backup-wan | tail -20
+```
+
+Nothing to enable. Two things are worth knowing.
+
+**The RBAC changed in this release.** Reactor records through the
+**`events.k8s.io/v1`** API, not the deprecated core one. They share storage but
+are separate API groups for authorization, so the previous rule — which named
+only `apiGroups: [""]` — was refused on every emission. The refusal is logged by
+the event broadcaster inside the controller and surfaced nowhere else, so the
+symptom was an Automation with no Events at all, which reads as nothing having
+happened. Upgrading fixes it; hand-written RBAC copied from an older chart needs
+the same change:
+
+```sh
+kubectl auth can-i create events.events.k8s.io --namespace media \
+  --as system:serviceaccount:reactor-system:reactor
+```
+
+**Events fire on edges, not on states.** A reconcile happens at least every 15
+seconds, so anything raised from a steady condition would be an API write every
+15 seconds per Automation. A target already at the right value produces nothing;
+a condition still reporting the same reason produces nothing after the first;
+`ActionFailed` stops at the retry budget. An old timestamp on a Warning means
+"still true since then", not "stale" — `status.conditions` is what is true now.
+
+`Normal` and `Warning` are used deliberately rather than as a severity dial.
+Being outvoted by a more restrictive claim is `Normal`, because that is how two
+Automations sharing a workload are meant to behave.
+
 ## Metrics, alerts and a dashboard (optional, off by default)
 
 Reactor's worst failure mode is silent: if it stops observing, every Automation

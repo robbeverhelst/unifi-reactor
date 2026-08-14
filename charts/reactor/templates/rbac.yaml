@@ -31,11 +31,18 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "watch", "update", "patch"]
-  # Warning Events on the Automations themselves — notably when deletion gives
-  # up handing a target back. Automations live in the namespaces they act on,
-  # so this has to follow the same scope as the rest of the manager's rules
+  # Events on the Automations themselves: every transition, every write to a
+  # target, every action that failed. Automations live in the namespaces they
+  # act on, so this follows the same scope as the rest of the manager's rules
   # rather than the release namespace only.
-  - apiGroups: [""]
+  #
+  # events.k8s.io, not "". The manager records through the events.k8s.io/v1 API
+  # — the two share storage but are separate API groups for authorization, so a
+  # rule naming only "" is refused on every emission, logged by the broadcaster
+  # and surfaced nowhere: the Automation simply has no Events, which reads as
+  # nothing having happened. Leader election is the one thing here still using
+  # the core/v1 recorder, and its own Role already grants it.
+  - apiGroups: ["events.k8s.io"]
     resources: ["events"]
     verbs: ["create", "patch"]
 {{- if .Values.actions.allowedDestinations }}

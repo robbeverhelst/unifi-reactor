@@ -521,6 +521,28 @@ func TestDashboardCarriesNothingSiteSpecific(t *testing.T) {
 	}
 }
 
+// TestEventsAreGrantedOnTheRightAPIGroup guards a rule that fails silently when
+// it is wrong. The manager records through events.k8s.io/v1; a rule naming only
+// the core group is refused on every emission, logged by the broadcaster and
+// surfaced nowhere, so the Automation simply has no Events.
+func TestEventsAreGrantedOnTheRightAPIGroup(t *testing.T) {
+	// Both RBAC modes: the manager's rules render as a ClusterRole in one and a
+	// Role in the other, and the events rule travels with them either way.
+	for _, mode := range []string{"rbac.clusterWide=true", "rbac.clusterWide=false"} {
+		t.Run(mode, func(t *testing.T) {
+			manifests := render(t, unifiURL, mode)
+			if !strings.Contains(manifests, `apiGroups: ["events.k8s.io"]`) {
+				t.Fatal("the manager is not granted events on events.k8s.io, so every Event it raises is refused")
+			}
+			// Leader election still uses the deprecated core/v1 recorder, and its
+			// own Role grants that in the release namespace. Exactly one rule each.
+			if got := strings.Count(manifests, `resources: ["events"]`); got != 2 {
+				t.Errorf("expected one events rule for the manager and one for leader election, found %d", got)
+			}
+		})
+	}
+}
+
 // TestNamespacedInstallsStayNamespacedWithoutSecureMetrics states the one place
 // rbac.clusterWide=false still produces cluster-scoped RBAC, and the escape
 // hatch from it.

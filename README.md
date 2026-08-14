@@ -456,6 +456,48 @@ Declaring the vocabulary is also what lets the gauge report `0` for the values a
 
 Both need their operator's CRDs, and both refuse to render without `metrics.enabled` rather than quietly querying series nothing is publishing.
 
+### The other direction: `kubectl describe`
+
+Metrics answer *how often*, across everything. Events answer *what happened*, to this one resource — and they need no Prometheus, no port, and no cluster-admin log access:
+
+```sh
+kubectl -n media describe automation pause-downloads-on-backup-wan
+```
+```text
+Type     Reason                     Age    From        Message
+----     ------                     ----   ----        -------
+Normal   StateEntered               3m12s  automation  wan moved from "primary" to "backup", so the condition started holding
+Normal   TargetScaled               3m12s  automation  Deployment/media/qbittorrent set to 0 replicas
+Normal   EdgeActionSent             3m11s  automation  notification.ntfy delivered to https://ntfy.example.com:443 after 1 attempt(s)
+Normal   DeferredToOtherAutomation  2m40s  automation  a more restrictive claim is in effect: Deployment/media/qbittorrent held by power/shed-on-battery
+Warning  StateKeyUnavailable        1m02s  automation  provider "unifi" stopped reporting ups; holding the last known state rather than treating lost sight of it as the condition ending
+Normal   StateExited                18s    automation  wan moved from "backup" to "primary", so the condition stopped holding
+Normal   TargetReleased             18s    automation  Deployment/media/qbittorrent released; no automation claims it any more
+```
+
+That is the whole failover, in order, including the part where it deliberately did nothing.
+
+`Normal` and `Warning` are used deliberately rather than as a severity dial. Entering a state, scaling a target, releasing one, and **being outvoted by a more restrictive claim** are all `Normal` — the last one especially, because it is how two automations sharing a workload are meant to behave, and reporting it as a fault would train you to ignore Warnings here. `Warning` is reserved for something you have to act on: a held state, a failed action, a retry budget spent, a notification that did not go out.
+
+Volume is bounded by the same rule everywhere: **Events fire on edges, not on states.** A reconcile happens at least every 15s, so anything raised from a steady condition would be an API write every 15 seconds per automation, forever. A target already at the right value produces nothing. A condition that keeps reporting the same reason produces nothing after the first. `ActionFailed` stops at the retry budget, and `RetryBudgetExhausted` replaces it exactly once.
+
+| Reason | Type | Raised when |
+| --- | --- | --- |
+| `StateEntered` / `StateExited` | Normal | the condition started or stopped holding, naming the key that moved |
+| `TargetScaled` / `TargetReleased` | Normal | a write to a target actually happened |
+| `DeferredToOtherAutomation` | Normal | a peer's more restrictive claim is the one in effect |
+| `EdgeActionSent` | Normal | a notification or HTTP request was delivered |
+| `StateKeyUnavailable` | Warning | a provider stopped reporting a key, so state is being held |
+| `ActionFailed` | Warning | a desired-state action could not be applied |
+| `RetryBudgetExhausted` | Warning | Reactor stopped retrying and is waiting for the next state change |
+| `EdgeActionFailed` / `EdgeActionSkipped` | Warning | a notification or HTTP request did not go out |
+| `ReleaseFailed` | Warning | deletion could not hand a target back and let the object go anyway |
+| `EventTriggerRemoved` | Warning | a leftover `spec.trigger` automation that does nothing; delete it |
+
+Events are where a state key with an **open value set** is reported: `isp` is not a metric label, so `isp moved from "carrier-a" to "carrier-b"` lives here and in `status.observedState`. The two halves are complementary on purpose — Prometheus keeps what is bounded, Kubernetes keeps what is specific.
+
+> Events are written to the `events.k8s.io/v1` API and expire on your cluster's retention (an hour by default). They are for the incident you are in, not the audit trail — `status` is the durable record.
+
 ## Compatibility
 
 Everything here was built against one setup, and this table says which one. "Verified" means a real capture or a real cluster; "expected" means the code path is version-independent as far as anyone can tell, which is not the same thing.
