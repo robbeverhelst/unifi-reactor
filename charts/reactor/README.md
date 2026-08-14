@@ -256,6 +256,7 @@ hardware is adopted by the controller.
 | `temperature` | `normal`, `high` | the hottest adopted device vs. the configured threshold |
 | `wifi` | `ok`, `warning`, `error` | the `wlan` subsystem's AP counts: some disconnected, or all of them |
 | `poe` | `ok`, `insufficient` | the worst switch's PoE draw vs. its budget and the configured threshold |
+| `outlet.<n>` | `on`, `off` | one switchable UPS outlet, by index or by name. **Read-only** |
 
 `isp` is the only key with an open value set — it is your carrier's name, lowercased with
 non-alphanumerics turned into hyphens. Read it off a state transition line before matching on it.
@@ -411,6 +412,29 @@ readable switch publishes no key.
 > ⚠️ The PoE fields are **not in any committed capture** — no switch record exists
 > at all — so this parser is written to the shape UniFi documents and is
 > unverified, including that `poe_power` arrives as a string.
+
+### `outlet.<n>`
+
+One key per switchable outlet on a UniFi UPS: `on` while the relay is closed and
+delivering mains. There is no configuration, because there is nothing to
+threshold — a relay is where it is.
+
+Addressed by index (`outlet.3`) while the outlet still carries the console's own
+`Outlet 3` placeholder, and by the slugified name (`outlet.nas`) once you name it.
+**Name them.** An automation matching `outlet.3` means something different the day
+somebody re-plugs the rack. Renaming makes the old key vanish, which is held as
+lost visibility rather than read as a recovery.
+
+Published only when an adopted device actually lists outlets; the captured gateway
+reports `"outlet_table": []`, which is not the same thing. An outlet reporting no
+`relay_state` publishes nothing rather than being read as off.
+
+> ⚠️ **Reactor never switches an outlet, and this is not a chart setting you can
+> turn on.** The captured UPS puts outlets 1–4 in `relay_group: 1` and 5–8 in
+> `relay_group: 2`, and nobody has confirmed whether the hardware switches an
+> outlet or a whole group — "turn off outlet 3" may mean "cut outlets 1 to 4".
+> Observing is how that gets settled safely; switching is
+> [#23](https://github.com/robbeverhelst/unifi-reactor/issues/23).
 
 ### `internet` and `wan.quality`
 
@@ -840,6 +864,16 @@ adds one `reactor_state_transitions_total` series per adopted device — a numbe
 bounded by your rack rather than by this chart, which is exactly why you have to
 ask for it.
 
+`outlet.<n>` is out of `reactor_state_info` for the key-name half of that
+argument and **not** for the cardinality half, which is why it needs no opt-in:
+eight outlets are bounded by a chassis rather than by your rack, and nobody adds
+outlets to a UPS. What keeps it out of the gauge is that the vocabulary is
+declared at startup, before any console is polled, so it cannot contain a key
+named after an outlet nobody has named yet. Declaring `outlet.*` would not work
+either: the gauge reports `0` for the values a key does **not** hold, and a
+prefix can only match keys that are present, so an outlet key that vanished with
+its UPS would sit at `1` forever.
+
 `wan.quality` and `ups.load` are in that list only because they were bucketed.
 The availability, latency and wattage behind them are continuous, and
 publishing those as values would have been the same cardinality failure — one
@@ -941,7 +975,7 @@ publishing — which fails as silence rather than as an error.
 | `unifi.temperature.highCelsius` | `75` | hottest adopted device at or above this reports `temperature: high` |
 | `unifi.poe.maxUtilizationPercent` | `90` | a switch delivering at or above this share of its PoE budget reports `poe: insufficient` |
 | `unifi.debounce.default` | `1` | consecutive observations a changed value needs before Reactor acts; each extra sample costs one `pollInterval` of reaction time |
-| `unifi.debounce.keys` | `{ups.battery: 2, ups.runtime: 2, ups.load: 3, isp: 2, internet: 3, wan.quality: 3, devices: 2, device.*: 2, firmware: 3, temperature: 3, wifi: 2, poe: 3}` | per-key overrides for signals that settle rather than switch; an entry may end in `*` to cover keys named after your hardware |
+| `unifi.debounce.keys` | `{ups.battery: 2, ups.runtime: 2, ups.load: 3, isp: 2, internet: 3, wan.quality: 3, devices: 2, device.*: 2, firmware: 3, temperature: 3, wifi: 2, poe: 3, outlet.*: 1}` | per-key overrides for signals that settle rather than switch; an entry may end in `*` to cover keys named after your hardware |
 | `unifi.webhook.enabled` | `false` | Run the webhook receiver; a delivery triggers a poll, never a state change |
 | `unifi.webhook.port` | `9090` | Port the receiver listens on inside the pod |
 | `unifi.webhook.path` | `/webhooks/unifi` | URL path deliveries are accepted on |

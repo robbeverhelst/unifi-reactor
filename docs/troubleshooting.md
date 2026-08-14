@@ -733,6 +733,54 @@ name removed — if it does not match what Reactor logged.
 
 ---
 
+## 10f. An `outlet.<n>` key is missing, or is not the one you expected
+
+Outlets are the one key in this batch whose fields are all in a real capture, so
+a missing one is usually about *addressing* rather than about parsing:
+
+```sh
+kubectl -n reactor-system logs deploy/reactor | grep 'unifi-outlets'
+# outlets device=ups-2u outlets=outlet.1=on,outlet.2=on,... needs log.level=debug
+# relayGroups="1=[outlet.1 outlet.2 outlet.3 outlet.4] 2=[outlet.5 outlet.6 outlet.7 outlet.8]"
+```
+
+The grouping line is at INFO and appears whenever the grouping is first seen or
+changes, so it is in the default log stream.
+
+| What you see | What it means |
+| --- | --- |
+| No `unifi-outlets` line at all | No adopted device lists any outlet. Note that the captured gateway reports `"outlet_table": []` — having the field is not having outlets |
+| The key is `outlet.5` and you expected `outlet.nas` | The outlet still carries the console's `Outlet 5` placeholder. Name it in the UniFi UI; any name of the form `Outlet <number>` is treated as the index spelled out, not as a name |
+| The key was `outlet.nas` and is now gone | You renamed the outlet. The old key vanishing is lost visibility, so the last known state is **held** and `Ready=False` reports `StateKeyUnavailable` — nothing fires `onExit` because you relabelled a socket. Point the automation at the new key |
+| `Two or more outlets are addressed by the same key` | Two outlets have the same name, or one is named after another's index. Neither is published, because picking one would be arbitrary and this key names something carrying mains power. Rename one |
+| `outletsUnreadable=outlet.4=no relay_state` | That outlet will not say what position it is in. Absent is not off, so it publishes nothing rather than reporting an outage |
+| `More than one adopted device reports an outlet table` | Outlet indexes restart on every chassis, so only the first device's outlets are published. Report it on [#23](https://github.com/robbeverhelst/unifi-reactor/issues/23), which has to decide how a second one is addressed before either can be switched |
+
+### Reactor will not switch an outlet, and that is deliberate
+
+There is no action, no flag and no allowlist for it. The captured UPS puts
+outlets 1–4 in `relay_group: 1` and 5–8 in `relay_group: 2`, and nobody has
+confirmed whether the hardware switches an outlet or a whole bank — if it is the
+bank, "turn off outlet 3" means "cut outlets 1 to 4". See
+[#23](https://github.com/robbeverhelst/unifi-reactor/issues/23).
+
+If you have the console in front of you, you can settle it in a minute. Pick an
+outlet in a bank carrying nothing you care about, toggle **one** outlet in the
+UniFi UI, and read the next line Reactor logs:
+
+```text
+Outlet state changed. If you are running the relay-group experiment on issue #60, this line is its readout
+  moved=outlet.5=on->off relayGroup=2 movedInGroup=1 outletsInGroup=4
+  verdict="outlets in this group moved independently of each other"
+```
+
+`movedInGroup=1` of `4` means outlets switch individually. `4` of `4` means the
+relay group is the switching unit. Either way, post it on
+[#60](https://github.com/robbeverhelst/unifi-reactor/issues/60) — that one line
+is what unblocks #23.
+
+---
+
 ## 11. Reactor warns about your UniFi Network version
 
 ```text

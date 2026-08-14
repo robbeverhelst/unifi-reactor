@@ -109,6 +109,12 @@ curl -X POST 'http://localhost:9443/temperature?celsius=82'    # a device runs h
 curl -X POST 'http://localhost:9443/poe?watts=55&budget=60'    # the PoE budget fills up
 curl -X POST 'http://localhost:9443/poe?silent=true'           # a powered port reports no wattage
 curl -X POST 'http://localhost:9443/poe?port=7&name=re-patched' # ...and the write path's identity check
+
+curl http://localhost:9443/outlets                             # every outlet, and which relay group it is in
+curl -X POST 'http://localhost:9443/outlets?outlet=5&state=off'          # one outlet opens
+curl -X POST 'http://localhost:9443/outlets?switching=group&outlet=5&state=off'   # ...and takes 5-8 with it
+curl -X POST 'http://localhost:9443/outlets?outlet=5&label=nas'          # key becomes outlet.nas
+curl -X POST 'http://localhost:9443/outlets?reset=true'        # back to the capture
 ```
 
 `/poe` drives both halves of the PoE story, because the mock has one synthetic switch and one `port_table` and they are the same one: `watts`/`budget`/`silent` move what the `poe` **state key** measures, while `port`/`name`/`uplink`/`poe` break the identity checks the `unifi.poe.cycle` **action** makes. That switch is adopted and online, so it is part of the fleet `devices` counts and is addressable as `mock-switch` through `/device`.
@@ -116,6 +122,10 @@ curl -X POST 'http://localhost:9443/poe?port=7&name=re-patched' # ...and the wri
 > **`/firmware`, `/temperature` and `/poe` serve fields no capture contains.** The committed records carry no upgrade flags, no thermals and no `port_table`, so those three endpoints render the shape UniFi's API *documents* — including `poe_power` as a string, which is the form most likely to break a parser. Driving them exercises the derivation; it does not confirm a console reports any of it. Until one does, the mock's honest default is what the captures show: those keys are simply absent, and `present=false` puts each back to that state. See [the capture notes](../testdata/unifi/README.md#what-is-not-captured-yet).
 
 Per-device keys are opt-in in Reactor (`unifi.devices.perDeviceKeys`), so `device.<name>` will not appear until you ask for it — `devices` is published either way. A device is addressed by the slug of the name it was *captured* under even after `rename=`, which is what makes the rename rehearsal reversible: renaming makes the old key **vanish**, and the reconciler holds the last known state rather than treating it as a recovery.
+
+`/outlets` is the one endpoint here that rehearses a question nobody has asked the hardware. Everything it serves **is** captured — `index`, `name`, `relay_state` and `relay_group` are all in `stat-device-ups.json` — but whether a UniFi UPS switches *an outlet* or *a relay group* is unknown, and `switching=` is the mock imitating each answer in turn. With `switching=individual`, asking for outlet 5 moves outlet 5; with `switching=group` the same request takes outlets 5–8, because they share `relay_group: 2`. Rehearse both, because a parser that only ever saw one of them is a parser tested against a guess.
+
+Reactor never writes an outlet — `/outlets` is the mock's own dev surface, not a UniFi endpoint Reactor calls. Switching is [#23](https://github.com/robbeverhelst/unifi-reactor/issues/23), and the experiment that decides it is H1 on [#60](https://github.com/robbeverhelst/unifi-reactor/issues/60): with the operator watching, toggle **one** outlet by hand in the UniFi UI and read whether one `relay_state` flips or four. `outlet=5&label=nas` rehearses the other half of that visit — naming the outlets, which moves the key off the index.
 
 `/wifi` drives the `wlan` subsystem's AP counts, because that is what `wifi` is derived from. `?status=` moves the console's own wording *without* moving the counts, which is how you rehearse the disagreement Reactor reports rather than silently resolving.
 

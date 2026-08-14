@@ -425,6 +425,46 @@ Zero and negative both mean "no estimate" and publish no `ups.runtime` key: `bat
 
 UniFi also has a `network:ups_overload_detected` alarm trigger, which corroborates `ups.load` but is not read: nothing derives state from a delivery payload.
 
+## Outlets (`outlet_table`) — captured, and read-only on purpose
+
+Every field the `outlet.<n>` keys need is in `api/stat-device-ups.json`, taken off a real console:
+
+```json
+{"index": 1, "name": "Outlet 1", "relay_state": true, "relay_group": 1}
+```
+
+Eight outlets. Outlets 1–4 report `relay_group: 1`; outlets 5–8 report `relay_group: 2`.
+
+| Field | In the capture | What the provider does with it |
+| --- | --- | --- |
+| `index` | `1`–`8` | the key's address while the outlet is unnamed: `outlet.3` |
+| `name` | `Outlet 1` … `Outlet 8` | the key's address once somebody names it: `outlet.nas`. `Outlet <number>` is treated as the index spelled out, not as a name |
+| `relay_state` | `true` on all eight | the value: `on` / `off`. A pointer, because absent is not off |
+| `relay_group` | `1` or `2` | **nothing.** Never derived from, only reported — see below |
+
+One more thing this capture settles, and it is easy to miss: the **gateway** record carries
+`"outlet_table": []`. Having the field is not having outlets, so a device is the outlet-bearing one
+when it lists outlets, never when it merely mentions the field.
+
+> ⚠️ **`relay_group` is the reason there is no write path.** If the relay group is what the hardware
+> switches, then asking for outlet 3 to go off takes outlets 1–4 with it. The documented write path —
+> `outlet_overrides` via `PUT rest/device` — comes from the **USP-PDU-Pro and USP-Strip**, which
+> expose `outlet_caps`, `outlet_power`, `outlet_current` and `cycle_enabled` per outlet and have no
+> `relay_group` at all. This UPS exposes none of those and does have relay groups, so the documented
+> path is documented for a different device class and confirms nothing here. Switching is
+> [#23](https://github.com/robbeverhelst/unifi-reactor/issues/23).
+
+The experiment that settles it needs no capture and no code — it needs the console. With Reactor
+running and this key published, toggle **one** outlet by hand in the UniFi UI, in a bank carrying
+nothing that matters, and read the line Reactor logs: `movedInGroup=1` of `4` means outlets switch
+individually, `4` of `4` means the relay group is the switching unit. That is hypothesis H1 on
+[#60](https://github.com/robbeverhelst/unifi-reactor/issues/60). While in the UI, **name the
+outlets** — the second half of the same visit, and what turns `outlet.3` into `outlet.nas`.
+
+`hack/mock-unifi`'s `/outlets` rehearses both answers (`switching=individual` and `switching=group`)
+so the parser is exercised against each. Unlike the WLAN table and the PoE switch there, this
+endpoint rewrites the real capture rather than inventing a shape.
+
 ## What the write path has, which is nothing
 
 `unifi.wlan.*` and `unifi.poe.cycle` write to the console, and **no capture backs any of it**. There

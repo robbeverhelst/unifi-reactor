@@ -52,10 +52,14 @@ import (
 // outletFields is the outlet block a UniFi UPS reports, embedded in
 // deviceRecord so it decodes from the same flat object.
 type outletFields struct {
-	// OutletTable is present on a UniFi UPS and absent on everything else in
-	// the captures. A device without one contributes no outlet keys at all,
-	// which is the same "omit what you cannot see" rule the rest of the state
-	// model follows.
+	// OutletTable carries the outlets. A device without one contributes no
+	// outlet keys at all, which is the same "omit what you cannot see" rule the
+	// rest of the state model follows.
+	//
+	// An EMPTY one contributes nothing either, and that is not a hypothetical:
+	// the captured gateway reports "outlet_table": [], so having the field is
+	// not the same as having outlets. A device is the outlet-bearing one when
+	// it lists outlets, never when it merely mentions the field.
 	OutletTable []outletRecord `json:"outlet_table"`
 }
 

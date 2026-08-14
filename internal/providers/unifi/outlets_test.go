@@ -26,6 +26,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/go-logr/logr/funcr"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // outlet builds one outlet_table entry. A nil relayState is an outlet that does
@@ -202,6 +205,22 @@ func TestNoOutletTableMeansNoKeys(t *testing.T) {
 	}
 }
 
+// The captured gateway reports "outlet_table": [], so a device that merely
+// mentions the field is not the outlet-bearing one. Taking the first device
+// with the field rather than the first with outlets would claim the gateway's
+// empty table and hide the UPS behind it.
+func TestAnEmptyOutletTableIsNotAnOutletBearingDevice(t *testing.T) {
+	gateway := adoptedDevice("Dream Machine Pro", deviceStateOnline)
+	gateway.OutletTable = []outletRecord{}
+	group := 1
+	state := outletState(t, gateway, upsWithOutlets("UPS 2U", outlet(1, "Outlet 1", boolPtr(true), &group)))
+
+	if state[stateKeyOutletPrefix+"1"] != outletOn {
+		t.Errorf("state[outlet.1] = %q, want the UPS behind the gateway's empty table to be read",
+			state[stateKeyOutletPrefix+"1"])
+	}
+}
+
 // Two outlets addressed the same way publish neither. Picking one would be
 // arbitrary, and this key names something carrying mains power.
 func TestOutletsSharingAKeyPublishNeither(t *testing.T) {
@@ -319,7 +338,7 @@ func TestBothRelayHypothesesAreObservable(t *testing.T) {
 			for _, index := range tt.off {
 				opened[index] = true
 			}
-			var second []outletRecord
+			second := make([]outletRecord, 0, len(capturedGrouping()))
 			for _, o := range capturedGrouping() {
 				if opened[*o.Index] {
 					o.RelayState = boolPtr(false)
@@ -342,6 +361,74 @@ func TestBothRelayHypothesesAreObservable(t *testing.T) {
 	}
 }
 
+// The log line is the deliverable, not a side effect: #61 exists so that a
+// human toggling one outlet by hand can read the answer to H1, and an answer
+// nobody can see is not one. Both readings are asserted through two
+// consecutive observations, at INFO, naming the relay group and how much of it
+// moved.
+func TestOutletChangeIsReportedWithItsRelayGroup(t *testing.T) {
+	tests := []struct {
+		name string
+		off  []int
+		want []string
+	}{
+		{
+			name: "one outlet of four",
+			off:  []int{5},
+			want: []string{"outlet.5=on->off", "movedInGroup\"=1", "outletsInGroup\"=4", "independently"},
+		},
+		{
+			name: "the whole bank",
+			off:  []int{5, 6, 7, 8},
+			want: []string{"outlet.8=on->off", "movedInGroup\"=4", "outletsInGroup\"=4", "switching unit"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logged strings.Builder
+			ctx := logf.IntoContext(context.Background(), funcr.New(func(prefix, args string) {
+				logged.WriteString(prefix + " " + args + "\n")
+			}, funcr.Options{}))
+			c := NewClient("", nil, "", false)
+
+			if _, err := c.stateFromDevices(ctx, deviceStatResponse{
+				Data: []deviceRecord{upsWithOutlets("UPS 2U", capturedGrouping()...)},
+			}); err != nil {
+				t.Fatalf("first observation: %v", err)
+			}
+			// The first observation reports the grouping rather than a change,
+			// because there is nothing yet to have changed from.
+			if !strings.Contains(logged.String(), "1=[outlet.1 outlet.2 outlet.3 outlet.4]") {
+				t.Errorf("the first observation must report the relay grouping; got:\n%s", logged.String())
+			}
+			logged.Reset()
+
+			opened := map[int]bool{}
+			for _, index := range tt.off {
+				opened[index] = true
+			}
+			second := make([]outletRecord, 0, len(capturedGrouping()))
+			for _, o := range capturedGrouping() {
+				if opened[*o.Index] {
+					o.RelayState = boolPtr(false)
+				}
+				second = append(second, o)
+			}
+			if _, err := c.stateFromDevices(ctx, deviceStatResponse{
+				Data: []deviceRecord{upsWithOutlets("UPS 2U", second...)},
+			}); err != nil {
+				t.Fatalf("second observation: %v", err)
+			}
+
+			for _, want := range tt.want {
+				if !strings.Contains(logged.String(), want) {
+					t.Errorf("the readout must mention %q; got:\n%s", want, logged.String())
+				}
+			}
+		})
+	}
+}
+
 // Nothing here may change an outlet: not behind a flag, not through a helper,
 // not reachable. #61's acceptance criteria say so in as many words, and this is
 // the test that keeps it true after the issue is closed.
@@ -353,12 +440,11 @@ func TestBothRelayHypothesesAreObservable(t *testing.T) {
 // at all. Both must be deleted deliberately to implement #23, which is the
 // point.
 func TestNoOutletWritePathExists(t *testing.T) {
-	writer := reflect.TypeOf(&Writer{})
-	for i := range writer.NumMethod() {
-		name := strings.ToLower(writer.Method(i).Name)
+	for method := range reflect.TypeFor[*Writer]().Methods() {
+		name := strings.ToLower(method.Name)
 		if strings.Contains(name, "outlet") || strings.Contains(name, "relay") {
 			t.Errorf("Writer.%s can change an outlet; #23 is deferred and outlet state is read-only",
-				writer.Method(i).Name)
+				method.Name)
 		}
 	}
 

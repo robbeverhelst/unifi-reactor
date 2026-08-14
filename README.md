@@ -735,6 +735,7 @@ Each key is published only when the matching hardware is adopted by your control
 | `temperature` | `normal`, `high` | the hottest adopted device against the configured threshold |
 | `wifi` | `ok`, `warning`, `error` | the WiFi subsystem as a whole, from the console's AP counts |
 | `poe` | `ok`, `insufficient` | PoE headroom on the worst switch, against the configured threshold |
+| `outlet.<n>` | `on`, `off` | one switchable UPS outlet, by index or by name. **Read-only** — see below |
 
 `isp` is the one key whose values are not a closed set: it is the carrier name your console geolocated your public address to, lowercased with everything non-alphanumeric turned into a hyphen. Look it up before matching on it —
 
@@ -1035,6 +1036,85 @@ measured, so one unreadable switch does not take the key with it.
 A switch reporting no budget is likewise not a switch with no budget, and never a
 denominator. A fleet with no readable PoE switch publishes no `poe` key at all.
 
+### `outlet.<n>` is read-only, and the relay grouping is why
+
+A UniFi UPS reports one entry per switchable outlet, and Reactor publishes one
+key each — `on` while the relay is closed and delivering mains, `off` when it is
+not:
+
+```yaml
+  when:
+    provider: unifi
+    state:
+      outlet.nas: off      # something cut power to the NAS
+```
+
+**Reactor will not switch an outlet.** Not behind a flag, not with an allowlist,
+not at all — and that is not caution about writes in general, since Reactor
+already power-cycles a PoE port. It is one specific unanswered question, visible
+in the capture:
+
+```json
+{"index": 1, "name": "Outlet 1", "relay_state": true, "relay_group": 1}
+```
+
+Outlets 1–4 report `relay_group: 1` and outlets 5–8 report `relay_group: 2`. If
+the relay **group** is what the hardware switches, then "turn off outlet 3" means
+"cut outlets 1 to 4", and one of those may be carrying your gateway, your switch
+or your storage. Nobody has confirmed which it is. The documented write path
+([`outlet_overrides`](https://github.com/Art-of-WiFi/UniFi-API-client/blob/main/examples/modify_smartpower_pdu_outlet.php))
+comes from the USP-PDU-Pro and USP-Strip, which expose per-outlet power and
+current and have **no relay groups at all**, so it is documented for a different
+device class and settles nothing here. Switching is tracked in
+[#23](https://github.com/robbeverhelst/unifi-reactor/issues/23) and stays there
+until it is answered.
+
+Observing is what answers it, safely. Reactor prints the grouping when it first
+sees it, and says what moved together whenever a relay does:
+
+```sh
+kubectl -n reactor-system logs deploy/reactor | grep unifi-outlets
+# A UPS is reporting switchable outlets. Reactor only READS them ...
+#   device=ups-2u relayGroups="1=[outlet.1 outlet.2 outlet.3 outlet.4] 2=[outlet.5 outlet.6 outlet.7 outlet.8]"
+# Outlet state changed. If you are running the relay-group experiment on issue #60, this line is its readout
+#   moved=outlet.5=on->off relayGroup=2 movedInGroup=1 outletsInGroup=4
+#   verdict="outlets in this group moved independently of each other"
+```
+
+Toggle **one** outlet by hand in the UniFi UI — pick one in the bank carrying
+nothing you care about — and that second line is the whole experiment:
+`movedInGroup=1` of `4` means outlets switch individually, and `4` of `4` means
+the relay group is the switching unit. Both are rehearsable without hardware; see
+[the mock](docs/development.md#running-without-a-udm).
+
+#### Name your outlets
+
+Out of the box every outlet is called `Outlet 1` … `Outlet 8`, which is the index
+spelled out rather than a name, so the key falls back to the index: `outlet.3`.
+Name them in the UniFi UI and the key becomes the name — `NAS` publishes
+`outlet.nas`.
+
+Do it before writing anything against them. `outlet.3` means something different
+the day somebody re-plugs the rack, and this is the same argument that made
+`portName` **required** rather than optional for
+[`unifi.poe.cycle`](#power-cycling-a-poe-port): hardware that carries mains power
+should be addressed by what it is, not by where it happens to be plugged.
+
+Renaming an outlet makes its old key *vanish* rather than report `off`, which
+Reactor treats as lost visibility — the last known state is held and `Ready=False`
+reports `StateKeyUnavailable`, so nothing sheds load because you labelled a socket.
+Two outlets addressed the same way publish **neither**, for the same reason two
+devices sharing a slug do.
+
+These keys appear only when an adopted device actually lists outlets. The captured
+gateway reports `"outlet_table": []`, so having the field is not the same as having
+outlets, and an outlet that reports no `relay_state` publishes nothing at all rather
+than being read as off.
+
+They are also **not** in `reactor_state_info`, and the reasoning is worth
+separating from [`device.<name>`'s](#cardinality-on-purpose), because only half of
+it carries over — see [Cardinality](#cardinality-on-purpose).
+
 If a provider stops reporting a key at all — the hardware dropped off the controller — Reactor holds the last known state and reports `Ready=False` with `StateKeyUnavailable` rather than treating lost visibility as a condition that ended ([what to do about it](docs/troubleshooting.md#2-statekeyunavailable-and-held-state)).
 
 ### Settling a noisy signal
@@ -1058,6 +1138,7 @@ unifi:
       temperature: 3    # ...and a measurement hovers on its threshold
       wifi: 2           # ...and an AP heartbeat can miss a beat
       poe: 3            # ...and a PoE draw moves when a radio comes up
+      outlet.*: 1       # a relay is a switch position; there is nothing to settle
 ```
 
 Each extra sample costs one `pollInterval` of reaction time, so the default is `1`: a WAN failover and a power cut both deserve an immediate reaction, and neither flaps. `ups.battery` ships at `2` because it is a threshold crossing — a charge hovering at 30% would otherwise report `low`, `normal`, `low` — and because a battery drains over minutes, so spending one more poll to be sure costs nothing. At the default 30s poll that makes a battery-level escalation react in 60s worst case instead of 30s.
@@ -1133,6 +1214,14 @@ Reconcile counts, queue depth and reconcile latency are controller-runtime's own
 Declaring the vocabulary is also what lets the gauge report `0` for the values a key does *not* hold. Without that, the series for a value it used to hold goes stale at `1` rather than dropping, and every graph built on it lies. All values `0` means the key is not currently observable — the metric side of [`StateKeyUnavailable`](docs/troubleshooting.md#2-statekeyunavailable-and-held-state).
 
 `device.<name>` is the other side of the same coin, and the reason [it is opt-in](#the-fleet-devices-and-why-devicename-is-opt-in). Its *values* are closed — two of them — but its **key name** comes from your network, so the set of keys is open. It is therefore never in `reactor_state_info` at all, and turning the keys on adds one `reactor_state_transitions_total` series per adopted device: a bounded number, chosen by you, rather than one this repository can promise. `devices` is one series regardless of fleet size, which is why it is the one that ships on.
+
+`outlet.<n>` is out of `reactor_state_info` too, and it is worth saying why it is **not** opt-in as well, because the two halves of `device.<name>`'s argument come apart here.
+
+The cardinality half does not carry over. Eight outlets are bounded by a chassis, not by a rack: nobody adds outlets to a UPS, and most installs have no outlet-bearing device at all. So these keys ship on, beside the other UPS keys, rather than being the one UPS key you have to ask for.
+
+The enumerability half does, and it is what keeps them out of the gauge. `StateVocabulary` is handed over once at startup, before any console has been polled, so it cannot contain a key whose name is an outlet somebody has not named yet — and hardcoding `outlet.1` … `outlet.8` would write one UPS's chassis into this repository and silently leave a larger PDU's ninth outlet outside the metric. Declaring `outlet.*` was considered and rejected for a sharper reason: the gauge reports `0` for the values a key does **not** hold, which requires enumerating the values of a key that is missing from the observation, and a prefix can only match keys that are present. An outlet key that vanished with its UPS would sit at `1` forever — the exact staleness declaring a vocabulary exists to prevent.
+
+They are still counted in `reactor_state_transitions_total` (one series each), they are in `status.observedState` and in Events, and the provider logs every change with its relay group in words. That last one is what the [relay-group experiment](#outletn-is-read-only-and-the-relay-grouping-is-why) actually reads.
 
 ### Alerts and the dashboard
 
@@ -1221,6 +1310,8 @@ Every parser here is written against a real captured response — except three, 
 They are written to the shape UniFi's own API documents, every field is in the [capture allowlist](testdata/unifi/README.md) so the next real capture settles them, and each fails by **publishing nothing** rather than by publishing a reassuring value: no `upgradable` anywhere means no `firmware` key, not `current`; no thermals means no `temperature` key, not `normal`; an unreadable switch is left out rather than counted as having headroom.
 
 If you run a UniFi switch or an access point, `./hack/capture-unifi.sh` now writes `stat-device-switch.json` and `stat-device-ap.json`, and one of each would settle all three at once.
+
+`outlet.<n>` is the opposite case and is listed here so the contrast is not lost: every field it reads — `index`, `name`, `relay_state`, `relay_group` — **is** in the committed capture, and the parser is written against real bytes. What is unverified about outlets is not the reading but the *writing*, which is why there is none.
 
 ## Configuration
 

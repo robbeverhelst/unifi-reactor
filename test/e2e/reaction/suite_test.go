@@ -84,6 +84,11 @@ const (
 	keyTemperature = "temperature"
 	keyWiFi        = "wifi"
 	keyPoE         = "poe"
+	// keyOutlet is one UPS outlet, addressed by index because the captured
+	// console has not named any of them. keyOutletNamed is what the same outlet
+	// is called once it is named, which is the argument for naming them.
+	keyOutlet      = "outlet.5"
+	keyOutletNamed = "outlet.nas"
 	// keyUPSDevice is the per-device key the captured UPS publishes under, and
 	// the reason the suite installs with per-device keys on: they are opt-in,
 	// so an install that does not ask for them is the default rather than the
@@ -113,6 +118,8 @@ const (
 	wifiError          = "error"
 	poeOK              = "ok"
 	poeInsufficient    = "insufficient"
+	outletOn           = "on"
+	outletOff          = "off"
 
 	// settleWindow is how long a workload must hold a value for the suite to
 	// accept that nothing is going to move it. It spans several polls and at
@@ -231,6 +238,9 @@ func resetConsole() {
 	Expect(mock.Firmware("present=false")).To(Succeed())
 	Expect(mock.Temperature("present=false")).To(Succeed())
 	Expect(mock.PoE("present=false")).To(Succeed())
+	// Unlike the three above, the outlets ARE in the capture, so their reset is
+	// back to eight closed relays in two relay groups rather than to nothing.
+	Expect(mock.Outlets("reset=true")).To(Succeed())
 }
 
 // workload renders a target Deployment. The pods run the mock's image because
