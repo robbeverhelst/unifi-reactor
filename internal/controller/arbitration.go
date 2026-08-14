@@ -229,6 +229,8 @@ type targetOutcome struct {
 	// withheld reports an outcome that was resolved and then not written,
 	// because the whole install is running as a dry run.
 	withheld bool
+	// managedBy names the controller Reactor declined to fight for this target.
+	managedBy string
 }
 
 // stance is how the Automation being reconciled takes part in one target's
@@ -319,6 +321,20 @@ func (r *AutomationReconciler) reconcileTarget(
 		value := int32(level)
 		outcome.desired = &value
 	}
+
+	// Before the preview, and that ordering is load-bearing. A target another
+	// controller drives is one this Automation would decline rather than claim,
+	// so previewing a level for it would answer a question with something that
+	// is not what would happen. managedBy is the whole of the answer there.
+	manager, err := r.foreignManagerOf(ctx, handler, key)
+	if err != nil {
+		return outcome, err
+	}
+	if manager != "" {
+		outcome.managedBy = manager
+		return r.declineTarget(ctx, handler, target, outcome, baseline, recorded)
+	}
+
 	if s.preview {
 		outcome.preview = r.previewFor(ctx, handler, self, key, target, claims, baseline)
 	}
@@ -363,6 +379,48 @@ func (r *AutomationReconciler) reconcileTarget(
 		// this workload by hand.
 		return outcome, nil
 	}
+}
+
+// declineTarget is what Reactor does about a target another controller drives.
+//
+// Never claimed: nothing is written at all, not even the annotations. Recording
+// a baseline here would be worse than useless — the value it captured would be
+// one the other controller is actively changing, so the number a later release
+// restored would mean nothing, and claimed-by would name an owner Reactor is
+// not.
+//
+// Already claimed: hand it back, to the baseline rather than to the arbitrated
+// reversal. This is not a release because nothing claims the target any more;
+// it is Reactor abdicating one it cannot hold, and "put it back where I found
+// it" is the only honest answer to that.
+//
+// The claimed case is the one that would be worst to get wrong. An HPA appearing
+// over a workload Reactor is holding at 0 is precisely where declining silently
+// would strand it: an HPA does not scale a workload up from zero, so refusing
+// to write would leave it at 0 with neither controller willing to move it. From
+// the next reconcile the baseline is gone, so the target reads as never claimed
+// and is simply one Reactor does not touch.
+func (r *AutomationReconciler) declineTarget(
+	ctx context.Context,
+	handler targetHandler,
+	target *unstructured.Unstructured,
+	outcome targetOutcome,
+	baseline *int64,
+	recorded bool,
+) (targetOutcome, error) {
+	metrics.ArbitrationResolved(metrics.OutcomeDeclined)
+	if !recorded || r.DryRun {
+		return outcome, nil
+	}
+
+	outcome.level = describeLevel(handler, baseline)
+	changed, err := releaseTarget(ctx, r.Client, handler, target, baseline)
+	outcome.changed = changed
+	if changed {
+		logf.FromContext(ctx).Info("handed target back to another controller",
+			"target", outcome.ref, "managedBy", outcome.managedBy, "level", outcome.level)
+	}
+	return outcome, err
 }
 
 // withhold marks an outcome that was resolved and then not written.

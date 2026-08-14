@@ -64,6 +64,8 @@ status:
 | `StateKeyUnavailable` | A key this Automation needs vanished from the observation. Last known matching state is held. | [§2](#2-statekeyunavailable-and-held-state) |
 | `ActionFailed` | An action returned an error. `status.lastExecution.reason` has the message. | [§5](#5-rbac-refuses-a-cross-namespace-target), [§6](#6-the-crd-invalid-ownership-metadata-or-a-stale-schema) |
 
+`Applied` carries its own reasons, and two of them are not faults: `DeferredToOtherAutomation` is a peer's more restrictive claim winning, and `TargetManagedByHPA` is Reactor declining a target another controller drives — [§15](#15-reactor-and-a-horizontalpodautoscaler-want-the-same-deployment).
+
 An Automation left over from before `spec.trigger` was removed has no conditions at all: `spec.when` is now required, so the API server rejects any write to it, status included. It is reported once per reconcile in the operator log and as a Warning Event on the resource instead:
 
 ```sh
@@ -101,6 +103,7 @@ kubectl -n media describe automation pause-downloads-on-backup-wan | tail -20
 | `ReleaseFailed` | Warning | deletion could not hand a target back and let the object go anyway — [§8](#8-a-workload-is-stuck-down-after-an-automation-was-deleted) |
 | `EventTriggerRemoved` | Warning | a leftover `spec.trigger` automation that does nothing; delete it |
 | `DryRun` | Normal | a dry run reached the transition it would have acted on; the message says what it would have done — [§14](#14-an-automation-is-not-acting-and-is-telling-you-what-it-would-do) |
+| `TargetManagedByHPA` | Warning | a HorizontalPodAutoscaler already drives the target, so Reactor declined it rather than fight — [§15](#15-reactor-and-a-horizontalpodautoscaler-want-the-same-deployment) |
 
 **Being outvoted is `Normal`, not a Warning.** Two Automations sharing a
 workload and one of them losing is the arbitration working as designed.
@@ -442,6 +445,8 @@ kubectl -n media get deploy qbittorrent -o jsonpath='{.metadata.annotations}'
 
 **A scale-*up* Automation loses to any scale-down claim on the same target**, because `min` encodes "most restrictive wins". `status.targets[].effective` makes it visible instead of silent. If you need the opposite, that is a design conversation, not a misconfiguration.
 
+**None of this reaches a claimant that is not an Automation.** The fold is over what Reactor can see, so a HorizontalPodAutoscaler on the same Deployment is not resolved — it is fought, unless detection is on. That is [§15](#15-reactor-and-a-horizontalpodautoscaler-want-the-same-deployment), and it looks quite different: a workload that flaps rather than one that settles on a value somebody else asked for.
+
 > The fold, `status.targets[]`, and the target annotations land with the target-ownership change. On v0.3.0 the outcome of two Automations on one target depends on reconcile order.
 
 ---
@@ -742,13 +747,56 @@ They report differently, and the difference tells you which one you are looking 
 
 **Reading a preview.** `preview.effective` is what the target would be held at with this automation's claim folded in; `preview.deferredBy` is who would still outvote it, `preview.wouldDefer` is who it would outvote, and `preview.onExit` is what it would hand back when its condition ended. It is computed whether or not the condition currently holds, on purpose — the automation you most want to check is the one for an outage.
 
-It is not a forecast. The peers, the observed state and the target can all change before the condition holds, and nothing in a fold can predict whether the write would be *accepted*: RBAC, an admission webhook, and a target that has since been deleted are all outside what it knows.
+It is not a forecast. The peers, the observed state and the target can all change before the condition holds, and nothing in a fold can predict whether the write would be *accepted*: RBAC, an admission webhook, a deleted target, and [a HorizontalPodAutoscaler already driving the field](#15-reactor-and-a-horizontalpodautoscaler-want-the-same-deployment) are all outside what it knows.
 
 **Nothing was written, but the workload is still down.** Turning the install-wide dry run on does not release what Reactor was already holding, because releasing is a write too. Those workloads freeze where they are with their annotations intact — [§8](#8-a-workload-is-stuck-down-after-an-automation-was-deleted) is how to get them back, and the fix is to suspend or delete those automations before enabling `safety.dryRun`, not after.
 
 ---
 
-## 15. Still stuck
+## 15. Reactor and a HorizontalPodAutoscaler want the same Deployment
+
+The symptom is a workload flapping on a fifteen-second cycle during an outage, or `Applied=False` with reason `TargetManagedByHPA` and no flapping at all — which of the two you get depends on whether detection is on.
+
+**What is happening.** Reactor writes `spec.replicas`; an HPA computes one from metrics and writes it back. [§7](#7-two-automations-fighting-over-one-target) does not apply: arbitration resolves claims *between Automations*, because Reactor can see all of them, and an HPA is a claimant it cannot see. There is nothing to fold it into.
+
+It is worth knowing this got *louder* rather than quieter with target ownership. Claims are re-asserted on every reconcile rather than once per transition, so what used to be a one-off flap is now a sustained oscillation. Same bug, more visible.
+
+**Confirm it:**
+
+```sh
+kubectl -n media get hpa -o custom-columns=\
+'NAME:.metadata.name,KIND:.spec.scaleTargetRef.kind,TARGET:.spec.scaleTargetRef.name'
+```
+
+Anything whose `TARGET` an Automation also names is in this fight.
+
+**The fix is to turn detection on**, and it is worth doing before you need it:
+
+```sh
+helm upgrade reactor oci://ghcr.io/robbeverhelst/charts/reactor \
+  --namespace reactor-system --reuse-values --set safety.detectHPA=true
+```
+
+Reactor then lists the HPAs in a target's namespace before claiming it, and if one points at the target it writes nothing at all — not the replica count and not the baseline annotation, because a baseline captured from a value the HPA is actively changing would restore a meaningless number later. `status.targets[].managedBy` names the HPA, a Warning Event says so, `reactor_arbitrations_total{outcome="declined"}` counts it, and the Automation stays `Ready=True`. Its other targets are unaffected.
+
+**A workload Reactor was already holding is handed back** to its baseline when an HPA appears over it, and then let go. That is deliberate and it is the case worth getting right: an HPA does not scale a workload up from zero, so a Reactor that simply went quiet while holding it at 0 would leave it there with neither controller willing to move it.
+
+**Detection is on but every claim now fails.** The permission is missing:
+
+```sh
+kubectl auth can-i list horizontalpodautoscalers.autoscaling \
+  --namespace media --as system:serviceaccount:reactor-system:reactor
+```
+
+Reactor fails closed here rather than writing blind, because an install that turned detection on has said it cares. `safety.detectHPA=true` grants it; a hand-written Role copied from an older chart will not have it.
+
+**"I want Reactor to win during the outage."** There is no `force`, on purpose. Overriding means writing `spec.replicas` harder, which is the oscillation rather than a way out of it — the HPA syncs again in seconds. What would actually work is suspending the HPA by patching its `minReplicas`/`maxReplicas`, and that is *write* access to somebody's autoscaling policy, which is a much bigger permission and a separate decision. Today the answers are: remove or suspend the HPA, or shed load somewhere it does not reach — `kubernetes.cronjob.suspend` and `kubernetes.cordon` are unaffected by any of this.
+
+**An empty `managedBy` is not a promise.** KEDA, a GitOps controller correcting drift, and a cron job running `kubectl scale` own `spec.replicas` just as hard, and none of them is discoverable through a stable API. An HPA is the common case and the one that can be seen; the general problem is not solvable by detection. If a workload flaps and no HPA names it, look for those next, and see [§9](#9-gitops-reactors-changes-look-like-drift).
+
+---
+
+## 16. Still stuck
 
 Collect these and open an issue — the [bug report template](https://github.com/robbeverhelst/unifi-reactor/issues/new/choose) asks for exactly this, and without it nothing is reproducible:
 

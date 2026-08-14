@@ -256,6 +256,35 @@ safety:
   #     hands every target back.
   dryRun: false
 
+  # Notice a HorizontalPodAutoscaler driving a target and decline to fight it.
+  #
+  # Reactor writes spec.replicas; an HPA computes one from metrics and writes it
+  # back. Neither is wrong and neither wins — the workload just oscillates,
+  # every reconcile against every HPA sync, until one of them is removed.
+  # Arbitration cannot help, because it resolves claims between Automations and
+  # an HPA is a claimant Reactor cannot see.
+  #
+  # With this on, Reactor lists the HPAs in a target's namespace before claiming
+  # it. If one points at the target it writes nothing, reports Applied=False
+  # with reason TargetManagedByHPA naming the HPA, raises a Warning Event and
+  # counts reactor_arbitrations_total{outcome="declined"}. The Automation stays
+  # Ready: it is correctly configured, it just cannot act there. A target
+  # Reactor was ALREADY holding when an HPA appeared is handed back to its
+  # recorded baseline first — an HPA will not scale a workload up from zero, so
+  # simply going quiet would strand it.
+  #
+  # It grants list on autoscaling/horizontalpodautoscalers, and nothing else.
+  # That is a read of an autoscaling policy: no write to one, and no permission
+  # over anything the HPA manages. Reactor declines to act and deliberately does
+  # not suspend the HPA on your behalf.
+  #
+  # Off by default because it changes what an install already in that fight
+  # does, and because it costs a permission nothing else here needs. Turn it on:
+  # losing a fight silently is worse than plainly declining to start one, and
+  # there is no automation this makes worse. If the permission is missing while
+  # this is on, a claim FAILS rather than proceeding blind, and says so.
+  detectHPA: false
+
 rbac:
   # cluster-wide: the operator may act on any namespace, enabling the optional
   #   Automation spec.actions[].target.namespace field.

@@ -146,6 +146,10 @@ var _ = BeforeSuite(func() {
 		"--set", "unifi.url="+harness.MockURL(releaseNamespace),
 		"--set", "unifi.insecureSkipVerify=false",
 		"--set", "unifi.pollInterval="+pollInterval,
+		// Off by default in the chart, and on here: the suite asserts that
+		// Reactor declines a workload a HorizontalPodAutoscaler already drives,
+		// which is exactly the behaviour this value turns on.
+		"--set", "safety.detectHPA=true",
 		// Structured logs, so the suite can assert on what the operator did
 		// and did not observe rather than on a rendered sentence.
 		"--set", "log.format=json",

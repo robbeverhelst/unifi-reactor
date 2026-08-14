@@ -69,6 +69,12 @@ const (
 	// status cannot tell them: status is a poll, and nobody polls a resource at
 	// the second it becomes interesting.
 	reasonDryRun = "DryRun"
+	// reasonTargetManagedByHPA is a Warning, and the one place that distinction
+	// carries real weight. Being outvoted by a peer is the arbitration working
+	// and is reported Normal; being unable to arbitrate at all is an automation
+	// that cannot do its job, and no amount of waiting fixes it. Somebody has to
+	// decide which controller owns the workload.
+	reasonTargetManagedByHPA = "TargetManagedByHPA"
 )
 
 // The events.k8s.io "action" field: what the controller was doing, as a coarse
@@ -170,6 +176,18 @@ func (r *AutomationReconciler) reportPreview(
 		"dry run: nothing was written. In force, this automation would %s", describePreviews(outcomes))
 }
 
+// describeManaged names the targets another controller is driving, and which
+// one, because "somebody else owns this" is not actionable until you know who.
+func describeManaged(outcomes []targetOutcome) string {
+	var managed []string
+	for _, outcome := range outcomes {
+		if outcome.managedBy != "" {
+			managed = append(managed, fmt.Sprintf("%s is driven by %s", outcome.ref, outcome.managedBy))
+		}
+	}
+	return strings.Join(managed, "; ")
+}
+
 // describePreviews renders what an out-of-force Automation's targets would
 // become, in the words its levels are reported in rather than as bare numbers —
 // "0 replicas" and "suspended" survive being read at 3am, "0" does not.
@@ -203,6 +221,17 @@ func describePreviews(outcomes []targetOutcome) string {
 func (r *AutomationReconciler) eventsForTargets(automation *reactorv1alpha1.Automation, outcomes []targetOutcome) {
 	for _, outcome := range outcomes {
 		if !outcome.changed {
+			continue
+		}
+		if outcome.managedBy != "" {
+			// Handing a claim back to a controller that took the target over,
+			// which reads nothing like an ordinary release: the standing state
+			// afterwards is that Reactor does not act here, and the reason it
+			// is a Warning is that somebody has to know their automation has
+			// stopped covering this workload.
+			r.event(automation, corev1.EventTypeWarning, reasonTargetManagedByHPA, actionRelease,
+				"%s is now driven by %s; handed it back at %s and stopped claiming it",
+				outcome.ref, outcome.managedBy, outcome.level)
 			continue
 		}
 		if outcome.effective == nil {

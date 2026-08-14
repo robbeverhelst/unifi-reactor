@@ -500,6 +500,24 @@ type TargetStatus struct {
 	// reported while it deliberately is not.
 	// +optional
 	Preview *TargetPreview `json:"preview,omitempty"`
+
+	// ManagedBy names a controller other than Reactor that already drives this
+	// target's level, as "Kind/namespace/name".
+	//
+	// Arbitration reaches only the Automations, so a claimant that is not one
+	// cannot be folded in and cannot be resolved against — it can only be
+	// fought, which neither side wins. Reactor therefore declines to claim a
+	// target named here and writes nothing to it, and Applied is False with
+	// reason TargetManagedByHPA. The Automation stays Ready: it is correctly
+	// configured, it simply cannot act on this target.
+	//
+	// Currently only a HorizontalPodAutoscaler, and only on an install that
+	// turned detection on. Nothing here promises the field is uncontested when
+	// it is empty: KEDA, a GitOps controller correcting drift and a cron job
+	// running kubectl own spec.replicas just as hard, and none of them is
+	// discoverable.
+	// +optional
+	ManagedBy string `json:"managedBy,omitempty"`
 }
 
 // TargetPreview is what would happen to one target if this Automation's
@@ -512,6 +530,10 @@ type TargetStatus struct {
 // Automation is deliberately out of force — spec.dryRun, or spec.suspend, where
 // it answers "what would resuming this do" — and is absent otherwise, because
 // an Automation that is in force is already described by the fields above.
+//
+// It is also absent on a target ManagedBy names, and that is an answer rather
+// than a gap: such a target would be declined rather than claimed, so there is
+// no level to preview.
 //
 // Three things it cannot promise, all the same thing said three ways: it is
 // computed from the peers, the observed state and the target as they are at

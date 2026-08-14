@@ -121,6 +121,16 @@ type targetHandler struct {
 	// one is never silently defaulted into the Automation's own.
 	clusterScoped bool
 
+	// contested marks a kind whose level another controller can own. A
+	// HorizontalPodAutoscaler writes exactly the field the scale subresource
+	// exposes, so every scalable kind is contested and nothing else here is —
+	// nothing autoscales a CronJob's suspend flag or a Node's cordon.
+	//
+	// It is what keeps the detection off the paths where it could only ever
+	// find nothing: an unclaimed CronJob costs no list, and adding a kind
+	// nothing else drives costs no thought about this at all.
+	contested bool
+
 	// baseline is the annotation this kind's pre-claim level is recorded in.
 	baseline string
 
@@ -217,6 +227,10 @@ func replicaHandler(gvk schema.GroupVersionKind) targetHandler {
 		gvk:        gvk,
 		baseline:   annotationBaselineReplicas,
 		actionType: actionKubernetesScale,
+		// /scale is exactly the interface a HorizontalPodAutoscaler writes
+		// through, so the property that makes one handler serve every scalable
+		// kind is also what makes every scalable kind contestable.
+		contested: true,
 		read: func(ctx context.Context, c client.Client, obj *unstructured.Unstructured) (int64, error) {
 			scale, err := scaleOf(ctx, c, obj)
 			if err != nil {

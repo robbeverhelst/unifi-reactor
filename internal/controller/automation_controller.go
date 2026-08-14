@@ -212,6 +212,17 @@ type AutomationReconciler struct {
 	// touch a workload the API server is the one keeping the promise.
 	DryRun bool
 
+	// DetectHPA makes Reactor check, before claiming a scalable target, whether
+	// a HorizontalPodAutoscaler already drives it — and decline the target
+	// rather than fight over it.
+	//
+	// Off by default, because it costs a permission the operator does not
+	// otherwise need and because turning it on changes what an install already
+	// in that fight does. With it off the behaviour is what it was: Reactor
+	// writes, the HPA writes back, and the workload oscillates on the poll
+	// interval.
+	DetectHPA bool
+
 	// SecretReader reads action credentials. It must be an uncached reader —
 	// the manager's APIReader — because a cached Get on a Secret starts an
 	// informer that holds every Secret in the cluster in memory. Falls back to
@@ -231,6 +242,19 @@ type AutomationReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments/scale;statefulsets/scale,verbs=get;update
 // +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;patch
+//
+// A HorizontalPodAutoscaler writes the same scale subresource Reactor does, and
+// is a claimant arbitration cannot reach, so a target one drives is declined
+// rather than fought over. list and nothing else: the HPAs of one namespace are
+// read uncached as unstructured objects, the way targets are, so no informer
+// holds every HPA in the cluster in memory and no get or watch is needed. This
+// is a read of an autoscaling policy and never a write to one — Reactor
+// declines to act, and deliberately does not suspend the HPA on your behalf.
+//
+// Unlike nodes this IS marked, so the manifest bundle carries it: it is
+// read-only and reaches no workload. The chart still renders it only under
+// safety.detectHPA, because there the value gating the behaviour exists.
+// +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=list
 //
 // Nodes are deliberately NOT marked here, even though kubernetes.cordon targets
 // them. These markers generate config/rbac/role.yaml, which is granted
@@ -636,6 +660,7 @@ func targetStatuses(outcomes []targetOutcome) []reactorv1alpha1.TargetStatus {
 			Level:      outcome.level,
 			DeferredBy: outcome.deferredBy,
 			Preview:    outcome.preview,
+			ManagedBy:  outcome.managedBy,
 		})
 	}
 	return statuses
@@ -669,6 +694,19 @@ func (r *AutomationReconciler) setAppliedCondition(
 		r.setCondition(automation, conditionApplied, metav1.ConditionFalse, reasonDryRun,
 			"this install runs as a dry run: status.targets[].effective is what each target would be "+
 				"held at, and nothing was written")
+		return
+	}
+
+	if managed := describeManaged(outcomes); managed != "" {
+		// Warning, unlike being outvoted by a peer. A deferred claim is the
+		// arbitration working; this is an automation that cannot do its job at
+		// all, and somebody has to decide which controller should own the
+		// workload — Reactor is not going to decide it for them.
+		r.eventOnNewReason(automation, conditionApplied, corev1.EventTypeWarning,
+			reasonTargetManagedByHPA, actionExecute,
+			"not claiming %s: arbitration cannot resolve a claimant it cannot see, and writing anyway "+
+				"would oscillate rather than win", managed)
+		r.setCondition(automation, conditionApplied, metav1.ConditionFalse, reasonTargetManagedByHPA, managed)
 		return
 	}
 

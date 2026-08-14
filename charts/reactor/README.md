@@ -142,6 +142,47 @@ kubectl patch automation <name> -n <namespace> \
   --type=merge -p '{"metadata":{"finalizers":[]}}'
 ```
 
+## HorizontalPodAutoscalers (optional, off by default)
+
+Reactor writes `spec.replicas`. So does an HPA, from metrics, and neither is
+wrong — Reactor sheds load to 0, the HPA scales it back, and fifteen seconds
+later Reactor sets 0 again. [Sharing a target](#sharing-a-target-between-automations)
+does not help: that fold is over the Automations, because Reactor can see all of
+them, and an HPA is a claimant it cannot see.
+
+```sh
+helm upgrade reactor oci://ghcr.io/robbeverhelst/charts/reactor \
+  --namespace reactor-system --reuse-values --set safety.detectHPA=true
+```
+
+With this on, Reactor lists the HPAs in a target's namespace before claiming it.
+If one names the target it writes **nothing** — not the replica count, and not
+the baseline annotation, because a baseline captured from a value the HPA is
+actively changing would restore a meaningless number later. `status.targets[]`
+gains `managedBy: HorizontalPodAutoscaler/<ns>/<name>`, a Warning Event says so,
+`reactor_arbitrations_total{outcome="declined"}` counts it, and the Automation
+stays `Ready=True` — it is correctly configured, it just cannot act there. Its
+other targets are unaffected.
+
+A workload Reactor was **already** holding is handed back to its baseline when
+an HPA appears over it, and then let go. An HPA does not scale a workload up
+from zero, so going quiet while holding it at 0 would strand it.
+
+**The RBAC this implies.** `list` on `autoscaling/horizontalpodautoscalers`, in
+whatever scope the manager already has — rendered only when this value is set.
+Stated plainly, it lets the operator read every HorizontalPodAutoscaler it can
+see, including their metric thresholds and replica bounds, which are policy
+rather than payload. It grants **no write** to an HPA, so Reactor cannot suspend
+one to win, and nothing over the workloads an HPA manages beyond what the target
+rules already allow. No `get` (a namespace is listed, not a name looked up) and
+no `watch` (HPAs are read uncached, so nothing starts an informer). If the
+permission is missing while detection is on, a claim **fails** rather than
+proceeding blind, and the error names the fix.
+
+Off by default because turning it on changes what an install already in that
+fight does, and because it costs a permission nothing else here needs. There is
+no Automation it makes worse, so turning it on is the recommendation.
+
 ## Dry run (optional, off by default)
 
 `safety.dryRun: true` is the mode to bring a new install up in. Every Automation
@@ -688,5 +729,6 @@ publishing — which fails as silence rather than as an error.
 | `uninstall.timeoutSeconds` | `120` | Hard bound on that Job, so a stuck release delays rather than blocks the uninstall |
 | `rbac.clusterWide` | `true` | `false` restricts the operator to watching and acting on the release namespace only (cross-namespace `target.namespace` stops working, and Automations elsewhere are not reconciled at all) |
 | `safety.dryRun` | `false` | Evaluate and arbitrate everything, write nothing, and withhold the permissions that could; see [Dry run](#dry-run-optional-off-by-default) |
+| `safety.detectHPA` | `false` | Notice a HorizontalPodAutoscaler driving a target and decline it rather than fight; grants `list` on `autoscaling/horizontalpodautoscalers`. See [HorizontalPodAutoscalers](#horizontalpodautoscalers-optional-off-by-default) |
 | `image.repository` | `ghcr.io/robbeverhelst/unifi-reactor` | Manager image |
 | `image.tag` | chart `appVersion` | Image tag |

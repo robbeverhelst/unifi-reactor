@@ -941,6 +941,24 @@ spec:
                         replicas", "suspended" — because a bare number stops explaining itself
                         once a target's level is a switch rather than a count.
                       type: string
+                    managedBy:
+                      description: |-
+                        ManagedBy names a controller other than Reactor that already drives this
+                        target's level, as "Kind/namespace/name".
+
+                        Arbitration reaches only the Automations, so a claimant that is not one
+                        cannot be folded in and cannot be resolved against — it can only be
+                        fought, which neither side wins. Reactor therefore declines to claim a
+                        target named here and writes nothing to it, and Applied is False with
+                        reason TargetManagedByHPA. The Automation stays Ready: it is correctly
+                        configured, it simply cannot act on this target.
+
+                        Currently only a HorizontalPodAutoscaler, and only on an install that
+                        turned detection on. Nothing here promises the field is uncontested when
+                        it is empty: KEDA, a GitOps controller correcting drift and a cron job
+                        running kubectl own spec.replicas just as hard, and none of them is
+                        discoverable.
+                      type: string
                     preview:
                       description: |-
                         Preview is what would happen here if this Automation were in force,

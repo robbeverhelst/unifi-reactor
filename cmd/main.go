@@ -194,7 +194,14 @@ func main() {
 	var enableHTTP2 bool
 	var releaseClaims bool
 	var dryRun bool
+	var detectHPA bool
 	var tlsOpts []func(*tls.Config)
+	flag.BoolVar(&detectHPA, "detect-hpa", false,
+		"Before claiming a scalable target, check whether a HorizontalPodAutoscaler already drives it, "+
+			"and decline the target rather than fight over it. Arbitration cannot resolve a claimant it "+
+			"cannot see, so writing anyway oscillates instead of winning. Needs list on "+
+			"autoscaling/horizontalpodautoscalers, which the chart grants under safety.detectHPA; without "+
+			"the permission a claim fails rather than proceeding blind.")
 	flag.BoolVar(&dryRun, "dry-run", false,
 		"Evaluate every Automation and report what it would do, and write to no target and send no "+
 			"edge action. Arbitration runs unchanged, so status.targets[].effective is the value each "+
@@ -405,14 +412,21 @@ func main() {
 			"to any target and no edge action is sent")
 	}
 
+	if !detectHPA {
+		setupLog.Info("HorizontalPodAutoscaler detection is off; an automation targeting a workload an " +
+			"HPA drives will write to it every reconcile and be overwritten every HPA sync. " +
+			"Set safety.detectHPA=true to have Reactor decline such a target instead")
+	}
+
 	if err := (&controller.AutomationReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Store:    store,
-		Wake:     wake,
-		DryRun:   dryRun,
-		Recorder: mgr.GetEventRecorder("automation"),
-		Outbound: actions.NewClient(destinations),
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		Store:     store,
+		Wake:      wake,
+		DryRun:    dryRun,
+		DetectHPA: detectHPA,
+		Recorder:  mgr.GetEventRecorder("automation"),
+		Outbound:  actions.NewClient(destinations),
 		// Uncached on purpose: a cached Get on a Secret would start an informer
 		// and keep every Secret in the cluster in this process's memory.
 		SecretReader: mgr.GetAPIReader(),

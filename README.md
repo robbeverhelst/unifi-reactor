@@ -307,7 +307,7 @@ kubectl -n media describe automation shed-on-battery | tail -3
 #                 hold Deployment/media/qbittorrent at 0 replicas, outvoting media/pause-on-backup-wan
 ```
 
-**What a preview cannot promise.** It is computed from the peers, the observed state and the target as they are at that moment, and all three can differ by the time the condition actually holds — another automation may have been written, the workload may have been scaled by hand, the baseline it would restore may not be the one it eventually records. It also says nothing about whether the write would *succeed*: RBAC, an admission webhook, a target that has since been deleted, and a controller that already owns the field are all outside what arbitration can know. A preview is a fact about a moment, not a forecast.
+**What a preview cannot promise.** It is computed from the peers, the observed state and the target as they are at that moment, and all three can differ by the time the condition actually holds — another automation may have been written, the workload may have been scaled by hand, the baseline it would restore may not be the one it eventually records. It also says nothing about whether the write would *succeed*: RBAC, an admission webhook, a target that has since been deleted, and [a controller that already owns the field](#when-something-else-already-owns-the-workload) are all outside what arbitration can know. A preview is a fact about a moment, not a forecast.
 
 For a **whole install** that has never acted — a first rollout into a cluster — there is `safety.dryRun: true`, and it is a different thing on purpose:
 
@@ -320,6 +320,33 @@ For a **whole install** that has never acted — a first rollout into a cluster 
 | Enforced by | the operator | the operator **and** the chart, which withholds every permission that could write to a target |
 
 That last row is the point of the install-wide switch: `--dry-run` is Reactor promising not to write, and the missing `patch` and `update` grants are the API server holding it to that. Turning it on for an install that is *already* holding workloads down freezes them where they are, because releasing a claim is a write too — suspend or delete those automations first.
+
+### When something else already owns the workload
+
+Arbitration works because Reactor can see every claimant. A HorizontalPodAutoscaler writes the same `spec.replicas` and is not an automation, so there is nothing to fold it into: Reactor scales to 0 to shed load, the HPA computes a count from metrics and scales it back, and fifteen seconds later Reactor scales it to 0 again. Neither is wrong; they both believe they own the field.
+
+`safety.detectHPA: true` makes Reactor look before it claims, and decline:
+
+```sh
+kubectl -n media get automation shed-on-battery -o jsonpath='{.status.targets[0]}'
+# {"ref":"Deployment/media/api","desired":0,
+#  "managedBy":"HorizontalPodAutoscaler/media/api-hpa"}
+
+kubectl -n media describe automation shed-on-battery | tail -2
+# Warning  TargetManagedByHPA  not claiming Deployment/media/api is driven by
+#                              HorizontalPodAutoscaler/media/api-hpa: arbitration cannot resolve
+#                              a claimant it cannot see, and writing anyway would oscillate rather than win
+```
+
+Nothing is written to that target — not the replica count, and not the baseline annotation, because a baseline captured from a value the HPA is actively changing would mean nothing when a later reversal restored it. The automation stays `Ready=True`: it is correctly configured, it simply cannot act there. Its other targets are unaffected.
+
+**A workload Reactor is already holding is handed back** when an HPA appears over it, to the baseline, and then let go. That case is the one worth getting right: an HPA will not scale a workload up from zero, so going quiet while holding it at 0 would leave it there with neither controller willing to move it.
+
+**There is deliberately no `force`.** Overriding would mean writing `spec.replicas` harder, which is the oscillation, not a way out of it. The thing that would actually work is suspending the HPA — patching its `minReplicas`/`maxReplicas` — and that needs *write* access to somebody's autoscaling policy, which is a much larger permission and a separate decision. If you genuinely want Reactor to win during an outage, remove or suspend the HPA, or point the automation at something else: `kubernetes.cronjob.suspend` and `kubernetes.cordon` shed real load and nothing autoscales them.
+
+Detection is **off by default**, because turning it on changes what an install already in that fight does and costs a permission — `list` on `autoscaling/horizontalpodautoscalers`, granted only when the value is set. That is a read of an autoscaling *policy*: Reactor gets no write to an HPA and nothing over the workloads one manages. With detection off the behaviour is unchanged, which is to say Reactor writes and is written over.
+
+And an honest limit: the general problem is not solvable by detection. KEDA, a GitOps controller correcting drift, and a cron job running `kubectl scale` own `spec.replicas` just as hard, and none of them is discoverable through a stable API. An HPA is the common case and the one that can be seen. An empty `managedBy` means nothing was found, not that the field is uncontested.
 
 ### Removing an automation, or Reactor itself
 
@@ -670,6 +697,7 @@ Chart values ([full reference](charts/reactor/README.md)):
 | `metrics.dashboard.enabled` | `false` | ship the overview dashboard as a grafana-operator `GrafanaDashboard` |
 | `rbac.clusterWide` | `true` | when `false`, restricts the operator to its own namespace |
 | `safety.dryRun` | `false` | evaluate and report everything, write nothing, and withhold the permissions that could ([above](#asking-what-an-automation-would-do)) |
+| `safety.detectHPA` | `false` | notice a HorizontalPodAutoscaler driving a target and decline it rather than fight ([above](#when-something-else-already-owns-the-workload)) |
 
 `Automation` resources are namespaced. An action targets its own namespace by default; naming a different one in `target.namespace` requires `rbac.clusterWide: true`.
 

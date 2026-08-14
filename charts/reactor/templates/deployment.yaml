@@ -58,6 +58,9 @@ spec:
             # write with a Forbidden that reads as a broken install.
             - --dry-run
             {{- end }}
+            {{- if .Values.safety.detectHPA }}
+            - --detect-hpa
+            {{- end }}
             {{- if .Values.metrics.enabled }}
             # Left unset, the binary defaults to 0 — no listener at all.
             - --metrics-bind-address=:{{ .Values.metrics.port }}
