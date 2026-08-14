@@ -239,6 +239,28 @@ rbac:
   #   can only target resources in that same namespace.
   clusterWide: true
 
+  # Let Automations use kubernetes.cordon, which closes a node to new
+  # scheduling while a condition holds — a worker running on a UPS whose
+  # battery is draining, say, so that replacement pods land on the node still
+  # on mains.
+  #
+  # Off by default, and it is the one permission here that reaches outside the
+  # workloads you installed Reactor to manage. Nodes are cluster-scoped, so
+  # enabling this creates a ClusterRole even when rbac.clusterWide is false —
+  # a namespaced Role cannot grant node access at all. Read that as a real
+  # widening of the operator's reach, not a formality.
+  #
+  # What it grants: get and patch on nodes. Kubernetes has no way to narrow
+  # patch to one field, so this also permits writing node labels and
+  # annotations. What it does NOT grant, at all and under any setting: pods or
+  # pods/eviction. Reactor cannot drain a node — that action is not implemented
+  # on purpose, because an eviction cannot be reversed and so has no level to
+  # arbitrate and no reversal to declare. See the README.
+  #
+  # Leaving this false does not break an Automation that uses kubernetes.cordon;
+  # it reports the node as unreachable and names this value.
+  allowNodeActions: false
+
 serviceAccount:
   create: true
   name: ""

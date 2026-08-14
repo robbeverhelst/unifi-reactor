@@ -36,9 +36,34 @@ type StateTrigger struct {
 }
 
 // TargetRef identifies the Kubernetes object an action operates on.
+//
+// The cluster-scope rule below reads __namespace__ rather than namespace, and
+// has to: namespace is a CEL reserved word, so Kubernetes exposes the property
+// under its escaped name. Written the obvious way the rule does not fail at
+// admission — it fails to compile, which makes the whole CRD unapplyable and
+// takes every other field down with it. No unit test catches that, because a
+// CRD is only compiled by a real API server; the e2e suites are what found it.
+//
+// It lives on TargetRef rather than on Action because the constraint is a
+// property of a target reference, not of any particular action that holds one.
+// +kubebuilder:validation:XValidation:rule="self.kind != 'Node' || !has(self.__namespace__)",message="target.namespace: a Node is cluster-scoped and takes no namespace"
 type TargetRef struct {
-	// Kind of the target resource. Only "Deployment" is supported in v1alpha1.
-	// +kubebuilder:validation:Enum=Deployment
+	// Kind of the target resource.
+	//
+	// kubernetes.scale works through the scale subresource, so its executor is
+	// kind-agnostic: any object exposing /scale can be held at a replica count
+	// without Reactor knowing where that kind keeps its replicas. This list is
+	// nevertheless closed, and that is the deliberate half of the trade-off
+	// #17 asks about.
+	//
+	// An open field would buy nothing an operator can use. A kind is only
+	// reachable if the chart granted RBAC for it, and RBAC has to name
+	// resources explicitly — so an open enum would accept a kind Reactor cannot
+	// touch and turn a typo into a Forbidden discovered during the outage the
+	// Automation was written for, instead of a rejected write at admission.
+	// Adding a kind is an entry here and a rule in the chart, and no executor
+	// code either way.
+	// +kubebuilder:validation:Enum=Deployment;StatefulSet;CronJob;Node
 	Kind string `json:"kind"`
 
 	// Name of the target resource.
@@ -48,6 +73,9 @@ type TargetRef struct {
 	// Namespace of the target resource. Defaults to the Automation's own
 	// namespace. Cross-namespace targets require the controller to run with
 	// cluster-wide RBAC; otherwise the Automation reports Ready=False.
+	//
+	// Rejected on a cluster-scoped kind. A Node addressed inside a namespace is
+	// not a different Node, it is a lookup that cannot succeed.
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
 }
@@ -169,18 +197,29 @@ type Notification struct {
 // Action is a single normalized action. Type selects the action provider;
 // the provider-specific fields are flat and validated per type.
 //
-// Types divide into two kinds. A desired-state action (kubernetes.scale)
-// declares a level and is arbitrated continuously across every Automation
-// sharing its target. An edge action (http.request, notification.*) expresses
-// an occurrence: it fires on this Automation's own transitions, owns no target
-// and arbitrates with nothing.
+// Types divide into two kinds. A desired-state action (kubernetes.scale,
+// kubernetes.cronjob.suspend) declares a level and is arbitrated continuously
+// across every Automation sharing its target. An edge action (kubernetes.restart,
+// http.request, notification.*) expresses an occurrence: it fires on this
+// Automation's own transitions, owns no target and arbitrates with nothing.
+//
+// A desired-state action's level is an integer the arbiter orders and nothing
+// more, so a boolean level is carried as its own field — replicas for a count,
+// suspended and cordoned for a switch — rather than by overloading one of them.
+// The units differ; the ordering does not.
 // +kubebuilder:validation:XValidation:rule="(self.type == 'http.request') == has(self.request)",message="spec.actions: request is required by http.request and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type.startsWith('notification.') == has(self.notification)",message="spec.actions: notification is required by the notification.* types and rejected on every other type"
-// +kubebuilder:validation:XValidation:rule="self.type == 'kubernetes.scale' || !has(self.target)",message="spec.actions: target belongs to kubernetes.* actions; the outbound actions have no target"
+// +kubebuilder:validation:XValidation:rule="self.type.startsWith('kubernetes.') == has(self.target)",message="spec.actions: target is required by the kubernetes.* actions and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type == 'kubernetes.scale' || !has(self.replicas)",message="spec.actions: replicas belongs to kubernetes.scale"
+// +kubebuilder:validation:XValidation:rule="self.type == 'kubernetes.cronjob.suspend' || !has(self.suspended)",message="spec.actions: suspended belongs to kubernetes.cronjob.suspend"
+// +kubebuilder:validation:XValidation:rule="self.type == 'kubernetes.cordon' || !has(self.cordoned)",message="spec.actions: cordoned belongs to kubernetes.cordon"
+// +kubebuilder:validation:XValidation:rule="!has(self.target) || self.type != 'kubernetes.cordon' || self.target.kind == 'Node'",message="spec.actions: kubernetes.cordon targets a Node"
+// +kubebuilder:validation:XValidation:rule="!has(self.target) || self.type != 'kubernetes.scale' || self.target.kind in ['Deployment', 'StatefulSet']",message="spec.actions: kubernetes.scale targets a kind with a scale subresource: Deployment or StatefulSet"
+// +kubebuilder:validation:XValidation:rule="!has(self.target) || self.type != 'kubernetes.cronjob.suspend' || self.target.kind == 'CronJob'",message="spec.actions: kubernetes.cronjob.suspend targets a CronJob"
+// +kubebuilder:validation:XValidation:rule="!has(self.target) || self.type != 'kubernetes.restart' || self.target.kind in ['Deployment', 'StatefulSet']",message="spec.actions: kubernetes.restart targets a kind with a pod template: Deployment or StatefulSet"
 type Action struct {
 	// Type of the action, e.g. "kubernetes.scale".
-	// +kubebuilder:validation:Enum=kubernetes.scale;http.request;notification.ntfy;notification.discord;notification.slack
+	// +kubebuilder:validation:Enum=kubernetes.scale;kubernetes.cronjob.suspend;kubernetes.cordon;kubernetes.restart;http.request;notification.ntfy;notification.discord;notification.slack
 	Type string `json:"type"`
 
 	// Target of a kubernetes.* action.
@@ -192,6 +231,33 @@ type Action struct {
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
 
+	// Suspended is whether kubernetes.cronjob.suspend wants the target CronJob
+	// suspended. Omitting it means true, which is what the action is named
+	// after; write suspended: false in spec.onExit to ask for it back.
+	//
+	// Suspending stops new Jobs being created. It deliberately does nothing to
+	// a Job already running: killing work in flight is a different and much
+	// more dangerous action than declining to start more of it, and mid-flight
+	// deletion is not something an outage should decide on your behalf.
+	// +optional
+	Suspended *bool `json:"suspended,omitempty"`
+
+	// Cordoned is whether kubernetes.cordon wants the target Node closed to new
+	// scheduling. Omitting it means true, which is what the action is named
+	// after; write cordoned: false in spec.onExit to reopen it explicitly.
+	//
+	// Cordoning stops new Pods being scheduled onto the Node and moves nothing
+	// that is already running. Evicting those — draining — is not offered, and
+	// not because it was not built: an eviction cannot be reversed, so it has no
+	// level to arbitrate and no reversal to declare, which is the one property
+	// every other action here has. See docs/spec.md.
+	//
+	// Node actions need cluster-scoped RBAC that the chart grants only when
+	// rbac.allowNodeActions is set. Without it the Automation reports the target
+	// as unreachable and names the value to set.
+	// +optional
+	Cordoned *bool `json:"cordoned,omitempty"`
+
 	// Request describes the outbound call an http.request action makes.
 	// +optional
 	Request *HTTPRequest `json:"request,omitempty"`
@@ -202,7 +268,7 @@ type Action struct {
 
 	// TimeoutSeconds bounds a single attempt at this action, so an
 	// unreachable target or endpoint cannot occupy a reconcile indefinitely.
-	// Defaults to 30 for kubernetes.scale and to 10 for the outbound actions,
+	// Defaults to 30 for the kubernetes.* actions and to 10 for the outbound ones,
 	// which may retry within the same reconcile. Exceeding it is recorded as a
 	// failed execution, not held open.
 	// +kubebuilder:validation:Minimum=1
@@ -375,19 +441,32 @@ type EdgeExecutionStatus struct {
 // arbitration across every Automation sharing that target actually resolved
 // to. When the two differ, DeferredBy names who is holding it there.
 type TargetStatus struct {
-	// Ref is the target this entry describes, as "Kind/namespace/name".
+	// Ref is the target this entry describes, as "Kind/namespace/name", or
+	// "Kind/name" for a cluster-scoped target.
 	Ref string `json:"ref"`
 
-	// Desired is the value this Automation alone wants right now, whether it
+	// Desired is the level this Automation alone wants right now, whether it
 	// is currently matching or reversing. Absent when it wants nothing —
 	// reversal None, or a reversal value it has no way to know.
+	//
+	// A level is ordered and nothing more: lower is more restrictive, and the
+	// arbiter resolves a shared target by taking the lowest. What the number
+	// counts depends on the action that produced it — replicas for
+	// kubernetes.scale, and 0 suspended / 1 running for
+	// kubernetes.cronjob.suspend. Level spells the same value out in words.
 	// +optional
 	Desired *int32 `json:"desired,omitempty"`
 
-	// Effective is the value arbitration resolved to across every Automation
+	// Effective is the level arbitration resolved to across every Automation
 	// claiming this target. Absent while nothing claims it.
 	// +optional
 	Effective *int32 `json:"effective,omitempty"`
+
+	// Level renders Effective in the units of the action that set it — "3
+	// replicas", "suspended" — because a bare number stops explaining itself
+	// once a target's level is a switch rather than a count.
+	// +optional
+	Level string `json:"level,omitempty"`
 
 	// DeferredBy names the Automations whose more restrictive claim is holding
 	// the target away from Desired, as "namespace/name". Empty when this

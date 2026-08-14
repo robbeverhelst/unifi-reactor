@@ -90,13 +90,13 @@ kubectl -n media describe automation pause-downloads-on-backup-wan | tail -20
 | Reason | Type | Means |
 | --- | --- | --- |
 | `StateEntered` / `StateExited` | Normal | the condition started or stopped holding; the message names the key that moved |
-| `TargetScaled` / `TargetReleased` | Normal | a write to a target actually happened |
+| `TargetHeld` / `TargetReleased` | Normal | a write to a target actually happened; the message names the level in words ("0 replicas", "suspended") |
 | `DeferredToOtherAutomation` | Normal | a peer's more restrictive claim won — [§7](#7-two-automations-fighting-over-one-target) |
-| `EdgeActionSent` | Normal | a notification or HTTP request was delivered |
+| `EdgeActionSent` | Normal | an edge action ran: a notification or HTTP request delivered, or a restart applied |
 | `StateKeyUnavailable` | Warning | a key vanished and state is being held — [§2](#2-statekeyunavailable-and-held-state) |
 | `ActionFailed` | Warning | a desired-state action could not be applied — [§5](#5-rbac-refuses-a-cross-namespace-target) |
 | `RetryBudgetExhausted` | Warning | Reactor stopped retrying and is waiting for the next state change |
-| `EdgeActionFailed` / `EdgeActionSkipped` | Warning | a notification or HTTP request did not go out — [§12](#12-a-notification-or-http-request-did-not-arrive) |
+| `EdgeActionFailed` / `EdgeActionSkipped` | Warning | an edge action did not happen — [§12](#12-a-notification-or-http-request-did-not-arrive) |
 | `ReleaseFailed` | Warning | deletion could not hand a target back and let the object go anyway — [§8](#8-a-workload-is-stuck-down-after-an-automation-was-deleted) |
 | `EventTriggerRemoved` | Warning | a leftover `spec.trigger` automation that does nothing; delete it |
 
@@ -328,7 +328,25 @@ kubectl auth can-i patch deployments \
   --as system:serviceaccount:reactor-system:reactor
 ```
 
-Two ways out, and the second is usually better in a homelab you did not want cluster-wide RBAC in:
+Scaling needs **two** permissions, because a replica count is read and written through the `scale` subresource while the baseline annotation goes on the object itself. If a target's annotations appear but its replicas never move, this is why:
+
+```sh
+kubectl auth can-i update statefulsets/scale \
+  --namespace other-ns \
+  --as system:serviceaccount:reactor-system:reactor
+```
+
+A `Node` target is a different problem with a different fix. Node access is opt-in, so the message says so directly:
+
+```text
+Ready  False  ActionFailed
+target Node/worker-03 not reachable with current RBAC
+(node actions are opt-in: install with rbac.allowNodeActions=true): ...
+```
+
+Nodes are cluster-scoped, so enabling that creates a ClusterRole even in a namespace-scoped install — see the README before you do. The manifest bundle does not offer node RBAC at all; use the chart, or grant the ClusterRole yourself.
+
+Two ways out for a namespaced target, and the second is usually better in a homelab you did not want cluster-wide RBAC in:
 
 - `helm upgrade ... --set rbac.clusterWide=true`
 - Move the Automation into the target's namespace and drop `target.namespace`. Automations are namespaced precisely so they can live next to what they act on.
@@ -413,7 +431,7 @@ status:
 
 ```sh
 kubectl -n media get deploy qbittorrent -o jsonpath='{.metadata.annotations}'
-# reactor.robbeverhelst.com/baseline-replicas: "1"
+# reactor.robbeverhelst.com/baseline-replicas: "1"   # or baseline-suspend on a CronJob
 # reactor.robbeverhelst.com/claimed-by: "power/shed-on-battery,net/pause-on-backup-wan"
 # reactor.robbeverhelst.com/claimed-at: "..."
 ```
@@ -569,9 +587,9 @@ The [compatibility matrix](../README.md#compatibility) is what these lines are c
 
 ---
 
-## 12. A notification or HTTP request did not arrive
+## 12. An edge action did not happen — or happened too often
 
-Outbound actions never fail the Automation — the scale is the thing that had to happen, the notification is the report of it — so `Ready` stays `True` and the answer is in `status.edgeActions` and in the resource's Events:
+Edge actions never fail the Automation — the desired-state action is the thing that had to happen, and a notification or a restart is not — so `Ready` stays `True` and the answer is in `status.edgeActions` and in the resource's Events:
 
 ```sh
 kubectl -n media get automation notify-on-failover -o jsonpath='{.status.edgeActions}' | jq
@@ -596,7 +614,31 @@ An empty `status.edgeActions` when you expected one means the action never fired
 - **The automation is suspended.** `spec.suspend: true` sends nothing, the same way a deleted one does not.
 - **It was a deletion.** Deleting an Automation is not a state transition and fires no edge action.
 
-A destination is only ever reported as `scheme://host:port`. That is not a truncation bug: for every notification transport the path is the credential, so it is kept out of status, logs and Events on purpose.
+A destination is only ever reported as `scheme://host:port`. That is not a truncation bug: for every notification transport the path is the credential, so it is kept out of status, logs and Events on purpose. A `kubernetes.restart` reports its target as `Kind/namespace/name` in the same field.
+
+### A workload keeps restarting
+
+`kubernetes.restart` is the only action where a repeat is harmful, so this has exactly one cause worth looking for: **the state key driving it is flapping.**
+
+```sh
+# how many times has this key actually changed value?
+#   increase(reactor_state_transitions_total{key="wan"}[1h])
+kubectl -n media describe automation restart-on-recovery | grep -E 'StateEntered|StateExited'
+```
+
+A pair of `StateEntered` / `StateExited` Events every poll is a flapping signal, not a restart bug. The engine only acts on transitions, so a *steady* condition never restarts anything twice — but each flap is a genuine transition and therefore a genuine rollout.
+
+The fix is [debounce](../README.md#settling-a-noisy-signal), and it belongs on the key rather than on the automation, so that every automation still sees one settled value:
+
+```sh
+helm upgrade reactor oci://ghcr.io/robbeverhelst/charts/reactor \
+  --namespace reactor-system --reuse-values \
+  --set unifi.debounce.keys.wan=3
+```
+
+Each extra sample costs one `pollInterval` of reaction time. The shipped default of `1` is chosen for `kubernetes.scale`, where a flap is harmless; a key that drives a restart should be raised above it. `spec.suspend: true` stops the restarts immediately while you decide.
+
+Two things that are *not* the cause: a reconcile without a transition (edge actions do not fire), and a retry (a restart is attempted exactly once per transition and never retried).
 
 ---
 

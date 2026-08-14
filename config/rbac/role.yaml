@@ -14,12 +14,25 @@ rules:
   - apps
   resources:
   - deployments
+  - statefulsets
   verbs:
   - get
-  - list
   - patch
+- apiGroups:
+  - apps
+  resources:
+  - deployments/scale
+  - statefulsets/scale
+  verbs:
+  - get
   - update
-  - watch
+- apiGroups:
+  - batch
+  resources:
+  - cronjobs
+  verbs:
+  - get
+  - patch
 - apiGroups:
   - events.k8s.io
   resources:

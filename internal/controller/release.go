@@ -202,16 +202,21 @@ func releaseClaimedTarget(
 	key targetKey,
 	automations []*reactorv1alpha1.Automation,
 ) error {
-	var deployment appsv1.Deployment
+	handler, err := handlerFor(key.Kind)
+	if err != nil {
+		return err
+	}
+
+	target := newTarget(handler)
 	name := types.NamespacedName{Namespace: key.Namespace, Name: key.Name}
-	if err := c.Get(ctx, name, &deployment); err != nil {
+	if err := c.Get(ctx, name, target); err != nil {
 		if errors.IsNotFound(err) {
 			return nil
 		}
 		return fmt.Errorf("getting target %s: %w", key, err)
 	}
 
-	baseline, recorded := baselineOf(&deployment)
+	baseline, recorded := baselineOf(handler, target)
 	if !recorded {
 		return nil // never claimed, so there is nothing to hand back
 	}
@@ -222,18 +227,18 @@ func releaseClaimedTarget(
 			reversals = append(reversals, reversal)
 		}
 	}
-	var level *int32
+	var level *int64
 	if release, ok := engine.Resolve(reversals); ok {
-		value := int32(release.Level)
-		level = &value
+		level = &release.Level
 	}
 
-	changed, err := releaseTarget(ctx, c, &deployment, level)
+	changed, err := releaseTarget(ctx, c, handler, target, level)
 	if err != nil {
 		return err
 	}
 	if changed {
-		logf.FromContext(ctx).Info("released target", "target", key.String(), "replicas", level)
+		logf.FromContext(ctx).Info("released target",
+			"target", key.String(), "level", describeLevel(handler, level))
 	}
 	return nil
 }

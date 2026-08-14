@@ -62,8 +62,32 @@ const (
 	// reasonActionFailed is reported when a desired-state action could not be
 	// applied to its target.
 	reasonActionFailed = "ActionFailed"
-	// actionKubernetesScale is the only action type implemented in v0.1.
+	// actionKubernetesScale holds a workload at a replica count.
 	actionKubernetesScale = "kubernetes.scale"
+	// actionCronJobSuspend holds a CronJob at suspended or running. Suspending
+	// stops new Jobs being created and deliberately leaves a Job already
+	// running alone: declining to start more work is a different and far safer
+	// act than killing work in flight.
+	actionCronJobSuspend = "kubernetes.cronjob.suspend"
+	// actionKubernetesCordon holds a Node at schedulable or unschedulable. It is
+	// desired-state for the same reason suspend is: schedulable is a level, it
+	// is reversible, and applying it twice is applying it once.
+	//
+	// Its sibling in #18, kubernetes.drain, is deliberately not here and is not
+	// implemented anywhere. See docs/spec.md for the reasoning; the short form
+	// is that an eviction cannot be un-evicted, so a drain has no level to
+	// arbitrate, no reversal to declare, and no way to be a pure function of
+	// which conditions currently hold.
+	actionKubernetesCordon = "kubernetes.cordon"
+	// actionKubernetesRestart rolls a workload's pods, the way `kubectl rollout
+	// restart` does. It is an edge action: a restart is an occurrence, not a
+	// level — there is no value a target can be held at that means "restarted",
+	// and nothing to arbitrate with a peer over.
+	actionKubernetesRestart = "kubernetes.restart"
+	// actionPrefixKubernetes marks the actions that act on the cluster rather
+	// than leave it, which is what decides whether an edge action goes through
+	// the outbound client and its destination allowlist.
+	actionPrefixKubernetes = "kubernetes."
 	// reevaluateInterval bounds how stale a matching decision can get relative
 	// to the poller's StateStore when nothing else triggers a reconcile.
 	reevaluateInterval = 15 * time.Second
@@ -85,9 +109,18 @@ const (
 	// action fires on an occurrence that has already passed, so it is never
 	// retried across reconciles — a later reconcile has no new transition, and
 	// re-sending there would be a duplicate rather than a retry. Whether it may
-	// be repeated at all within its one reconcile is decided per type in
-	// retryable(): notifications are publishes and retry, an arbitrary POST or
-	// PATCH might not be and is attempted exactly once.
+	// be repeated at all within its one reconcile is decided per type:
+	//
+	//   - notification.*    retried. Every transport shipped is a publish, so a
+	//                       duplicate is noise on a phone and a miss is the
+	//                       failure the feature exists to prevent.
+	//   - http.request      retried only when the method is idempotent by RFC
+	//                       9110, or the author declares it so. See retryable().
+	//   - kubernetes.restart AT-MOST-ONCE, unconditionally. Every execution rolls
+	//                       the workload, so a retry after an ambiguous failure
+	//                       is a second outage rather than a correction — and
+	//                       the failures that matter here (a conflict, a
+	//                       Forbidden) are not the kind a retry fixes.
 	maxActionAttempts = 5
 	// retryBackoffBase and retryBackoffCap bound the exponential delay between
 	// those attempts.
@@ -133,7 +166,9 @@ func retryBackoff(attempts int32) time.Duration {
 // The rule for a new action type: if you cannot define a meet with an identity
 // element for it, it is an edge action and belongs out of this map.
 var desiredStateActions = map[string]bool{
-	actionKubernetesScale: true,
+	actionKubernetesScale:  true,
+	actionCronJobSuspend:   true,
+	actionKubernetesCordon: true,
 }
 
 func isDesiredState(actionType string) bool {
@@ -172,7 +207,24 @@ type AutomationReconciler struct {
 // +kubebuilder:rbac:groups=reactor.robbeverhelst.com,resources=automations,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=reactor.robbeverhelst.com,resources=automations/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=reactor.robbeverhelst.com,resources=automations/finalizers,verbs=update
-// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
+// Targets are read as unstructured objects through the uncached client, so a
+// target kind needs get to read it and patch to write it — no list, no watch,
+// and no informer holding every object of that kind in memory.
+// A replica count is read and written through the scale subresource, so a
+// scalable kind needs its parent for the annotations and its /scale for the
+// level. That split is what keeps one executor serving every scalable kind.
+// +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;patch
+// +kubebuilder:rbac:groups=apps,resources=deployments/scale;statefulsets/scale,verbs=get;update
+// +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;patch
+//
+// Nodes are deliberately NOT marked here, even though kubernetes.cordon targets
+// them. These markers generate config/rbac/role.yaml, which is granted
+// unconditionally by `make deploy` and by the manifest bundle — and node access
+// is the one grant in this operator that reaches outside the workloads it was
+// installed to manage, so it must be something an install opts into rather than
+// something every install carries. The chart renders it under
+// rbac.allowNodeActions; the bundle does not offer it at all, and an Automation
+// that needs it says so in its status.
 // mgr.GetEventRecorder returns the events.k8s.io/v1 recorder, not the deprecated
 // core/v1 one. They share storage but are separate API groups for authorization,
 // and a rule naming only "" fails every emission with a Forbidden the broadcaster
@@ -535,6 +587,7 @@ func targetStatuses(outcomes []targetOutcome) []reactorv1alpha1.TargetStatus {
 			Ref:        outcome.ref,
 			Desired:    outcome.desired,
 			Effective:  outcome.effective,
+			Level:      outcome.level,
 			DeferredBy: outcome.deferredBy,
 		})
 	}

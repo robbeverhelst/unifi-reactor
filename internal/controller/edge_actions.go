@@ -148,30 +148,51 @@ func (r *AutomationReconciler) reportEdgeAction(
 	automation *reactorv1alpha1.Automation,
 	entry reactorv1alpha1.EdgeExecutionStatus,
 ) {
+	done, failed := edgeVerbs(entry.Type)
 	switch entry.Status {
 	case executionSuccess:
 		log.Info("edge action sent", "automation", claimantOf(automation),
 			"action", entry.Type, "destination", entry.Destination, "attempts", entry.Attempts)
 		r.event(automation, corev1.EventTypeNormal, reasonEdgeActionSent, actionEdge,
-			"%s delivered to %s after %d attempt(s)", entry.Type, entry.Destination, entry.Attempts)
+			"%s %s %s after %d attempt(s)", entry.Type, done, entry.Destination, entry.Attempts)
 	case executionFailed:
 		log.Info("edge action failed", "automation", claimantOf(automation),
 			"action", entry.Type, "destination", entry.Destination, "reason", entry.Reason)
 		r.event(automation, corev1.EventTypeWarning, reasonEdgeActionFailed, actionEdge,
-			"%s was not delivered: %s", entry.Type, entry.Reason)
+			"%s %s: %s", entry.Type, failed, entry.Reason)
 	default:
 		r.event(automation, corev1.EventTypeWarning, reasonEdgeActionSkipped, actionEdge,
 			"%s did not run: %s", entry.Type, entry.Reason)
 	}
 }
 
-// runEdgeAction resolves one action into a request and sends it.
+// edgeVerbs says what an edge action did in words that fit what it acted on. A
+// request is delivered to a destination; a restart is applied to an object, and
+// reading "delivered to Deployment/media/sonarr" at 3am would make an operator
+// wonder what was delivered.
+func edgeVerbs(actionType string) (done, failed string) {
+	if isKubernetesAction(actionType) {
+		return "applied to", "was not applied"
+	}
+	return "delivered to", "was not delivered"
+}
+
+// runEdgeAction performs one edge action.
+//
+// The two families are separated here rather than inside the outbound client,
+// because a kubernetes.* edge action goes to the API server this operator is
+// already authenticated to — there is no destination to allow, no credential to
+// resolve, and no allowlist that could sensibly apply. An install that has
+// deliberately allowed no outbound destination can still restart a workload.
 func (r *AutomationReconciler) runEdgeAction(
 	ctx context.Context,
 	automation *reactorv1alpha1.Automation,
 	action reactorv1alpha1.Action,
 	data actions.Context,
 ) (actions.Result, error) {
+	if isKubernetesAction(action.Type) {
+		return r.runClusterAction(ctx, automation, action)
+	}
 	if r.Outbound == nil || !r.Outbound.Enabled() {
 		return actions.Result{}, errors.New(
 			"outbound actions are disabled on this install: no destination is allowed")

@@ -485,32 +485,140 @@ Initial Kubernetes actions:
 ```yaml
 - type: kubernetes.scale
   target:
-    kind: Deployment
+    kind: Deployment      # or StatefulSet
     name: qbittorrent
   replicas: 0
 ```
 
+Reads and writes go through the `scale` subresource rather than the kind's own
+`spec.replicas`. `/scale` is the interface that says "this object has a replica
+count" without saying where it is kept, so one executor serves every scalable
+kind: adding one is an entry in the handler registry, an entry in the CRD enum
+and an RBAC rule, and no new executor code.
+
+`target.kind` stays a **closed enum** anyway, which is the deliberate half of
+the trade-off. The gain from opening it would be imaginary: a kind is only
+reachable if the chart granted RBAC for it, and RBAC has to name resources
+explicitly, so an open field would accept a kind the operator cannot touch and
+report a typo as a `Forbidden` during the incident rather than as a rejected
+write at admission. The enum is the same decision as the chart's rule list,
+written where the API server can enforce it.
+
 #### Restart
 
-Potential future action:
+Shipped, as an **edge** action. There is no value a workload can be held at
+that means "restarted", so it declares no level, participates in no
+arbitration, and fires on its own Automation's transition:
 
 ```yaml
 - type: kubernetes.restart
   target:
-    kind: Deployment
+    kind: Deployment      # or StatefulSet
     name: qbittorrent
 ```
 
+It stamps `kubectl.kubernetes.io/restartedAt` on the pod template — the same
+annotation `kubectl rollout restart` writes, so a workload Reactor restarted
+and one restarted by hand are indistinguishable afterwards, and the workload
+controller rolls the pods under the update strategy and disruption budget the
+workload already declares. Reactor never deletes a pod.
+
+**At-most-once, unconditionally.** This is the first non-idempotent action, and
+it is the reason #33's retry policy is per-type rather than global. Every
+execution rolls the workload, so retrying after an ambiguous failure is a
+second outage rather than a correction, and the failures that actually occur —
+a conflict, a Forbidden — are not ones a retry fixes. It is attempted once per
+transition, recorded in `status.edgeActions`, and never retried: not within the
+reconcile, and not across reconciles, because the transition is committed to
+status before the action runs and a later reconcile therefore sees no edge.
+
+**It is also what makes #30's debounce load-bearing.** The engine acts on
+transitions, so a steady condition never restarts twice — but a flapping key is
+a stream of transitions and each one is a real rollout. Scaling made flapping
+harmless; this does not. The default debounce of 1 was chosen for
+`kubernetes.scale`, and a key that drives a restart should be raised above it,
+at a cost of one poll interval of reaction time per extra sample.
+
 #### Suspend CronJob
 
-Potential future action:
+Shipped. Desired-state, and the first action whose level is a switch rather
+than a count:
 
 ```yaml
 - type: kubernetes.cronjob.suspend
   target:
+    kind: CronJob
     name: large-backup
-  suspended: true
+  suspended: true          # optional; true is the default
 ```
+
+`engine.Resolve` was deliberately *not* generalised over an ordered type
+parameter to accommodate it. A switch is a two-element lattice, and embedding
+it in the integers as "suspended is 0, running is 1" is order-preserving, so
+the meet stays `min` and "most restrictive wins" stays "suspended wins" without
+the engine learning a second kind of value. A target has exactly one kind, so
+two levels in different units never meet in the first place — the generality
+would have had no case to serve.
+
+The baseline is recorded under `reactor.robbeverhelst.com/baseline-suspend`,
+not under `baseline-replicas`. That annotation is a compatibility promise about
+replica counts as of v1.0, and a reader — a person, or a script over `kubectl
+get -o custom-columns` — is entitled to keep reading `"1"` there as one
+replica. A kind whose level is not a count records it under its own name.
+
+Suspending does not stop a Job already running, and deliberately grants no
+permission over Jobs at all: declining to start more work is a categorically
+safer act than killing work in flight, and deleting in-flight Jobs is not
+something an outage should decide on the operator's behalf.
+
+#### Cordon — and why there is no drain
+
+`kubernetes.cordon` is shipped, as a desired-state action behind an explicit
+chart opt-in:
+
+```yaml
+- type: kubernetes.cordon
+  target:
+    kind: Node
+    name: worker-03
+  cordoned: true         # optional; true is the default
+```
+
+`spec.unschedulable` is a level, ordered so that cordoned is the restrictive
+answer, so it folds like every other level and needs no new rule. It is the
+first cluster-scoped target, which is why `target.namespace` is rejected on a
+`Node` rather than defaulted.
+
+`kubernetes.drain` — proposed in #18 alongside it — is **deliberately not
+implemented**. Not deferred behind a flag, not implemented with a timeout: not
+built. The reasoning, because a well-evidenced "no" is worth more here than a
+dangerous feature:
+
+1. **An eviction cannot be reversed, so it cannot be a level.** Every action in
+   this design declares a value that is a pure function of which conditions
+   currently hold — that is what makes the outcome independent of reconcile
+   order, a controller restart harmless, and `onExit` expressible. A drain has
+   no such value. There is no state a node can be held at that means "drained",
+   nothing for `spec.reversal` to declare, and nothing for a later reconcile to
+   correct. A flapping key would empty the node once per flap.
+2. **It inverts its own goal on a small cluster.** Draining assumes spare
+   capacity elsewhere. On three nodes behind one UPS the evicted pods do not
+   move, they go Pending — so the workload is lost at the moment of the drain
+   rather than at the moment the battery dies. Cordoning delivers the actual
+   benefit (new pods land on the node still on mains) without that cost.
+3. **It can evict the operator performing it**, if Reactor's own pod is on the
+   node. Nothing else here can kill the thing doing and reporting the work,
+   mid-action.
+4. **It hangs by design.** Eviction respects PodDisruptionBudgets, and a
+   single-replica workload with `minAvailable: 1` blocks indefinitely. A
+   timeout bounds the call; it does not bound a half-drained node.
+
+The RBAC follows the decision rather than merely reflecting it:
+`rbac.allowNodeActions` grants `nodes` and nothing over `pods` or
+`pods/eviction`, under any setting. An operator whose plan genuinely needs a
+drain should pair `kubernetes.cordon` with a notification and run `kubectl
+drain` by hand — an irreversible cluster-wide decision at 3am is the right
+place for a human.
 
 #### Patch resource
 
@@ -701,11 +809,18 @@ The operator should follow least privilege.
 If the controller needs:
 
 ```text
-get/list/watch deployments
+get deployments
 patch deployments
 ```
 
 give it exactly those permissions.
+
+As shipped, a target kind costs `get` and `patch` and nothing else. Targets are
+read as unstructured objects through the manager's uncached client, so no
+target kind starts an informer — which is what would have made `list` and
+`watch` necessary, and would have held every object of that kind in the
+operator's memory to answer a question asked about one of them every fifteen
+seconds.
 
 Do not ship:
 
@@ -714,6 +829,14 @@ cluster-admin
 ```
 
 unless there is a compelling reason.
+
+Anything reaching outside the workloads Reactor was installed to manage is
+opt-in rather than default, and is a separate object so that turning it on is a
+visible decision. `kubernetes.cordon` is the only such permission today: nodes
+are cluster-scoped, so `rbac.allowNodeActions` creates a ClusterRole even in a
+namespace-scoped install, and the chart says so where the value is set. The
+generated `config/rbac/role.yaml` deliberately does not carry it, so the
+manifest bundle grants no node access at all.
 
 Document how users can restrict Reactor's permissions.
 
