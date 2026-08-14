@@ -89,6 +89,17 @@ limitations under the License.
 //	curl -X POST 'http://localhost:9443/firmware?present=false'   # the field is not reported at all
 //	curl -X POST 'http://localhost:9443/firmware?reset=true'
 //
+// Rehearse a device cooking. No capture carries any thermal field — the UPS 2U
+// has none and the gateway record was allowlisted before this was parsed — so
+// this serves the shape UniFi documents, in both of its forms:
+//
+//	curl -X POST 'http://localhost:9443/temperature?celsius=82'
+//	curl -X POST 'http://localhost:9443/temperature?celsius=82&name=ups-2u'  # one device
+//	curl -X POST 'http://localhost:9443/temperature?overheating=true'        # the console's own verdict
+//	curl -X POST 'http://localhost:9443/temperature?celsius=55&general=true' # the single-value form
+//	curl -X POST 'http://localhost:9443/temperature?present=false'           # no thermals reported
+//	curl -X POST 'http://localhost:9443/temperature?reset=true'
+//
 // Rehearse the UPS dropping off the console entirely — the ups keys vanish
 // from the state rather than reporting a value, which is what an Automation
 // holding its last known state has to cope with:
@@ -226,6 +237,7 @@ const (
 	valueCaptured = "captured"
 	fieldDevices  = "devices"
 	fieldPresent  = "present"
+	paramName     = "name"
 
 	// What a variant says wan1/wan2 is_uplink do when the backup takes over.
 	uplinkMoves   = "moves"
@@ -296,6 +308,12 @@ type deviceOverride struct {
 	// means the field is not served at all, which is what every capture shows.
 	upgradable *bool
 	eol        *bool
+	// celsius, overheating and general inject the thermal fields, which no
+	// capture carries either. general switches between the two documented
+	// forms: a per-sensor temperatures table, or one general_temperature.
+	celsius     *float64
+	overheating *bool
+	general     bool
 }
 
 // mockUpgradeVersion is what this mock claims a device would upgrade TO. It is
@@ -469,6 +487,7 @@ func main() {
 	mux.HandleFunc("GET /device", m.describeFleet)
 	mux.HandleFunc("POST /device", m.setDevice)
 	mux.HandleFunc("POST /firmware", m.setFirmware)
+	mux.HandleFunc("POST /temperature", m.setTemperature)
 
 	// The write path: the Network application under /proxy/network, but
 	// authenticated the UniFi OS way — a session cookie plus the csrf header.
@@ -553,7 +572,7 @@ func cloneJSON(value map[string]any) map[string]any {
 // rewriteFleet applies one device's overrides and reports whether it should
 // still appear in the list at all.
 func (m *mock) rewriteFleet(device map[string]any) bool {
-	name, _ := device["name"].(string)
+	name, _ := device[paramName].(string)
 	override := m.deviceOverrides[slugifyName(name)]
 	if override == nil {
 		return true
@@ -579,7 +598,35 @@ func (m *mock) rewriteFleet(device map[string]any) bool {
 	if override.eol != nil {
 		device["model_in_eol"] = *override.eol
 	}
+	m.rewriteThermals(device, override)
 	return true
+}
+
+// rewriteThermals injects the temperature fields. Nothing is injected until
+// /temperature is called: the honest default is a device that reports no
+// thermals, because that is what every capture shows.
+func (m *mock) rewriteThermals(device map[string]any, override *deviceOverride) {
+	if override.celsius == nil && override.overheating == nil {
+		return
+	}
+	device["has_temperature"] = true
+	device["has_fan"] = false
+	if override.overheating != nil {
+		device["overheating"] = *override.overheating
+	}
+	if override.celsius == nil {
+		return
+	}
+	if override.general {
+		device["general_temperature"] = *override.celsius
+		return
+	}
+	// The per-sensor form, with a null-valued sensor beside the real one: a
+	// sensor that reports nothing is a case the parser must not read as 0 °C.
+	device["temperatures"] = []any{
+		map[string]any{"name": "CPU", "type": "cpu", "value": *override.celsius},
+		map[string]any{"name": "System", "type": "board", "value": nil},
+	}
 }
 
 // rewriteBattPool applies the runtime and load overrides. A runtime of exactly
@@ -988,7 +1035,7 @@ func (m *mock) setFirmware(w http.ResponseWriter, r *http.Request) {
 	defer m.mu.Unlock()
 
 	targets := m.capturedSlugs()
-	if name := slugifyName(query.Get("name")); name != "" {
+	if name := slugifyName(query.Get(paramName)); name != "" {
 		if !slices.Contains(targets, name) {
 			http.Error(w, fmt.Sprintf("no captured device named %q; try one of: %s\n",
 				name, strings.Join(targets, ", ")), http.StatusBadRequest)
@@ -1057,6 +1104,82 @@ func (m *mock) describeFirmware(slugs []string) string {
 	return strings.Join(described, "; ")
 }
 
+// setTemperature drives the thermal fields, which the temperature key buckets.
+// Without a name the change applies to every captured device.
+func (m *mock) setTemperature(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	targets := m.capturedSlugs()
+	if name := slugifyName(query.Get(paramName)); name != "" {
+		if !slices.Contains(targets, name) {
+			http.Error(w, fmt.Sprintf("no captured device named %q; try one of: %s\n",
+				name, strings.Join(targets, ", ")), http.StatusBadRequest)
+			return
+		}
+		targets = []string{name}
+	}
+
+	clear := query.Get("reset") != ""
+	if raw := query.Get(fieldPresent); raw != "" {
+		present, err := strconv.ParseBool(raw)
+		if err != nil {
+			http.Error(w, "present must be a boolean", http.StatusBadRequest)
+			return
+		}
+		clear = clear || !present
+	}
+	if clear {
+		for _, slug := range targets {
+			override := m.overrideFor(slug)
+			override.celsius, override.overheating, override.general = nil, nil, false
+		}
+		log.Printf("thermal overrides cleared on %s", strings.Join(targets, ","))
+		writeJSON(w, map[string]any{fieldDevices: m.describeDevices()})
+		return
+	}
+
+	var celsius *float64
+	if raw := query.Get("celsius"); raw != "" {
+		value, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			http.Error(w, "celsius must be a number", http.StatusBadRequest)
+			return
+		}
+		celsius = &value
+	}
+	var overheating *bool
+	if raw := query.Get("overheating"); raw != "" {
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			http.Error(w, "overheating must be a boolean", http.StatusBadRequest)
+			return
+		}
+		overheating = &value
+	}
+	general := query.Get("general") == "true"
+
+	for _, slug := range targets {
+		override := m.overrideFor(slug)
+		if celsius != nil {
+			override.celsius, override.general = celsius, general
+		}
+		if overheating != nil {
+			override.overheating = overheating
+		}
+	}
+
+	log.Printf("thermals on %s: celsius=%s overheating=%s form=%s", strings.Join(targets, ","),
+		describeFloat(celsius), describeBool(overheating),
+		map[bool]string{false: "temperatures[]", true: "general_temperature"}[general])
+	writeJSON(w, map[string]any{
+		fieldDevices: m.describeDevices(),
+		fieldNote: "no capture carries any thermal field; this serves the shape UniFi documents, " +
+			"which is enough to drive the parser and not evidence that a console reports it",
+	})
+}
+
 // setDevice drives one device's fleet fields, which is what the devices and
 // device.<name> keys are derived from.
 //
@@ -1075,7 +1198,7 @@ func (m *mock) setDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slug := slugifyName(query.Get("name"))
+	slug := slugifyName(query.Get(paramName))
 	if slug == "" {
 		http.Error(w, "name is required; GET /device lists what the capture holds", http.StatusBadRequest)
 		return
@@ -1140,11 +1263,11 @@ func (m *mock) describeDevices() []any {
 		if !ok {
 			continue
 		}
-		name, _ := device["name"].(string)
+		name, _ := device[paramName].(string)
 		described = append(described, map[string]any{
-			"name":  name,
-			"key":   "device." + slugifyName(name),
-			"state": device["state"],
+			paramName: name,
+			"key":     "device." + slugifyName(name),
+			"state":   device["state"],
 			// The handle to address it by, which does not move when it is
 			// renamed: every response is rebuilt from the capture.
 			"adopted": device["adopted"],
@@ -1166,7 +1289,7 @@ func (m *mock) capturedSlugs() []string {
 		if !ok {
 			continue
 		}
-		if name, ok := device["name"].(string); ok {
+		if name, ok := device[paramName].(string); ok {
 			slugs = append(slugs, slugifyName(name))
 		}
 	}

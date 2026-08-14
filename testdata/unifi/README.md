@@ -275,6 +275,60 @@ here claims to have come off a console.
 > `current`. That is the direction a pointer buys you, and it is why absent is
 > never read as "up to date".
 
+## Temperature — parsed, not captured
+
+**No committed capture carries a single thermal field.** The UPS 2U reports
+`has_fan: false` and no temperatures, and the gateway record was allowlisted
+before any of this was parsed, so the `temperature` key is written entirely to
+the shape UniFi's API documents and the field names issue
+[#11](https://github.com/robbeverhelst/unifi-reactor/issues/11) lists.
+
+| Field | In the captures | What the provider does with it |
+| --- | --- | --- |
+| `has_temperature` | **absent** | the device says it does thermal reporting; keeps the key alive when it publishes no number |
+| `overheating` | **absent** | the console's own verdict, trusted over the configured threshold |
+| `temperatures[]` (`name`, `type`, `value`) | **absent** | the hottest sensor's `value` is the device's reading |
+| `general_temperature` | **absent** | the single-value form, used when there is no table |
+| `has_fan` | **absent** | never derived from; a hot fanless device and a hot device with a dead fan are different problems |
+
+Every `value` is a pointer. A sensor reporting nothing is not a sensor at 0 °C,
+and reading it as one would make the rack look *coldest* exactly when a sensor
+stops answering — the wrong direction for the only key whose job is to notice
+heat.
+
+All of them are now in the allowlist in `hack/capture-unifi.sh`, and the script
+now also writes `stat-device-switch.json` and `stat-device-ap.json` — see
+[what is not captured yet](#what-is-not-captured-yet) — because a switch or an
+AP is the hardware that would settle this. `internal/providers/unifi/temperature_test.go`
+asserts the decode of both documented forms **in code**, as a hypothesis rather
+than as a fixture.
+
+> ⚠️ **Unverified, including the unit.** Nothing confirms these readings are
+> Celsius. If a firmware reported Fahrenheit, the 75 default would trip on a
+> perfectly cool switch — which is the one failure mode here that is loud rather
+> than silent, and the reason the debug line prints the raw number. Compare it
+> against what the UniFi UI shows for the same device before trusting the key.
+
+## What is not captured yet
+
+`hack/capture-unifi.sh` writes two files that **do not exist in this
+repository**, because no capture has been taken since they were added:
+
+| File it would write | Why it matters |
+| --- | --- |
+| `api/stat-device-switch.json` | the ground truth for `poe` and for `temperature` on a switch, and the only device type carrying a `port_table` |
+| `api/stat-device-ap.json` | `temperature` on a fanless device, and the firmware flags on a second device type |
+
+Both are written with the device's `name` replaced by a placeholder, unlike the
+gateway and UPS records: those two kept the console's own default names for that
+hardware, while a switch or an AP is usually named after a room or a person. A
+device name is API-shaped — it *is* the `device.<name>` state key — so its shape
+belongs in a fixture; whose room it is does not.
+
+If the site has no such device adopted, the script says so and writes nothing.
+Run it and commit whatever it produces; every ⚠️ above and below is waiting on
+one of those two files.
+
 ## UPS state (`vbms_table`)
 
 A UniFi UPS is reported as a switch-type device (`USWDA26`) carrying:

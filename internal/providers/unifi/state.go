@@ -22,16 +22,17 @@ const (
 	// ProviderName is how Automations refer to this provider.
 	ProviderName = "unifi"
 
-	stateKeyWAN        = "wan"
-	stateKeyWANQuality = "wan.quality"
-	stateKeyISP        = "isp"
-	stateKeyInternet   = "internet"
-	stateKeyUPS        = "ups"
-	stateKeyUPSBattery = "ups.battery"
-	stateKeyUPSRuntime = "ups.runtime"
-	stateKeyUPSLoad    = "ups.load"
-	stateKeyDevices    = "devices"
-	stateKeyFirmware   = "firmware"
+	stateKeyWAN         = "wan"
+	stateKeyWANQuality  = "wan.quality"
+	stateKeyISP         = "isp"
+	stateKeyInternet    = "internet"
+	stateKeyUPS         = "ups"
+	stateKeyUPSBattery  = "ups.battery"
+	stateKeyUPSRuntime  = "ups.runtime"
+	stateKeyUPSLoad     = "ups.load"
+	stateKeyDevices     = "devices"
+	stateKeyFirmware    = "firmware"
+	stateKeyTemperature = "temperature"
 
 	// stateKeyDevicePrefix is what a per-device key is published under:
 	// device.<slugified name>. It is the first key on this list whose NAME is
@@ -137,6 +138,14 @@ const (
 	// into something that can page, notify or open a ticket, and stops there.
 	firmwareCurrent          = "current"
 	firmwareUpdatesAvailable = "updates-available"
+
+	// temperature buckets a measurement, exactly as wan.quality and ups.load
+	// do, and for the same two reasons: a number cannot be matched by spec.when,
+	// and it could never be a metric label. The hottest device in the fleet
+	// decides, against a configurable threshold; the readings behind it are a
+	// V(1) log line.
+	temperatureNormal = "normal"
+	temperatureHigh   = "high"
 )
 
 // The comparisons this provider makes between two independent signals for the
@@ -189,14 +198,15 @@ const (
 // and in a Kubernetes Event, exactly as isp's value does.
 func StateVocabulary() map[string][]string {
 	return map[string][]string{
-		stateKeyWAN:        {wanPrimary, wanBackup},
-		stateKeyWANQuality: {wanQualityGood, wanQualityDegraded},
-		stateKeyInternet:   {internetOK, internetDegraded, internetDown},
-		stateKeyUPS:        {upsOnline, upsOnBattery},
-		stateKeyUPSBattery: {batteryNormal, batteryLow, batteryCritical},
-		stateKeyUPSRuntime: {upsRuntimeAmple, upsRuntimeShort, upsRuntimeCritical},
-		stateKeyUPSLoad:    {upsLoadNormal, upsLoadHigh},
-		stateKeyDevices:    {devicesAllOnline, devicesDegraded},
-		stateKeyFirmware:   {firmwareCurrent, firmwareUpdatesAvailable},
+		stateKeyWAN:         {wanPrimary, wanBackup},
+		stateKeyWANQuality:  {wanQualityGood, wanQualityDegraded},
+		stateKeyInternet:    {internetOK, internetDegraded, internetDown},
+		stateKeyUPS:         {upsOnline, upsOnBattery},
+		stateKeyUPSBattery:  {batteryNormal, batteryLow, batteryCritical},
+		stateKeyUPSRuntime:  {upsRuntimeAmple, upsRuntimeShort, upsRuntimeCritical},
+		stateKeyUPSLoad:     {upsLoadNormal, upsLoadHigh},
+		stateKeyDevices:     {devicesAllOnline, devicesDegraded},
+		stateKeyFirmware:    {firmwareCurrent, firmwareUpdatesAvailable},
+		stateKeyTemperature: {temperatureNormal, temperatureHigh},
 	}
 }

@@ -58,6 +58,21 @@ unifi:
     # the console makes its old key vanish, which Reactor holds state through
     # rather than treating as a recovery.
     perDeviceKeys: false
+  temperature:
+    # Reading (°C) at or above which the hottest adopted device makes
+    # temperature report "high". The console's own overheating flag reports
+    # "high" regardless of this number: the firmware knows what a model
+    # tolerates and a default here does not.
+    #
+    # Set against the debounce temperature ships with, not in isolation. UniFi
+    # switches and APs normally sit at 40-60 °C, so 75 plus 3 samples means a
+    # reading that held for 90s at the default pollInterval rather than a fan
+    # spinning up late. Lower this towards the normal operating range and that
+    # hysteresis stops meaning anything.
+    #
+    # The per-device readings are in a debug log line — that is where to look
+    # before choosing your own number.
+    highCelsius: 75
   wan:
     # Thresholds for wan.quality, which buckets how well the *live* uplink is
     # performing into "good" or "degraded". Both numbers are averages the
@@ -104,6 +119,11 @@ unifi:
     # anyone. 60s at the default poll is nothing against the failure the key
     # exists for — a device that has been dead for days.
     #
+    # temperature takes 3 because it is a measurement that hovers: thermals
+    # move with the room, the fan and the load, and a reading sitting on the
+    # threshold would otherwise report high/normal/high. Its default threshold
+    # is set against these 3 samples.
+    #
     # firmware takes 3, and nothing is lost by it: the key comes from the
     # console's lookup against Ubiquiti's release catalogue rather than from
     # your hardware, and no firmware update needs reacting to within 30
@@ -124,6 +144,7 @@ unifi:
       devices: 2
       device.*: 2
       firmware: 3
+      temperature: 3
   # Name of an existing Secret containing the key UNIFI_API_KEY.
   # Create it with:
   #   kubectl -n <namespace> create secret generic unifi-reactor-credentials \

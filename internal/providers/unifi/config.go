@@ -51,6 +51,7 @@ const (
 	envMinAvailability    = "UNIFI_WAN_QUALITY_MIN_AVAILABILITY_PERCENT"
 	envMaxLatency         = "UNIFI_WAN_QUALITY_MAX_LATENCY_MS"
 	envPerDeviceKeys      = "UNIFI_PER_DEVICE_KEYS"
+	envHighTemperature    = "UNIFI_TEMPERATURE_HIGH_CELSIUS"
 
 	envWebhookEnabled     = "UNIFI_WEBHOOK_ENABLED"
 	envWebhookBindAddress = "UNIFI_WEBHOOK_BIND_ADDRESS"
@@ -85,6 +86,7 @@ type Config struct {
 	HighLoadPercent        float64
 	MinAvailabilityPercent float64
 	MaxLatencyMs           float64
+	HighTemperatureCelsius float64
 	// PerDeviceKeys opts into a device.<name> key per adopted device. Off by
 	// default: it is the only setting that changes how many series an install
 	// publishes rather than what any of them mean.
@@ -156,6 +158,7 @@ func ConfigFromEnv(lookup func(string) string) (Config, bool, error) {
 		HighLoadPercent:        DefaultHighLoadPercent,
 		MinAvailabilityPercent: DefaultMinAvailabilityPercent,
 		MaxLatencyMs:           DefaultMaxLatencyMs,
+		HighTemperatureCelsius: DefaultHighTemperatureCelsius,
 		PerDeviceKeys:          lookup(envPerDeviceKeys) == envTrue,
 		Webhook: WebhookConfig{
 			Enabled:            lookup(envWebhookEnabled) == envTrue,
@@ -235,6 +238,7 @@ func ConfigFromEnv(lookup func(string) string) (Config, bool, error) {
 		{envMinAvailability, &cfg.MinAvailabilityPercent},
 		{envMaxLatency, &cfg.MaxLatencyMs},
 		{envHighLoad, &cfg.HighLoadPercent},
+		{envHighTemperature, &cfg.HighTemperatureCelsius},
 	} {
 		raw := lookup(field.env)
 		if raw == "" {

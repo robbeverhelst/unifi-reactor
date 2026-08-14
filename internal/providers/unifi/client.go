@@ -114,6 +114,10 @@ type Client struct {
 	MinAvailabilityPercent float64
 	MaxLatencyMs           float64
 
+	// HighTemperatureCelsius bounds the temperature state key: the hottest
+	// adopted device at or above this reports high.
+	HighTemperatureCelsius float64
+
 	// PerDeviceKeys publishes a device.<name> key per adopted device alongside
 	// the aggregate devices key. It defaults off because it is the one setting
 	// here that changes how many things Reactor publishes rather than what they
@@ -152,6 +156,7 @@ func NewClient(baseURL string, apiKey APIKey, site string, insecureSkipVerify bo
 		HighLoadPercent:        DefaultHighLoadPercent,
 		MinAvailabilityPercent: DefaultMinAvailabilityPercent,
 		MaxLatencyMs:           DefaultMaxLatencyMs,
+		HighTemperatureCelsius: DefaultHighTemperatureCelsius,
 		http: &http.Client{
 			Timeout: 10 * time.Second,
 			Transport: &http.Transport{
@@ -191,6 +196,7 @@ type deviceRecord struct {
 	// flat object, so this is a grouping for readers and nothing more.
 	deviceHealthFields
 	firmwareFields
+	temperatureFields
 }
 
 type wanPort struct {
@@ -257,6 +263,7 @@ type vbmsTable struct {
 //	devices      all-online | degraded   (the adopted fleet in one value)
 //	device.<name>  online | offline      (opt-in; see Client.PerDeviceKeys)
 //	firmware     current | updates-available
+//	temperature  normal  | high              (the hottest adopted device)
 //
 // ups and ups.battery are deliberately independent: a `when: {ups: on-battery}`
 // automation must stay matched for the whole outage, including as the battery
@@ -344,6 +351,7 @@ func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse
 	gatewaySeen := false
 	fleet := newDeviceTally()
 	var firmware firmwareTally
+	var heat temperatureTally
 
 	for _, d := range parsed.Data {
 		// The fleet keys are about devices the console manages, so an unadopted
@@ -353,6 +361,7 @@ func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse
 		if d.adopted() {
 			fleet.observe(ctx, d)
 			firmware.observe(d)
+			heat.observe(ctx, d)
 		} else {
 			logf.FromContext(ctx).WithName("unifi-devices").V(1).Info(
 				"Skipping a device that is not adopted", "model", d.Model, "type", d.Type)
@@ -385,6 +394,7 @@ func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse
 	}
 	fleet.publish(ctx, state, c.PerDeviceKeys)
 	firmware.publish(ctx, state)
+	c.publishTemperature(ctx, state, heat)
 
 	if len(state) == 0 {
 		return nil, fmt.Errorf(

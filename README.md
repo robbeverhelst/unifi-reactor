@@ -732,6 +732,7 @@ Each key is published only when the matching hardware is adopted by your control
 | `devices` | `all-online`, `degraded` | whether every adopted device is reachable, or at least one is not |
 | `device.<name>` | `online`, `offline` | one adopted device, by slugified name. **Opt-in** — see below |
 | `firmware` | `current`, `updates-available` | whether the console has an update waiting for anything adopted |
+| `temperature` | `normal`, `high` | the hottest adopted device against the configured threshold |
 
 `isp` is the one key whose values are not a closed set: it is the carrier name your console geolocated your public address to, lowercased with everything non-alphanumeric turned into a hyphen. Look it up before matching on it —
 
@@ -901,6 +902,53 @@ it does not transition, so an Automation matching it would sit permanently
 matched, which is a report rather than a reaction. It is counted in the log line
 above, and a key for it is a decision to argue for separately.
 
+### `temperature` is the hottest device, bucketed
+
+A switch cooking in a warm rack degrades before it fails. `temperature` reports
+`high` when the hottest adopted device is at or above a threshold **you
+configure**, or when the console itself says a device is overheating:
+
+```yaml
+unifi:
+  temperature:
+    highCelsius: 75
+```
+
+```yaml
+  when:
+    provider: unifi
+    state:
+      temperature: high    # stop the transcode job before the rack gets worse
+```
+
+The console's own `overheating` flag outranks the threshold: the firmware knows
+what that model tolerates and a number in this repository does not. Otherwise the
+hottest *sensor* on the hottest *device* decides — a board is as hot as its
+hottest part, and averaging would let one cool sensor hide a cooking one.
+
+Like [`wan.quality`](#internet-is-the-one-wan-cannot-express) and `ups.load`, this
+is a **bucketed measurement**, and for the same two reasons: `spec.when` compares
+strings, so a number cannot be a state value, and one metric series per distinct
+reading is unbounded. The readings themselves are a `V(1)` log line — which is
+where you find out what your rack actually runs at before setting the threshold:
+
+```sh
+kubectl -n reactor-system logs deploy/reactor | grep 'unifi-temperature'   # needs log.level=debug
+# temperature temperature=normal hottestCelsius=58.5 hottestDevice=switch-48 thresholdCelsius=75 devicesFanless=2
+```
+
+The default of 75 °C is set **against the debounce**, not in isolation, the same
+way [`ups.runtime`'s thresholds are](#charge-is-a-poor-shutdown-trigger-runtime-is-a-better-one): UniFi switches and APs
+normally sit at 40–60 °C, so 75 °C plus 3 samples means a reading that genuinely
+held for 90 seconds rather than a fan spinning up late. Lower it towards the
+normal operating range and that hysteresis stops meaning anything, because the
+reading will cross the line and stay there. Move one and you have moved the other.
+
+A device reporting no temperature is **not a device at 0 °C** — it publishes
+nothing, and a fleet where nothing is instrumented publishes no `temperature` key
+at all. Reading a missing sensor as zero would make the rack look coldest exactly
+when a sensor stops answering.
+
 If a provider stops reporting a key at all — the hardware dropped off the controller — Reactor holds the last known state and reports `Ready=False` with `StateKeyUnavailable` rather than treating lost visibility as a condition that ended ([what to do about it](docs/troubleshooting.md#2-statekeyunavailable-and-held-state)).
 
 ### Settling a noisy signal
@@ -921,6 +969,7 @@ unifi:
       devices: 2        # ...and don't believe one missed heartbeat
       device.*: 2       # a trailing * covers keys named after your hardware
       firmware: 3       # ...and nothing about an update is urgent
+      temperature: 3    # ...and a measurement hovers on its threshold
 ```
 
 Each extra sample costs one `pollInterval` of reaction time, so the default is `1`: a WAN failover and a power cut both deserve an immediate reaction, and neither flaps. `ups.battery` ships at `2` because it is a threshold crossing — a charge hovering at 30% would otherwise report `low`, `normal`, `low` — and because a battery drains over minutes, so spending one more poll to be sure costs nothing. At the default 30s poll that makes a battery-level escalation react in 60s worst case instead of 30s.
@@ -938,6 +987,8 @@ Debounce is also the whole of the flap control for `wan.quality`, and that is wo
 `devices` and `device.*` ship at `2`. A device's state is a switch position like `wan`, but it is the *console's* judgement about a heartbeat rather than a wire it can see, and a busy console that misses one beat must not be a reason to page anyone. One extra sample is 60 seconds at the default poll, which is nothing against the failure this key exists for — an AP that has been dead for days.
 
 `firmware` ships at `3`, and here the reason is that nothing is lost by it. The key is not derived from your hardware at all but from the console's lookup against Ubiquiti's release catalogue, which can refresh, blip or briefly disagree with itself — and *no* firmware update needs reacting to within 30 seconds. Extra samples are free when reaction time does not matter, so it takes the most of any key.
+
+`temperature` ships at `3` because it is a measurement that hovers: thermals move with the room, the fan and the load, and a reading sitting near the threshold would otherwise report `high`, `normal`, `high`. Debounce is the whole of the flap control here, exactly as it is for `wan.quality` — three consecutive identical readings, or the key holds what it had.
 
 `device.*` is the one entry here that is a pattern rather than a key. Per-device key names come from your hardware, so no list written here could name them; a trailing `*` matches every key with that prefix. An exact key always wins over a pattern, and the longest matching prefix wins between patterns, so `device.ap-attic: 5` pulls one device out of the group it belongs to.
 

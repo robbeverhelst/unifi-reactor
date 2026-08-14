@@ -40,6 +40,8 @@ DEVICE='{
   disconnection_reason,
   upgradable, upgrade_to_firmware, required_version, safe_for_autoupgrade,
   model_in_eol, model_in_lts,
+  has_temperature, has_fan, overheating, general_temperature,
+  temperatures: (if .temperatures then [.temperatures[] | {name, type, value}] else null end),
   wan1: (if .wan1 then (.wan1 | '"$WAN"') else null end),
   wan2: (if .wan2 then (.wan2 | '"$WAN"') else null end),
   uplink: (if .uplink then {name: .uplink.name, type: .uplink.type} else null end),
@@ -55,6 +57,36 @@ jq '{meta: {rc: "ok"}, data: [.data[] | select(.model == "UDMPRO") | '"$DEVICE"'
   /tmp/cap-device.json > "$OUT/stat-device-gateway.json"
 jq '{meta: {rc: "ok"}, data: [.data[] | select(.vbms_table != null) | '"$DEVICE"' | .mac = "'"$MAC"'"]}' \
   /tmp/cap-device.json > "$OUT/stat-device-ups.json"
+
+# A switch and an access point. Neither has ever been captured, and between them
+# they are the ground truth for temperature (#11), PoE (#14) and the firmware
+# flags (#12) — the three parsers currently written to a documented shape rather
+# than to an observation. The UPS 2U reports no thermals and no PoE, so it
+# cannot settle any of them.
+#
+# Only the first of each is kept: one record is enough to learn a field's shape,
+# and every extra one is another device name and another 8KB to sanitize.
+#
+# Their names are replaced with placeholders, unlike the gateway's and the UPS's
+# — those two kept the console's own defaults for that hardware, while a switch
+# or an AP is usually named after a room or a person. A device name is the
+# `device.<name>` state key, so it is API-shaped and belongs in a fixture; whose
+# room it is does not.
+echo "capturing stat/device -> switch + access point"
+jq '{meta: {rc: "ok"}, data: [[.data[] | select(.type == "usw" and .vbms_table == null)][0] | select(. != null) | '"$DEVICE"' | .mac = "'"$MAC"'" | .name = "Switch"]}' \
+  /tmp/cap-device.json > /tmp/cap-switch.json
+jq '{meta: {rc: "ok"}, data: [[.data[] | select(.type == "uap")][0] | select(. != null) | '"$DEVICE"' | .mac = "'"$MAC"'" | .name = "Access Point"]}' \
+  /tmp/cap-device.json > /tmp/cap-ap.json
+for pair in "switch:/tmp/cap-switch.json" "ap:/tmp/cap-ap.json"; do
+  kind="${pair%%:*}"; file="${pair#*:}"
+  if [ "$(jq '.data | length' "$file")" -eq 0 ]; then
+    echo "  no $kind adopted on this site; stat-device-$kind.json not written"
+    rm -f "$file"
+    continue
+  fi
+  mv "$file" "$OUT/stat-device-$kind.json"
+  echo "  wrote stat-device-$kind.json"
+done
 
 echo "capturing stat/health"
 api stat/health | jq '{meta: {rc: "ok"}, data: [.data[] | {

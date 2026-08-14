@@ -674,6 +674,28 @@ curl -sk -H "X-API-KEY: $UNIFI_API_KEY" \
 per device type, and the devices that *do* answer are enough to publish the key.
 Nothing silent is ever assumed to be current.
 
+## 10d. `temperature` never appears, or reports `high` on a cool rack
+
+Like `firmware`, this key is derived from fields **no capture in this project
+contains**, so start by looking at what the parser actually saw:
+
+```sh
+kubectl -n reactor-system logs deploy/reactor | grep 'unifi-temperature'   # needs log.level=debug
+# temperature temperature=normal hottestCelsius=58.5 hottestDevice=switch-48 thresholdCelsius=75 devicesInstrumented=4
+```
+
+| What you see | What it means |
+| --- | --- |
+| `No adopted device reports its thermals` | Nothing in the fleet reports `has_temperature`, a reading, or `overheating`. A UniFi UPS genuinely has none; if a switch or an AP is adopted, the field names differ on your firmware and [#11](https://github.com/robbeverhelst/unifi-reactor/issues/11) wants to know |
+| `A device claims temperature reporting but published no reading` | Instrumented and silent. It keeps the key alive and contributes no number — it is **not** counted as 0 °C |
+| `high` at a `hottestCelsius` that looks cool | Either the console set `overheating` (check `devicesOverheating` — its verdict outranks the threshold), or **the readings are not Celsius**. That unit is unverified. Compare `hottestCelsius` against what the UniFi UI shows for the same device |
+| `normal` on a rack you know is hot | Your threshold is above what the hardware reports. Read `hottestCelsius` over a day, then set `unifi.temperature.highCelsius` a little above it |
+
+Change the threshold and the debounce together. `temperature` settles over 3
+samples, and the 75 °C default assumes a normal operating range of 40–60 °C; move
+the threshold into that range and 90 seconds of hysteresis stops meaning anything,
+because the reading crosses the line and stays there.
+
 ---
 
 ## 11. Reactor warns about your UniFi Network version
