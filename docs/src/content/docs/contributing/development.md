@@ -214,7 +214,7 @@ kubectl -n reactor-system logs deploy/reactor | grep -E 'webhook delivery|state 
 make dev-webhook
 ```
 
-The mock's alarm responses are built from `docs/unifi-alarm-manager-api.md`, not captured from a console. Registration succeeding against the mock proves Reactor sends what those notes describe. It does not prove a real console accepts it.
+The mock's alarm responses are built from the [Alarm Manager API notes](/contributing/unifi-alarm-manager-api/), not captured from a console. Registration succeeding against the mock proves Reactor sends what those notes describe. It does not prove a real console accepts it.
 
 ### Capturing real deliveries
 

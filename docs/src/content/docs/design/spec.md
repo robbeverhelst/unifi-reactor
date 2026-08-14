@@ -830,7 +830,7 @@ action; a private cooldown would be a second, weaker debounce invisible to
 everything beside it.
 
 Every endpoint on this path is **inferred**, and
-[docs/unifi-write-api.md](/contributing/unifi-write-api/) splits what was observed on a real
+[Writing to a UniFi console](/contributing/unifi-write-api/) splits what was observed on a real
 console from what was not. `hack/mock-unifi` serves and enforces the write
 endpoints so the path is exercised at all.
 

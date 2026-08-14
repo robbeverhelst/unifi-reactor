@@ -7,7 +7,7 @@ description: "Switching a WLAN off on a metered uplink, and power-cycling a PoE 
 
 Everything above reaches *out* of the cluster to an address you allowlisted. The two actions here reach *back at the console Reactor watches*, and they are a different kind of risk: they are the first things Reactor changes on your network rather than reads from it, and the people they affect are not running the cluster.
 
-> ⚠️ **Nothing here has ever been run against a real console.** The way Reactor authenticates a write was worked out against a live UDM Pro, but every endpoint under it is inferred from how UniFi's own web UI is understood to work. [`docs/unifi-write-api.md`](/contributing/unifi-write-api/) says exactly which is which. Everything is exercised against `hack/mock-unifi`, and a mock proves the wiring, not the protocol.
+> ⚠️ **Nothing here has ever been run against a real console.** The way Reactor authenticates a write was worked out against a live UDM Pro, but every endpoint under it is inferred from how UniFi's own web UI is understood to work. [Writing to a UniFi console](/contributing/unifi-write-api/) says exactly which is which. Everything is exercised against `hack/mock-unifi`, and a mock proves the wiring, not the protocol.
 
 Three properties hold for both, and they are what make them safe enough to ship at all:
 

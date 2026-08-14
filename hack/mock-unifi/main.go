@@ -179,13 +179,15 @@ limitations under the License.
 //
 // The WLAN records are NOT a capture. No wlanconf response has ever been
 // recorded (testdata/unifi/README.md says which files are), so these are built
-// from the field names in docs/unifi-write-api.md and the SSIDs are obviously
-// fake. They prove Reactor sends what those notes describe; they do not prove a
-// console answers this way.
+// from the field names in
+// https://reactor.robbeverhelst.com/contributing/unifi-write-api/ and the SSIDs
+// are obviously fake. They prove Reactor sends what those notes describe; they
+// do not prove a console answers this way.
 //
 // It also mocks enough of the undocumented Alarm Manager API
-// (docs/unifi-alarm-manager-api.md) for Reactor to register its own webhook
-// rule against, and can then fire a delivery at whatever URL that rule names:
+// (https://reactor.robbeverhelst.com/contributing/unifi-alarm-manager-api/) for
+// Reactor to register its own webhook rule against, and can then fire a
+// delivery at whatever URL that rule names:
 //
 //	curl -X POST http://localhost:9443/alarm-fire
 //
@@ -2197,7 +2199,7 @@ func (m *mock) describeWLANs(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, map[string]any{
 		"wlans": state,
 		keyNote: "synthetic, not a capture: no wlanconf response has ever been recorded from a console. " +
-			"See docs/unifi-write-api.md for what is known and what is assumed.",
+			"See https://reactor.robbeverhelst.com/contributing/unifi-write-api/ for what is known and what is assumed.",
 	})
 }
 
@@ -2356,7 +2358,7 @@ func (m *mock) describePoE(w http.ResponseWriter, _ *http.Request) {
 		paramWatts: m.poeWatts, paramBudget: m.poeBudget, paramSilent: m.poeSilent,
 		keyNote: "synthetic, not a capture: no switch record has ever been recorded from a console, " +
 			"no power-cycle command has ever been sent to one, and no capture carries a PoE budget. " +
-			"See docs/unifi-write-api.md and testdata/unifi/README.md.",
+			"See https://reactor.robbeverhelst.com/contributing/unifi-write-api/ and testdata/unifi/README.md.",
 	})
 }
 

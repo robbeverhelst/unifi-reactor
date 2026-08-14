@@ -65,7 +65,7 @@ Out of scope: `unifi.insecureSkipVerify: true`, which is the documented default 
 
 **Residual risk, stated plainly.** With an SSID or a port allowlisted, anyone who can create an `Automation` in any namespace can cause that SSID to be switched or that port to be cycled, at whatever moment the provider state they chose transitions. That is the feature. Allowlist only things whose loss is an inconvenience, and note that a disabled WLAN is **not handed back** by an uninstall or by deleting the `Automation` — there is no baseline for it and the pre-delete sweep has no credentials to use one with.
 
-**Unverified surface.** Every endpoint on the write path is inferred rather than observed; only the authentication has been seen working against real hardware. [`docs/unifi-write-api.md`](docs/unifi-write-api.md) splits the two. A bug in that inference degrades to a refused action rather than to a wrong one, which is the property the check-before-write discipline exists to give.
+**Unverified surface.** Every endpoint on the write path is inferred rather than observed; only the authentication has been seen working against real hardware. [Writing to a UniFi console](https://reactor.robbeverhelst.com/contributing/unifi-write-api/) splits the two. A bug in that inference degrades to a refused action rather than to a wrong one, which is the property the check-before-write discipline exists to give.
 
 ## Supported versions
 

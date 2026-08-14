@@ -42,10 +42,11 @@ import (
 //
 // EVERY ENDPOINT AND FIELD NAME BELOW IS INFERRED. No write to a real console
 // has ever been made from this repository, and none of these paths appears in a
-// committed capture. See docs/unifi-write-api.md, which splits what is known
-// from what is assumed. The discipline that follows from that is the same one
-// the Alarm Manager registration uses: check before writing, and abandon rather
-// than guess.
+// committed capture. See
+// https://reactor.robbeverhelst.com/contributing/unifi-write-api/, which splits
+// what is known from what is assumed. The discipline that follows from that is
+// the same one the Alarm Manager registration uses: check before writing, and
+// abandon rather than guess.
 const (
 	wlanConfEndpoint = "rest/wlanconf"
 	// deviceStatEndpoint is the same read the poller makes. The PoE check goes
@@ -391,7 +392,8 @@ func describeConsoleTarget(action reactorv1alpha1.Action) (string, error) {
 //
 // What it cannot bound is the window: a change made in the UniFi UI between the
 // read and the write is lost. That window is two adjacent requests wide, and it
-// is stated in docs/unifi-write-api.md rather than pretended away.
+// is stated in https://reactor.robbeverhelst.com/contributing/unifi-write-api/
+// rather than pretended away.
 func (w *Writer) setWLANEnabled(ctx context.Context, client *AlarmClient, name string, want bool) error {
 	log := logf.FromContext(ctx).WithName("unifi-write")
 

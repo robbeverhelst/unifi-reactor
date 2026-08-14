@@ -72,7 +72,7 @@ the API key the poller uses.
 Worth knowing before switching it on:
 
 - It writes to your gateway over an **undocumented, reverse-engineered, version-fragile** API
-  ([notes](https://github.com/robbeverhelst/unifi-reactor/blob/main/docs/unifi-alarm-manager-api.md)),
+  ([notes](/contributing/unifi-alarm-manager-api/)),
   verified against UniFi Network 10.5.67 only.
 - It **only ever creates** its rule. It never edits or deletes one, because those verbs were never
   confirmed against a real console. If `publicURL` changes later, the stale rule is reported in the

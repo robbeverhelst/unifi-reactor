@@ -13,7 +13,7 @@ make build         # compile the manager binary
 make help          # every target
 ```
 
-Both `make test` and `make lint` must pass before a PR is ready. CI runs lint, tests, three e2e suites, and a manifest-drift check. The e2e suites (`make test-reaction`, `make test-lifecycle`, `make test-e2e`) each create and delete their own Kind cluster; see [Development](docs/development.md#end-to-end-tests) for what each one covers. The chart tests in `test/chart/` need `helm` on your PATH to run at all — they render the chart and check, among other things, that its templated CRD has not drifted from `config/crd/bases`.
+Both `make test` and `make lint` must pass before a PR is ready. CI runs lint, tests, three e2e suites, and a manifest-drift check. The e2e suites (`make test-reaction`, `make test-lifecycle`, `make test-e2e`) each create and delete their own Kind cluster; see [Development](https://reactor.robbeverhelst.com/contributing/development/#end-to-end-tests) for what each one covers. The chart tests in `test/chart/` need `helm` on your PATH to run at all — they render the chart and check, among other things, that its templated CRD has not drifted from `config/crd/bases`.
 
 **No UniFi hardware is required.** `make dev-mock` serves the captured payloads on `:9443` and lets you drive state transitions by hand:
 
@@ -26,7 +26,7 @@ curl -X POST 'http://localhost:9443/ups?level=5'               # battery critica
 curl -X POST 'http://localhost:9443/ups?mode=mains&level=100'  # power restored
 ```
 
-Point an operator at it with `UNIFI_URL=http://<your-lan-address>:9443 UNIFI_API_KEY=mock`. [docs/development.md](docs/development.md) has the full setup, including running against a real cluster with `make dev-deploy`.
+Point an operator at it with `UNIFI_URL=http://<your-lan-address>:9443 UNIFI_API_KEY=mock`. [Development](https://reactor.robbeverhelst.com/contributing/development/) has the full setup, including running against a real cluster with `make dev-deploy`.
 
 ## Generated files must be committed
 
@@ -65,7 +65,7 @@ So, concretely:
 
 `internal/engine/` must never contain provider-specific logic — no provider names, no state key names, no vendor value strings. Providers translate vendor reality into a normalized state map; the engine only ever sees that map. That seam is the project's central architectural claim.
 
-If you are adding a provider, [docs/adding-a-provider.md](docs/adding-a-provider.md) walks the whole contract through the UniFi implementation.
+If you are adding a provider, [Adding a provider](https://reactor.robbeverhelst.com/contributing/adding-a-provider/) walks the whole contract through the UniFi implementation.
 
 ## Commits and PRs
 
@@ -91,7 +91,7 @@ For the PR itself:
 
 Use the [bug report template](https://github.com/robbeverhelst/unifi-reactor/issues/new/choose). It asks for the UniFi Network version, console model, chart version, and `kubectl get automation -o yaml` — those four are what makes anything reproducible, and every one of them is missing from the average report.
 
-Check [docs/troubleshooting.md](docs/troubleshooting.md) first; several of the most common reports are documented behaviour with a documented fix.
+Check the [troubleshooting guide](https://reactor.robbeverhelst.com/troubleshooting/) first; several of the most common reports are documented behaviour with a documented fix.
 
 **Redact before posting.** Logs and resource dumps can carry your public IP, your ISP, internal hostnames, and site identifiers. Nothing in a bug report needs them.
 
