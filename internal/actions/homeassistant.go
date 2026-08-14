@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 )
 
@@ -42,18 +41,12 @@ const homeAssistantNameChars = "abcdefghijklmnopqrstuvwxyz0123456789_"
 // actually built.
 const maxHomeAssistantName = 64
 
-// homeAssistantAPI is the path every service call goes under. Reactor appends
-// the domain and the service to it and the Automation supplies neither the
-// prefix nor anything after the service name.
-var homeAssistantAPI = []string{"api", "services"}
+// homeAssistantName is what the integration is called in an error message.
+const homeAssistantName = "Home Assistant"
 
 // HomeAssistantURL builds the endpoint one service call goes to, from the base
-// address of an instance and the service being called.
-//
-// The base may carry a path — an instance behind a reverse proxy at
-// /home-assistant is ordinary — but nothing else: a query or a fragment on what
-// is meant to be a base address is a sign the URL is being used to smuggle
-// something past the part of it Reactor controls.
+// address of an instance and the service being called. Only the last two path
+// segments come from the Automation, and only after they are checked.
 func HomeAssistantURL(base, domain, service string) (string, error) {
 	if err := usableHomeAssistantName("domain", domain); err != nil {
 		return "", err
@@ -61,21 +54,7 @@ func HomeAssistantURL(base, domain, service string) (string, error) {
 	if err := usableHomeAssistantName("service", service); err != nil {
 		return "", err
 	}
-
-	parsed, err := url.Parse(base)
-	if err != nil {
-		// Deliberately not wrapping: a parse error quotes the whole input back,
-		// and this text reaches the Automation's status.
-		return "", errors.New("the Home Assistant url is not a valid URL")
-	}
-	if parsed.RawQuery != "" || parsed.Fragment != "" {
-		return "", errors.New(
-			"the Home Assistant url is the base address of the instance and takes no query or fragment; " +
-				"Reactor appends the service path itself")
-	}
-
-	segments := append(append([]string{}, homeAssistantAPI...), domain, service)
-	return parsed.JoinPath(segments...).String(), nil
+	return endpointOn(base, homeAssistantName, "api", "services", domain, service)
 }
 
 // usableHomeAssistantName rejects anything that is not a bare slug.

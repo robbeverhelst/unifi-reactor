@@ -713,6 +713,72 @@ resume torrents
 
 This should be demonstrated in documentation using a single state-triggered Automation with `onExit`.
 
+> **As shipped**, as `qbittorrent.pause` and `qbittorrent.resume`. This section's
+> instruction was to prefer the generic HTTP action, and the first step was to
+> prove whether it can express this. It can only under one configuration, and
+> the reason it cannot in general is what justifies the action.
+>
+> **The generic-HTTP attempt.** qBittorrent's WebUI authenticates with a session
+> cookie from `POST /api/v2/auth/login`, not with a static token. `http.request`
+> is one request: it holds no cookie jar, follows no redirect, and there is no
+> value that could be put in a Secret ahead of time, because the `SID` does not
+> exist until the login happens. So:
+>
+> - With authentication **bypassed** for the calling subnet, a plain
+>   `http.request` — `POST {base}/api/v2/torrents/pause`, body `hashes=all` —
+>   works, and is documented as the right answer for that setup.
+> - With authentication **on**, which is the default and the only sensible
+>   posture for something reachable from the cluster, it cannot be expressed at
+>   all. Not awkwardly: at all.
+>
+> That is the bar the [named integrations](#named-integrations-over-the-generic-action)
+> section states — the exchange is not one request — and it is met. What was
+> *not* built is a second HTTP client: `Session` is a field on the existing
+> request, so the login, the action and the logout all go through the same
+> allowlist check, the same dialer floor, the same redirect refusal and the same
+> origin-only reporting.
+>
+> **The session and the credential rule.** A `SID` is a bearer of the same
+> authority as the password, so caching one across reconciles would be exactly
+> what this project refuses to do with the password. There is no session cache.
+> The login happens inside the one action, the cookie lives in a local variable,
+> and a logout ends the session on the far end rather than leaving it to expire.
+> A retry re-runs the whole exchange.
+
+#### Pausing is a level, and this is an edge action anyway
+
+The interesting part of #21 is not the HTTP. Paused-versus-running is a level,
+and a level is the thing this design arbitrates — so the action *looks* like a
+desired-state action and is not one.
+
+What makes a desired-state action possible is not the fold. It is that the
+target is a Kubernetes object, so the value it held before Reactor claimed it
+can be recorded as an annotation **on that object**, where it outlives the
+Automation, outlives Reactor, and is readable by the pre-delete sweep during an
+uninstall. That baseline is what makes release possible, and release is what
+makes a claim legitimate.
+
+A qBittorrent instance reached over HTTP has no Kubernetes identity to arbitrate
+over, no annotation to hold a baseline, and nothing the uninstall hook could
+reach if it did — that hook runs with no credentials and no destination
+allowlist, by design. The alternatives were considered and rejected in the
+[README](../README.md#it-is-a-level-in-the-world-and-an-edge-action-here):
+status dies with the Automation, a tag written into the user's torrent client
+is both editable by them and unreadable by a client that never parses a response
+body, and a synthesized identity would arbitrate on string equality of a URL.
+
+So it ships as an edge action, named as a verb, with two limitations stated
+rather than hidden: it is not arbitrated, and `resume` resumes torrents that
+were paused by hand because nothing recorded which those were.
+
+**The general conclusion, which is the durable part.** Non-Kubernetes
+desired-state targets need a design that does not exist yet: somewhere to keep a
+baseline and a claim for a thing with no object to hang them on, and some way
+for the uninstall path to reach it. Until that exists, the rule is that a
+desired-state action targets a Kubernetes object, and anything else is an edge
+action named as a verb. That is a rule about the whole action taxonomy, not
+about torrents.
+
 ## State
 
 State is the primary abstraction, not a future feature.

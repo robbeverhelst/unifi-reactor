@@ -234,6 +234,58 @@ type HomeAssistantService struct {
 	Idempotent *bool `json:"idempotent,omitempty"`
 }
 
+// QBittorrent is the instance a qbittorrent.pause or qbittorrent.resume acts on.
+//
+// Pausing is a level in the world — paused or running — and an edge action
+// here, which is the one thing about this type worth understanding before
+// using it.
+//
+// A desired-state action is arbitrated across every Automation claiming its
+// target, and what makes that possible is not the fold: it is that the target
+// is a Kubernetes object, so the value it held before Reactor first touched it
+// can be recorded as an annotation ON that object, where it outlives both the
+// Automation and Reactor itself. A qBittorrent instance reached over HTTP has
+// no such place. It has no Kubernetes identity to arbitrate over, no annotation
+// to hold a baseline, and no way for the pre-delete sweep — which reads those
+// annotations with no credentials and no allowlist — to hand it back.
+//
+// So the honest shape is an edge action, and two limitations follow from that
+// rather than being oversights:
+//
+//   - It is not arbitrated. Two Automations pausing the same instance for
+//     unrelated reasons do not resolve to one claim; each fires on its own
+//     transition, and whichever resumes first resumes everything.
+//   - It has no baseline. A resume resumes every torrent, including ones
+//     paused by hand before Reactor ever ran. Nothing here can tell those
+//     apart, because nothing recorded which they were.
+//
+// A design for non-Kubernetes desired-state targets — somewhere legitimate to
+// keep a baseline and a claim for a thing with no object to hang them on — does
+// not exist yet, and inventing one inside this type would be the worst place to
+// try. See the README for the alternatives that were considered.
+type QBittorrent struct {
+	// URL is the base address of the qBittorrent WebUI, e.g.
+	// http://qbittorrent.media.svc.cluster.local:8080. The API paths are
+	// appended by Reactor and are not expressible here.
+	//
+	// Omit it to take the base address from the Secret's url key instead.
+	// Exactly one of the two must supply it.
+	// +kubebuilder:validation:MaxLength=2048
+	// +optional
+	URL string `json:"url,omitempty"`
+
+	// SecretRef names a Secret in this Automation's namespace holding the WebUI
+	// username and password, under the username and password keys. It may also
+	// hold the base address under url.
+	//
+	// Both are required. qBittorrent issues a session cookie rather than
+	// accepting a static token, and that login is the entire reason this action
+	// exists rather than being an http.request — an instance configured to
+	// bypass authentication for its subnet is expressible as one POST with
+	// http.request, and that is the honest thing to write for it.
+	SecretRef SecretReference `json:"secretRef"`
+}
+
 // Notification is the message a notification.* action sends.
 //
 // The destination is not expressible here at all: it comes from the referenced
@@ -264,9 +316,16 @@ type Notification struct {
 // Types divide into two kinds. A desired-state action (kubernetes.scale,
 // kubernetes.cronjob.suspend) declares a level and is arbitrated continuously
 // across every Automation sharing its target. An edge action (kubernetes.restart,
-// http.request, notification.*, homeassistant.service) expresses an occurrence:
-// it fires on this Automation's own transitions, owns no target and arbitrates
-// with nothing.
+// http.request, notification.*, homeassistant.service, qbittorrent.*) expresses
+// an occurrence: it fires on this Automation's own transitions, owns no target
+// and arbitrates with nothing.
+//
+// The dividing line is not "does this express a level" — pausing a torrent
+// client plainly does. It is whether there is somewhere to record the value the
+// target held before Reactor claimed it, so that release can put it back. For a
+// Kubernetes object that is an annotation on the object; for anything else
+// there is no answer yet, which is why qbittorrent.* is an edge action and is
+// named as a verb. See the QBittorrent type.
 //
 // A desired-state action's level is an integer the arbiter orders and nothing
 // more, so a boolean level is carried as its own field — replicas for a count,
@@ -274,6 +333,7 @@ type Notification struct {
 // The units differ; the ordering does not.
 // +kubebuilder:validation:XValidation:rule="(self.type == 'http.request') == has(self.request)",message="spec.actions: request is required by http.request and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="(self.type == 'homeassistant.service') == has(self.homeAssistant)",message="spec.actions: homeAssistant is required by homeassistant.service and rejected on every other type"
+// +kubebuilder:validation:XValidation:rule="self.type.startsWith('qbittorrent.') == has(self.qbittorrent)",message="spec.actions: qbittorrent is required by the qbittorrent.* types and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type.startsWith('notification.') == has(self.notification)",message="spec.actions: notification is required by the notification.* types and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type.startsWith('kubernetes.') == has(self.target)",message="spec.actions: target is required by the kubernetes.* actions and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type == 'kubernetes.scale' || !has(self.replicas)",message="spec.actions: replicas belongs to kubernetes.scale"
@@ -285,7 +345,7 @@ type Notification struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.target) || self.type != 'kubernetes.restart' || self.target.kind in ['Deployment', 'StatefulSet']",message="spec.actions: kubernetes.restart targets a kind with a pod template: Deployment or StatefulSet"
 type Action struct {
 	// Type of the action, e.g. "kubernetes.scale".
-	// +kubebuilder:validation:Enum=kubernetes.scale;kubernetes.cronjob.suspend;kubernetes.cordon;kubernetes.restart;http.request;notification.ntfy;notification.discord;notification.slack;homeassistant.service
+	// +kubebuilder:validation:Enum=kubernetes.scale;kubernetes.cronjob.suspend;kubernetes.cordon;kubernetes.restart;http.request;notification.ntfy;notification.discord;notification.slack;homeassistant.service;qbittorrent.pause;qbittorrent.resume
 	Type string `json:"type"`
 
 	// Target of a kubernetes.* action.
@@ -335,6 +395,10 @@ type Action struct {
 	// HomeAssistant is the service call a homeassistant.service action makes.
 	// +optional
 	HomeAssistant *HomeAssistantService `json:"homeAssistant,omitempty"`
+
+	// QBittorrent is the instance a qbittorrent.* action acts on.
+	// +optional
+	QBittorrent *QBittorrent `json:"qbittorrent,omitempty"`
 
 	// TimeoutSeconds bounds a single attempt at this action, so an
 	// unreachable target or endpoint cannot occupy a reconcile indefinitely.

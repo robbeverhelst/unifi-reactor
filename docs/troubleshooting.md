@@ -608,6 +608,9 @@ kubectl -n media describe automation notify-on-failover | grep EdgeAction
 | `rendering template` | A message referenced a field or state key that does not exist | `{{ .State.wan }}` errors on a typo, by design |
 | `has no "authorization" key` | `homeassistant.service` found no token, and refuses to collect a 401 to find out | Add `authorization=Bearer <long-lived-token>` to the Secret |
 | `did not render to a JSON object` | `homeAssistant.data` rendered to a list, a bare string or nothing | Service data is an object: `{"entity_id": "light.hall"}` |
+| `set no "SID" cookie` | qBittorrent rejected the username or password. It answers a wrong one with `200 OK` and no cookie, not a 401 | Check the `username` and `password` keys in the Secret |
+| `needs both a "username" and a "password"` | `qbittorrent.*` found only one of them | Both are required; an instance that bypasses authentication is an `http.request`, not this action |
+| `responded 404 Not Found` on `/torrents/pause` | qBittorrent 5.0 deprecated `pause`/`resume` in favour of `stop`/`start`; an instance that removed them answers 404 | Report it — Reactor uses the compatible names deliberately |
 
 An empty `status.edgeActions` when you expected one means the action never fired rather than failed. That is one of:
 

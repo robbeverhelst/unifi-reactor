@@ -48,6 +48,11 @@ const (
 	reasonEdgeActionSent    = "EdgeActionSent"
 	reasonEdgeActionFailed  = "EdgeActionFailed"
 	reasonEdgeActionSkipped = "EdgeActionSkipped"
+	// verbApplied, verbCommanded and verbDelivered are how an Event says what an
+	// edge action did. See edgeVerbs for which goes with what.
+	verbApplied   = "applied to"
+	verbCommanded = "applied at"
+	verbDelivered = "delivered to"
 	// edgeActionBudget bounds every edge action on one transition put together,
 	// so a list of unreachable endpoints delays this Automation rather than
 	// occupying a reconcile worker indefinitely. Actions left when it runs out
@@ -166,15 +171,23 @@ func (r *AutomationReconciler) reportEdgeAction(
 	}
 }
 
-// edgeVerbs says what an edge action did in words that fit what it acted on. A
-// request is delivered to a destination; a restart is applied to an object, and
-// reading "delivered to Deployment/media/sonarr" at 3am would make an operator
-// wonder what was delivered.
+// edgeVerbs says what an edge action did in words that fit what it acted on.
+//
+// A notification is delivered to a destination; a restart is applied to an
+// object, and reading "delivered to Deployment/media/sonarr" at 3am would make
+// an operator wonder what was delivered. The named integrations sit between the
+// two — they command a service at an address rather than announcing anything to
+// it, so "delivered" would read as if a message had gone out.
 func edgeVerbs(actionType string) (done, failed string) {
-	if isKubernetesAction(actionType) {
-		return "applied to", "was not applied"
+	switch {
+	case isKubernetesAction(actionType):
+		return verbApplied, "was not applied"
+	case actionType == actions.TypeHomeAssistant,
+		actionType == actions.TypeQBittorrentPause,
+		actionType == actions.TypeQBittorrentResume:
+		return verbCommanded, "was not applied at"
 	}
-	return "delivered to", "was not delivered"
+	return verbDelivered, "was not delivered"
 }
 
 // runEdgeAction performs one edge action.
@@ -248,6 +261,8 @@ func (r *AutomationReconciler) buildRequest(
 		return r.buildHTTPRequest(ctx, automation, action, data, timeout)
 	case actions.TypeHomeAssistant:
 		return r.buildHomeAssistantRequest(ctx, automation, action, data, timeout)
+	case actions.TypeQBittorrentPause, actions.TypeQBittorrentResume:
+		return r.buildQBittorrentRequest(ctx, automation, action, timeout)
 	default:
 		return r.buildNotification(ctx, automation, action, data, timeout)
 	}
@@ -411,6 +426,43 @@ func (r *AutomationReconciler) buildHomeAssistantRequest(
 		Retryable: spec.Idempotent != nil && *spec.Idempotent,
 		Timeout:   timeout,
 	}, nil
+}
+
+// buildQBittorrentRequest turns one qbittorrent.pause or qbittorrent.resume
+// into the login-act-logout exchange it needs.
+//
+// Nothing is templated here, and there is nothing to template: the action takes
+// no message and no body, and its only parameters are where the instance is and
+// who to log in as. That is a smaller surface than http.request, which is the
+// trade an integration is supposed to make.
+func (r *AutomationReconciler) buildQBittorrentRequest(
+	ctx context.Context,
+	automation *reactorv1alpha1.Automation,
+	action reactorv1alpha1.Action,
+	timeout time.Duration,
+) (actions.Request, error) {
+	spec := action.QBittorrent
+	if spec == nil {
+		return actions.Request{}, fmt.Errorf("%s needs a qbittorrent block", action.Type)
+	}
+
+	credentials, err := r.credentialsFor(ctx, automation, spec.SecretRef.Name)
+	if err != nil {
+		return actions.Request{}, err
+	}
+	base, err := destinationFrom(
+		action.Type, "qbittorrent.url", spec.URL, credentials.URL, spec.SecretRef.Name)
+	if err != nil {
+		return actions.Request{}, err
+	}
+	if credentials.Username == "" || credentials.Password == "" {
+		return actions.Request{}, fmt.Errorf(
+			"secret %q needs both a %q and a %q key: qBittorrent issues a session rather than accepting a token",
+			spec.SecretRef.Name, actions.SecretKeyUsername, actions.SecretKeyPassword)
+	}
+
+	return actions.QBittorrentRequest(
+		action.Type, base, credentials.Username, credentials.Password, timeout)
 }
 
 // retryable decides whether a failed request may be sent again.

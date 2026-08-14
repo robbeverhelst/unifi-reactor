@@ -36,6 +36,13 @@ const (
 	// SecretKeyHeaderPrefix marks a key whose remainder is a header name, for
 	// the services that want their own, e.g. "header-X-Api-Key".
 	SecretKeyHeaderPrefix = "header-"
+	// SecretKeyUsername and SecretKeyPassword are for a service that issues a
+	// session rather than accepting a token — qBittorrent's WebUI is the one
+	// shipped. They are deliberately not turned into a header: nothing sends
+	// them anywhere except the login leg of a Session, which is the only place
+	// they are read.
+	SecretKeyUsername = "username"
+	SecretKeyPassword = "password"
 )
 
 // headerNameChars is the token character set a header name may use, per
@@ -49,6 +56,10 @@ type Credentials struct {
 	URL string
 	// Header carries the credential headers.
 	Header http.Header
+	// Username and Password are for a service that issues a session. They never
+	// become a header and never leave the login leg they were read for.
+	Username string
+	Password string
 }
 
 // CredentialsFrom reads the recognised keys out of a Secret's data.
@@ -72,6 +83,10 @@ func CredentialsFrom(secretName string, data map[string][]byte) (Credentials, er
 		switch {
 		case key == SecretKeyURL:
 			credentials.URL = value
+		case key == SecretKeyUsername:
+			credentials.Username = value
+		case key == SecretKeyPassword:
+			credentials.Password = value
 		case key == SecretKeyAuthorization:
 			if err := usableHeaderValue(secretName, key, value); err != nil {
 				return Credentials{}, err

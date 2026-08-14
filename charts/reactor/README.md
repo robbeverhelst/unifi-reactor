@@ -260,7 +260,7 @@ Worth knowing before switching it on:
 
 ## Outbound actions
 
-`http.request`, the `notification.*` types and the named integrations (`homeassistant.service`) send a request out of the cluster. All of them are **off until you say where they may go**, and all of them go through one client, so this one value covers every current and future outbound action type:
+`http.request`, the `notification.*` types and the named integrations (`homeassistant.service`, `qbittorrent.pause` / `qbittorrent.resume`) send a request out of the cluster. All of them are **off until you say where they may go**, and all of them go through one client, so this one value covers every current and future outbound action type:
 
 ```yaml
 actions:
@@ -311,6 +311,7 @@ kubectl -n media create secret generic ntfy-credentials \
 | `url` | The destination. Required for `notification.*`; an alternative to `request.url` for `http.request` and to `homeAssistant.url` for `homeassistant.service` |
 | `authorization` | Sent as the `Authorization` header. This is where a Home Assistant long-lived access token goes, as `Bearer <token>` |
 | `header-<Name>` | Sent as the header `<Name>`, e.g. `header-X-Api-Key` |
+| `username` / `password` | The login for a service that issues a session rather than accepting a token — `qbittorrent.*`. They never become a header, and the session they produce is ended rather than cached |
 
 The Secret must live in the `Automation`'s own namespace — there is no namespace field on `secretRef`, on purpose. Nothing from it is logged, put in status, or attached to an `Event`; a destination is only ever reported as `scheme://host:port`.
 

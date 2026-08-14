@@ -122,6 +122,12 @@ const (
 	//                       notify.* and button.press are not, and the action
 	//                       cannot tell which one it was handed. The author can,
 	//                       which is why the declaration is theirs to make.
+	//   - qbittorrent.*     retried. This is the one edge action that can argue
+	//                       idempotence rather than assert it: pausing a paused
+	//                       torrent is a no-op and so is resuming a running one.
+	//                       A retry re-runs the whole exchange, login included,
+	//                       and a rejected credential is not transient so it
+	//                       stops at the first attempt.
 	//   - kubernetes.restart AT-MOST-ONCE, unconditionally. Every execution rolls
 	//                       the workload, so a retry after an ambiguous failure
 	//                       is a second outage rather than a correction — and

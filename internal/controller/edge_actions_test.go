@@ -48,6 +48,10 @@ const (
 	// path rules themselves.
 	haDomain  = "light"
 	haService = "turn_on"
+	// The qBittorrent fixtures, on a documentation address that resolves
+	// nowhere. The exchange itself is covered in internal/actions.
+	qbitURL        = "http://qbittorrent.example.com:8080"
+	qbitSecretName = "qbittorrent-credentials"
 )
 
 // recordingDoer stands in for the outbound transport. No test here opens a
@@ -403,22 +407,43 @@ var _ = Describe("Edge actions", func() {
 		})
 	})
 
-	Context("schema validation", func() {
-		// The action type enum is a CRD schema change, and the CEL rules beside
-		// it are what stop a type and its configuration block drifting apart.
-		rejects := func(name string, action reactorv1alpha1.Action) {
-			automation := &reactorv1alpha1.Automation{
-				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
-				Spec: reactorv1alpha1.AutomationSpec{
-					When: &reactorv1alpha1.StateTrigger{
-						Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
-					},
-					Actions: []reactorv1alpha1.Action{action},
+	// The action type enum is a CRD schema change, and the CEL rules beside it
+	// are what stop a type and its configuration block drifting apart. These
+	// run against a real API server, which is the only thing that compiles CEL.
+	rejects := func(name string, action reactorv1alpha1.Action) {
+		automation := &reactorv1alpha1.Automation{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+			Spec: reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
 				},
-			}
-			Expect(k8sClient.Create(ctx, automation)).NotTo(Succeed())
+				Actions: []reactorv1alpha1.Action{action},
+			},
 		}
+		Expect(k8sClient.Create(ctx, automation)).NotTo(Succeed())
+	}
 
+	Context("what an Event says an action did", func() {
+		// The Event is what an operator reads instead of controller logs, so the
+		// verb has to fit what was acted on: a message is delivered, an object
+		// is applied to, and a service is commanded at an address.
+		It("uses a verb that fits the thing acted on", func() {
+			for actionType, want := range map[string]string{
+				actions.TypeNtfy:              verbDelivered,
+				actions.TypeHTTPRequest:       verbDelivered,
+				actionKubernetesRestart:       verbApplied,
+				actions.TypeHomeAssistant:     verbCommanded,
+				actions.TypeQBittorrentPause:  verbCommanded,
+				actions.TypeQBittorrentResume: verbCommanded,
+			} {
+				done, failed := edgeVerbs(actionType)
+				Expect(done).To(Equal(want), actionType)
+				Expect(failed).NotTo(BeEmpty(), actionType)
+			}
+		})
+	})
+
+	Context("schema validation", func() {
 		It("rejects an action whose type and configuration block disagree", func() {
 			rejects("no-notification", reactorv1alpha1.Action{Type: actions.TypeNtfy})
 			rejects("no-request", reactorv1alpha1.Action{Type: actions.TypeHTTPRequest})
@@ -642,6 +667,122 @@ var _ = Describe("Edge actions", func() {
 				}
 				Expect(k8sClient.Create(ctx, automation)).NotTo(Succeed())
 			}
+		})
+	})
+
+	Context("qbittorrent.pause and qbittorrent.resume", func() {
+		qbit := func(actionType string) reactorv1alpha1.Action {
+			return reactorv1alpha1.Action{
+				Type: actionType,
+				QBittorrent: &reactorv1alpha1.QBittorrent{
+					URL:       qbitURL,
+					SecretRef: reactorv1alpha1.SecretReference{Name: qbitSecretName},
+				},
+			}
+		}
+
+		It("pauses on the way in and resumes on the way out, each on its own edge", func() {
+			const name = "edge-qbit"
+			createSecret(qbitSecretName, map[string][]byte{
+				actions.SecretKeyUsername: []byte("reactor"),
+				actions.SecretKeyPassword: []byte("hunter2"),
+			})
+			createAutomation(name, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
+				},
+				Actions: []reactorv1alpha1.Action{qbit(actions.TypeQBittorrentPause)},
+				OnExit:  []reactorv1alpha1.Action{qbit(actions.TypeQBittorrentResume)},
+			})
+
+			observe(map[string]string{keyWAN: wanBackup})
+			reconcileOnce(name)
+			observe(map[string]string{keyWAN: wanPrimary})
+			reconcileOnce(name)
+
+			sent := outbound.requests()
+			Expect(sent).To(HaveLen(2))
+			Expect(sent[0].URL).To(Equal(qbitURL + "/api/v2/torrents/pause"))
+			Expect(sent[1].URL).To(Equal(qbitURL + "/api/v2/torrents/resume"))
+
+			By("carrying a login and a logout around each one")
+			for _, request := range sent {
+				Expect(request.Session).NotTo(BeNil())
+				Expect(request.Session.Cookie).To(Equal("SID"))
+				Expect(request.Session.Login.URL).To(Equal(qbitURL + "/api/v2/auth/login"))
+				Expect(request.Session.Logout.URL).To(Equal(qbitURL + "/api/v2/auth/logout"))
+				Expect(string(request.Body)).To(Equal("hashes=all"))
+				Expect(request.Retryable).To(BeTrue(),
+					"pausing a paused torrent is a no-op, which is the one edge action that can argue this")
+			}
+
+			By("carrying no credential in the Automation's status")
+			status := statusOf(name)
+			Expect(status.EdgeActions).To(HaveLen(1))
+			Expect(status.EdgeActions[0].Type).To(Equal(actions.TypeQBittorrentResume))
+			Expect(status.EdgeActions[0].Status).To(Equal(executionSuccess))
+		})
+
+		It("refuses to act without both a username and a password", func() {
+			const name = "edge-qbit-half-credentials"
+			createSecret(qbitSecretName, map[string][]byte{
+				actions.SecretKeyUsername: []byte("reactor"),
+			})
+			createAutomation(name, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
+				},
+				Actions: []reactorv1alpha1.Action{qbit(actions.TypeQBittorrentPause)},
+			})
+
+			observe(map[string]string{keyWAN: wanBackup})
+			reconcileOnce(name)
+
+			Expect(outbound.requests()).To(BeEmpty())
+			Expect(statusOf(name).EdgeActions[0].Reason).To(
+				ContainSubstring(actions.SecretKeyPassword))
+		})
+
+		// It owns no target and takes part in no arbitration — status.targets
+		// stays empty, which is the difference between this and a
+		// kubernetes.scale that would express the same intent more bluntly.
+		It("claims nothing, so nothing is arbitrated over it", func() {
+			const name = "edge-qbit-unarbitrated"
+			createSecret(qbitSecretName, map[string][]byte{
+				actions.SecretKeyUsername: []byte("reactor"),
+				actions.SecretKeyPassword: []byte("hunter2"),
+			})
+			createAutomation(name, reactorv1alpha1.AutomationSpec{
+				When: &reactorv1alpha1.StateTrigger{
+					Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
+				},
+				Actions: []reactorv1alpha1.Action{qbit(actions.TypeQBittorrentPause)},
+			})
+
+			observe(map[string]string{keyWAN: wanBackup})
+			reconcileOnce(name)
+
+			Expect(statusOf(name).Targets).To(BeEmpty())
+		})
+
+		It("rejects a target on it, and a qbittorrent block on anything else", func() {
+			rejects("qbit-no-block", reactorv1alpha1.Action{Type: actions.TypeQBittorrentPause})
+			rejects("qbit-targeted", reactorv1alpha1.Action{
+				Type:   actions.TypeQBittorrentPause,
+				Target: &reactorv1alpha1.TargetRef{Kind: kindDeployment, Name: targetQbit},
+				QBittorrent: &reactorv1alpha1.QBittorrent{
+					URL:       qbitURL,
+					SecretRef: reactorv1alpha1.SecretReference{Name: qbitSecretName},
+				},
+			})
+			rejects("qbit-block-on-scale", reactorv1alpha1.Action{
+				Type:   actionKubernetesScale,
+				Target: &reactorv1alpha1.TargetRef{Kind: kindDeployment, Name: targetQbit},
+				QBittorrent: &reactorv1alpha1.QBittorrent{
+					URL:       qbitURL,
+					SecretRef: reactorv1alpha1.SecretReference{Name: qbitSecretName},
+				},
+			})
 		})
 	})
 })
