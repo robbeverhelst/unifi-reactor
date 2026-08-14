@@ -1453,6 +1453,7 @@ See the [chart reference](charts/reactor/README.md#webhook-fast-path-optional-of
 - [UniFi Alarm Manager API](docs/unifi-alarm-manager-api.md) — reverse-engineered notes on configuring UniFi's outbound webhooks programmatically
 - [Writing to a UniFi console](docs/unifi-write-api.md) — what the `unifi.*` actions send, split into what was observed on real hardware and what is inferred
 - [Development](docs/development.md) — building, testing, and running against a local cluster
+- [Distribution](docs/distribution.md) — the Artifact Hub listing, why the chart carries no `signKey`, and which lists this project does and does not qualify for
 - [Contributing](CONTRIBUTING.md) — the dev loop, conventional commits, and the fixture capture policy
 - [Security policy](SECURITY.md) — the outbound-action threat model, how to report a vulnerability, and how to verify a signed release
 

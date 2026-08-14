@@ -21,6 +21,10 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+          # Full history and tags: the Artifact Hub changes annotation is
+          # derived from the commits between this tag and the one before it,
+          # and a shallow clone has neither.
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
@@ -74,6 +78,18 @@ jobs:
 
       - name: Set up Helm
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+
+      - name: Add the Artifact Hub changes annotation
+        run: |
+          # Written onto the runner's copy of Chart.yaml, never committed: it
+          # describes one release, so a version of it in git would be stale the
+          # moment the next tag is cut. A release with nothing to list is a
+          # normal outcome and is not an error.
+          ./hack/artifacthub-changes.sh --write "${GITHUB_REF_NAME}" \
+            || echo "::warning::no artifacthub.io/changes annotation for ${GITHUB_REF_NAME}"
+          # Whatever happened above, the chart must still parse — checked here,
+          # before anything is published, rather than on Artifact Hub after.
+          helm show chart charts/reactor > /dev/null
 
       - name: Package and push Helm chart (OCI)
         id: chart
