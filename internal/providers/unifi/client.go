@@ -20,7 +20,9 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"strings"
@@ -36,6 +38,25 @@ import (
 const (
 	DefaultLowBatteryPercent      = 30
 	DefaultCriticalBatteryPercent = 10
+)
+
+// Default UPS runtime and load thresholds.
+//
+// The runtime pair is chosen against the debounce it ships with rather than in
+// isolation. ups.runtime settles over 2 samples — 60 seconds at the default
+// poll — so a critical threshold of 180 seconds leaves two minutes of headroom
+// between Reactor believing the reading and the UPS running out. Moving one of
+// these without the other is how that headroom disappears.
+const (
+	// DefaultShortRuntimeSeconds is remaining runtime at or below which
+	// ups.runtime reports "short": start winding down.
+	DefaultShortRuntimeSeconds = 600
+	// DefaultCriticalRuntimeSeconds is where it reports "critical": stop.
+	DefaultCriticalRuntimeSeconds = 180
+	// DefaultHighLoadPercent is the draw, as a percentage of the UPS's power
+	// budget, at or above which ups.load reports "high". The capture was taken
+	// at 310W of a 1000W budget.
+	DefaultHighLoadPercent = 80.0
 )
 
 // APIKey supplies the key sent with a request. It is resolved per request
@@ -81,6 +102,18 @@ type Client struct {
 	LowBatteryPercent      int
 	CriticalBatteryPercent int
 
+	// ShortRuntimeSeconds and CriticalRuntimeSeconds bound the ups.runtime
+	// state key, and HighLoadPercent bounds ups.load.
+	ShortRuntimeSeconds    int
+	CriticalRuntimeSeconds int
+	HighLoadPercent        float64
+
+	// MinAvailabilityPercent and MaxLatencyMs bound the wan.quality state key.
+	// The live uplink is good while it is at least this available and no
+	// slower than this on average, over the console's own uptime window.
+	MinAvailabilityPercent float64
+	MaxLatencyMs           float64
+
 	// mu guards previous only.
 	mu sync.Mutex
 	// previous remembers the last WAN signals so that a change in one can be
@@ -106,6 +139,11 @@ func NewClient(baseURL string, apiKey APIKey, site string, insecureSkipVerify bo
 		site:                   site,
 		LowBatteryPercent:      DefaultLowBatteryPercent,
 		CriticalBatteryPercent: DefaultCriticalBatteryPercent,
+		ShortRuntimeSeconds:    DefaultShortRuntimeSeconds,
+		CriticalRuntimeSeconds: DefaultCriticalRuntimeSeconds,
+		HighLoadPercent:        DefaultHighLoadPercent,
+		MinAvailabilityPercent: DefaultMinAvailabilityPercent,
+		MaxLatencyMs:           DefaultMaxLatencyMs,
 		http: &http.Client{
 			Timeout: 10 * time.Second,
 			Transport: &http.Transport{
@@ -174,50 +212,107 @@ type vbmsTable struct {
 	BattPool      struct {
 		BatteryLevel int  `json:"batteryLevel"`
 		IsCharging   bool `json:"ischarging"`
-		TimeToRemain int  `json:"timeToRemain"`
 		AvailableCnt int  `json:"batt_available_cnt"`
+		// TimeToRemain is seconds of runtime at the current load — inferred
+		// from one observation (1043 on a UPS 2U drawing 310W), never yet
+		// checked against a real outage. Zero and negative both mean "no
+		// estimate": the same block uses -1 that way for battery_avr_time, and
+		// an absent field decodes to 0, which is not a runtime anyone should
+		// act on either.
+		TimeToRemain int `json:"timeToRemain"`
+		// TotalPowerOutput and TotalPowerBudget are watts drawn and watts
+		// available. Pointers for the same reason the health numbers are: an
+		// absent output would decode as 0W and report a fully loaded UPS as
+		// idle, which is the wrong direction to be wrong in.
+		TotalPowerOutput *float64 `json:"device_total_power_output"`
+		TotalPowerBudget *float64 `json:"device_total_power_budget"`
 	} `json:"battpool"`
 }
 
 // Observe returns the normalized UniFi state map. Keys are only present when
 // the corresponding hardware is visible to the controller:
 //
-//	wan         primary | backup      (which uplink the gateway is using)
-//	isp         a slug, or unknown    (the carrier behind the live uplink)
-//	ups         online  | on-battery  (whether the UPS is running on mains)
-//	ups.battery normal  | low | critical
+//	wan          primary | backup      (which uplink the gateway is using)
+//	wan.quality  good    | degraded    (how well that uplink is performing)
+//	isp          a slug, or unknown    (the carrier behind the live uplink)
+//	internet     ok | degraded | down  (whether the outside world is reachable)
+//	ups          online  | on-battery  (whether the UPS is running on mains)
+//	ups.battery  normal  | low | critical
+//	ups.runtime  ample   | short | critical
+//	ups.load     normal  | high
 //
 // ups and ups.battery are deliberately independent: a `when: {ups: on-battery}`
 // automation must stay matched for the whole outage, including as the battery
 // drains, instead of flipping out of its matching state (which would run its
-// onExit actions in the middle of a power failure).
+// onExit actions in the middle of a power failure). wan and internet are
+// independent for the same kind of reason and a different one: they answer
+// different questions, and the case where the link is up, the uplink is
+// unchanged and there is no internet is precisely the one wan cannot express.
+//
+// Two endpoints are read, and either may fail without taking the other's keys
+// with it. Only observing nothing at all is an error.
 func (c *Client) Observe(ctx context.Context) (map[string]string, error) {
-	url := fmt.Sprintf("%s/proxy/network/api/s/%s/stat/device", c.baseURL, c.site)
+	log := logf.FromContext(ctx).WithName("unifi-observe")
+	state := map[string]string{}
+
+	var devices deviceStatResponse
+	deviceErr := c.get(ctx, "stat/device", &devices)
+	if deviceErr == nil {
+		var fromDevices map[string]string
+		fromDevices, deviceErr = c.stateFromDevices(ctx, devices)
+		maps.Copy(state, fromDevices)
+	}
+
+	// The health endpoint is a second call rather than a second parse of the
+	// first, so it fails separately. Losing it costs internet and wan.quality,
+	// which then vanish from the observation and are held as last known state
+	// by anything matching them — the same degradation a UPS dropping off the
+	// console produces, and the same reason it must not be an error here.
+	var health healthResponse
+	healthErr := c.get(ctx, "stat/health", &health)
+	if healthErr == nil {
+		c.mergeHealth(ctx, state, health, state[stateKeyWAN])
+	}
+
+	if len(state) == 0 {
+		return nil, errors.Join(deviceErr, healthErr)
+	}
+	if deviceErr != nil {
+		log.Error(deviceErr, "The device endpoint failed; the keys derived from it are unavailable this poll")
+	}
+	if healthErr != nil {
+		log.Error(healthErr, "The health endpoint failed; internet and wan.quality are unavailable this poll")
+	}
+	return state, nil
+}
+
+// get fetches one site-scoped endpoint and decodes it. The API key is resolved
+// per request, so a rotated credential takes effect on the next call.
+func (c *Client) get(ctx context.Context, endpoint string, out any) error {
+	url := fmt.Sprintf("%s/proxy/network/api/s/%s/%s", c.baseURL, c.site, endpoint)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	apiKey, err := c.apiKey()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	req.Header.Set("X-API-KEY", apiKey)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("polling unifi device state: %w", err)
+		return fmt.Errorf("polling unifi %s: %w", endpoint, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("polling unifi device state: unexpected status %d", resp.StatusCode)
+		return fmt.Errorf("polling unifi %s: unexpected status %d", endpoint, resp.StatusCode)
 	}
-
-	var parsed deviceStatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return nil, fmt.Errorf("decoding unifi device state: %w", err)
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("decoding unifi %s: %w", endpoint, err)
 	}
-	return c.stateFromDevices(ctx, parsed)
+	return nil
 }
 
 // stateFromDevices derives the state map from a device list. The first record
@@ -246,6 +341,16 @@ func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse
 				state[stateKeyUPS] = upsOnBattery
 			}
 			state[stateKeyUPSBattery] = c.batteryLevel(d.VBMS.BattPool.BatteryLevel)
+			// Runtime and load are each published only when the UPS reports
+			// the numbers behind them. A UPS that reports charge but no
+			// runtime estimate is a real thing to be, and inventing one is
+			// worse than omitting the key.
+			if runtime := c.runtimeLevel(d.VBMS.BattPool.TimeToRemain); runtime != "" {
+				state[stateKeyUPSRuntime] = runtime
+			}
+			if load := c.loadLevel(d.VBMS.BattPool.TotalPowerOutput, d.VBMS.BattPool.TotalPowerBudget); load != "" {
+				state[stateKeyUPSLoad] = load
+			}
 		}
 	}
 
@@ -444,6 +549,51 @@ func slugify(name string) string {
 		}
 	}
 	return b.String()
+}
+
+// runtimeLevel buckets the UPS's own estimate of how long it can carry the
+// current load. An empty result means the UPS offered no estimate.
+//
+// This is a better shutdown trigger than charge, and that is the whole point of
+// the key: charge ignores load, and timeToRemain does not. It is published on
+// mains as well as on battery, because "could we even survive an outage right
+// now" is worth being able to ask before one starts.
+func (c *Client) runtimeLevel(seconds int) string {
+	if seconds <= 0 {
+		return ""
+	}
+	short, critical := c.ShortRuntimeSeconds, c.CriticalRuntimeSeconds
+	if short <= 0 {
+		short = DefaultShortRuntimeSeconds
+	}
+	if critical <= 0 {
+		critical = DefaultCriticalRuntimeSeconds
+	}
+	switch {
+	case seconds <= critical:
+		return upsRuntimeCritical
+	case seconds <= short:
+		return upsRuntimeShort
+	default:
+		return upsRuntimeAmple
+	}
+}
+
+// loadLevel buckets the draw as a fraction of the UPS's budget. An empty result
+// means the UPS reported no usable pair of numbers — a missing output, or a
+// budget of zero, which no fraction can be taken against.
+func (c *Client) loadLevel(output, budget *float64) string {
+	if output == nil || budget == nil || *budget <= 0 {
+		return ""
+	}
+	high := c.HighLoadPercent
+	if high <= 0 {
+		high = DefaultHighLoadPercent
+	}
+	if (*output / *budget * 100) >= high {
+		return upsLoadHigh
+	}
+	return upsLoadNormal
 }
 
 func (c *Client) batteryLevel(percent int) string {

@@ -20,7 +20,7 @@ The allowlist matters more than it looks. `stat/device` returns entire device re
 | --- | --- | --- |
 | `api/stat-device-gateway.json` | `GET /proxy/network/api/s/<site>/stat/device` (gateway) | `wan1`/`wan2` (`is_uplink`, `up`, `ifname`, `speed`), `uplink`, `last_wan_status`, `isp` (allowlisted from `active_geo_info.WAN.isp_name`) |
 | `api/stat-device-ups.json` | same call, UPS record | `vbms_table` battery state, `outlet_table` |
-| `api/stat-health.json` | `GET /proxy/network/api/s/<site>/stat/health` | per-subsystem `status`, WAN `uptime_stats` monitors, ISP |
+| `api/stat-health.json` | `GET /proxy/network/api/s/<site>/stat/health` | per-subsystem `status` (the `internet` key), WAN `uptime_stats` monitors (the `wan.quality` key), ISP |
 | `api/integration-info.json` | `GET /proxy/network/integration/v1/info` | controller version, for the compatibility guard |
 | `api/integration-sites.json` | `GET /proxy/network/integration/v1/sites` | site listing |
 
@@ -55,6 +55,70 @@ curl -X POST 'http://localhost:9443/wan?link=primary'                          #
 ```
 
 The same hypotheses are asserted in `internal/providers/unifi/wan_test.go`, derived there from the committed capture in code, with each transformation written out. **None of them is a fixture.** A file in `testdata/` claims to have come off a console; a hypothesis has not, and the two must never be confusable. The runbook below is the only thing that produces a real one.
+
+## Internet reachability and link quality (`stat/health`)
+
+Two keys come from this capture, and they answer different questions over
+different time horizons.
+
+`internet` is the `www` subsystem's `status`, mapped `ok` → `ok`,
+`warning` → `degraded`, `error` → `down`. Anything else — including `unknown`,
+which the capture shows the `vpn` subsystem using for "nothing configured
+here" — publishes no key at all, so an unfamiliar status holds whatever an
+Automation last matched instead of being read as "fine".
+
+> ⚠️ **The failure values are inferred.** `ok`, `warning` and `unknown` all
+> appear in this one capture — on `wan`, `wlan` and `vpn` respectively — so the
+> status *vocabulary* is observed. But the `www` subsystem has only ever been
+> seen saying `ok`, so which value it takes when the internet is actually
+> unreachable is unconfirmed, and `error` has never been captured on any
+> subsystem. See the runbook below.
+
+`wan.quality` comes from the `wan` subsystem's `uptime_stats`, keyed by uplink
+exactly as `last_wan_status` is. Two things in that block are worth knowing
+before reading the parser:
+
+| Field | In the capture | What the provider does with it |
+| --- | --- | --- |
+| `availability`, `latency_average` | `100.0` and `16` on `WAN`; **absent** on `WAN2` and `WAN3` | bucketed into `good`/`degraded` against configurable thresholds |
+| `monitors[]`, `alerting_monitors[]` | present on all three uplinks, each with its own `availability` | averaged as a fallback when the uplink-level fields are missing |
+| `time_period` | `86400` on `WAN` only | never derived from — logged, because it is what makes a threshold interpretable |
+| `uptime` | `98787` on `WAN` only | a third, independent opinion on which uplink is live (see below) |
+
+The absence pattern is the load-bearing observation. The console **omits**
+these fields rather than reporting zero — `WAN2` has been down for the whole
+window and carries `downtime` but no `availability` at all — so every number in
+the parser is decoded into a pointer. Reading an absent field as `0` would turn
+a truncated response into "this link is 0% available", which is the difference
+between holding state and shedding a cluster's load.
+
+Whether that omission is the console suppressing zero values (a Go
+`omitempty`, which the monitors' own `availability: 0.0` argues against) or
+something about how a dead uplink is summarized is not settled by one capture,
+and the parser does not need it to be: a missing field is treated as missing
+either way.
+
+### A third opinion on the `wan` mapping
+
+`uptime` is the only field the capture shows exclusively on the live uplink,
+and it is qualitatively different from the other WAN signals: it is traffic the
+console watched pass, where `is_uplink` and `uplink.name` are both statements
+about *configuration*. So the provider counts a
+`reactor_provider_signal_disagreements_total{signal="wan-health-disagrees"}`
+when uptime is accumulating on an uplink other than the one `wan` names.
+
+It is deliberately narrow — nothing fires unless *some* uplink has uptime and
+the believed one does not, which is the shape of "the mapping is pointing at
+the wrong port" rather than of "this link is having a bad day". It also does
+not yet *resolve* anything: `wan` is still derived from `is_uplink`, because
+promoting a new signal of record needs a real failover to have been observed
+and one has not been. Add the health comparison to the deliverable below and
+it might.
+
+There is deliberately **no** disagreement signal for `internet: down` while
+`wan: primary`. That is not a contradiction — it is precisely the failure mode
+`internet` was added to observe, and counting it would fire the metric on
+exactly the case the key exists for.
 
 ## Capturing a real failover
 
@@ -117,8 +181,14 @@ for f in *-health.json; do
   echo "== $f"
   jq -c '.data[] | select(.subsystem == "wan") | {
     status, wan_ip, isp_name, isp_organization,
-    uptime: (.uptime_stats | to_entries | map({(.key): {up: .value.uptime, down: .value.downtime}}))
+    uptime: (.uptime_stats | to_entries | map({(.key): {
+      up: .value.uptime, down: .value.downtime,
+      av: .value.availability, lat: .value.latency_average
+    }}))
   }' "$f"
+  # The www subsystem is the whole of the internet key. Its status during a
+  # real outage is the single most valuable unknown in this runbook.
+  jq -c '[.data[] | {subsystem, status}]' "$f"
 done
 ```
 
@@ -132,6 +202,9 @@ What each answer settles:
 | Does `uplink.name` follow the live port? | every stage | promotes or demotes the second signal |
 | What does `last_wan_status` say for a downed uplink? | stage 2 onward | **the unknown value.** Only `online` has ever been seen; whatever appears here is what the provider can start trusting |
 | Does `isp_name` change, and how many polls late? | stages 3 and 5 | sets the `isp` debounce, currently 2 samples on the assumption of one blank poll |
+| Does `uptime` move to the backup's key, and how fast? | every stage | **promotes or demotes the third signal.** Uptime is passed traffic rather than configuration, so if it tracks the live uplink it is the best candidate to become the signal of record |
+| What does the `www` subsystem say while the primary is down? | stage 2 especially | **the biggest unknown in `internet`.** Only `ok` has ever been seen. Whatever appears is what `down` and `degraded` should actually map to |
+| Does `availability` fall, and over what timescale? | stages 2–5 | says whether the `wan.quality` threshold is reactive or a next-day verdict, and whether the default of 99% is anywhere near right |
 | What did Reactor log? | the `unifi-wan` lines | a disagreement warning at stage 3 means one of the signals is wrong; silence means they all moved together |
 
 Only then commit anything, and only through the capture script:
@@ -155,7 +228,22 @@ A UniFi UPS is reported as a switch-type device (`USWDA26`) carrying:
 }
 ```
 
-`is_battery_mode` is the authoritative mains-vs-battery signal and `batteryLevel` the remaining charge. `timeToRemain` appears to be seconds of runtime at the current load, but that is inferred from observation and nothing depends on it yet.
+`is_battery_mode` is the authoritative mains-vs-battery signal and `batteryLevel` the remaining charge.
+
+Two more keys come from the same block. `battpool` is captured whole — it is pure battery telemetry with no identifiers — so every field below was already committed before any of this was parsed.
+
+| Field | In the capture | What the provider does with it |
+| --- | --- | --- |
+| `timeToRemain` | `1043` | bucketed into `ups.runtime`: `ample` / `short` / `critical` |
+| `device_total_power_output` | `310` | `ups.load`, as a share of the budget |
+| `device_total_power_budget` | `1000` | the denominator of that share |
+| `battery_avr_time` | `-1` | never read — but it is the evidence that `-1` is this block's "unknown" |
+
+> ⚠️ **`timeToRemain`'s unit is inferred.** Seconds is the only reading consistent with 1043 on a UPS 2U drawing 310W of a 1000W budget, but the capture was taken on mains with the battery charging, so the value has never been watched actually count down. Confirm it during a real outage before anything is allowed to shut down on `ups.runtime: critical`. See [#7](https://github.com/robbeverhelst/unifi-reactor/issues/7).
+
+Zero and negative both mean "no estimate" and publish no `ups.runtime` key: `battery_avr_time: -1` in this same block is what says `-1` is used that way, and an absent field decodes to `0`, which is not a runtime anything should act on either. The two power figures decode into pointers for the same reason the health numbers do — an absent output read as `0W` would report a fully loaded UPS as idle.
+
+UniFi also has a `network:ups_overload_detected` alarm trigger, which corroborates `ups.load` but is not read: nothing derives state from a delivery payload.
 
 ## Webhooks
 

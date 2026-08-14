@@ -45,6 +45,11 @@ const (
 	envPollInterval       = "UNIFI_POLL_INTERVAL"
 	envLowBattery         = "UNIFI_UPS_LOW_BATTERY_PERCENT"
 	envCriticalBattery    = "UNIFI_UPS_CRITICAL_BATTERY_PERCENT"
+	envShortRuntime       = "UNIFI_UPS_SHORT_RUNTIME_SECONDS"
+	envCriticalRuntime    = "UNIFI_UPS_CRITICAL_RUNTIME_SECONDS"
+	envHighLoad           = "UNIFI_UPS_HIGH_LOAD_PERCENT"
+	envMinAvailability    = "UNIFI_WAN_QUALITY_MIN_AVAILABILITY_PERCENT"
+	envMaxLatency         = "UNIFI_WAN_QUALITY_MAX_LATENCY_MS"
 
 	envWebhookEnabled     = "UNIFI_WEBHOOK_ENABLED"
 	envWebhookBindAddress = "UNIFI_WEBHOOK_BIND_ADDRESS"
@@ -71,6 +76,11 @@ type Config struct {
 	PollInterval           time.Duration
 	LowBatteryPercent      int
 	CriticalBatteryPercent int
+	ShortRuntimeSeconds    int
+	CriticalRuntimeSeconds int
+	HighLoadPercent        float64
+	MinAvailabilityPercent float64
+	MaxLatencyMs           float64
 	Webhook                WebhookConfig
 }
 
@@ -116,6 +126,11 @@ func ConfigFromEnv(lookup func(string) string) (Config, bool, error) {
 		PollInterval:           DefaultPollInterval,
 		LowBatteryPercent:      DefaultLowBatteryPercent,
 		CriticalBatteryPercent: DefaultCriticalBatteryPercent,
+		ShortRuntimeSeconds:    DefaultShortRuntimeSeconds,
+		CriticalRuntimeSeconds: DefaultCriticalRuntimeSeconds,
+		HighLoadPercent:        DefaultHighLoadPercent,
+		MinAvailabilityPercent: DefaultMinAvailabilityPercent,
+		MaxLatencyMs:           DefaultMaxLatencyMs,
 		Webhook: WebhookConfig{
 			Enabled:            lookup(envWebhookEnabled) == envTrue,
 			BindAddress:        DefaultWebhookBindAddress,
@@ -166,12 +181,36 @@ func ConfigFromEnv(lookup func(string) string) (Config, bool, error) {
 	}{
 		{envLowBattery, &cfg.LowBatteryPercent},
 		{envCriticalBattery, &cfg.CriticalBatteryPercent},
+		{envShortRuntime, &cfg.ShortRuntimeSeconds},
+		{envCriticalRuntime, &cfg.CriticalRuntimeSeconds},
 	} {
 		raw := lookup(field.env)
 		if raw == "" {
 			continue
 		}
 		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			return Config{}, false, fmt.Errorf("invalid %s %q: %w", field.env, raw, err)
+		}
+		*field.target = parsed
+	}
+
+	// Thresholds on a measured quantity rather than a percentage of charge, so
+	// they are floats: an operator on a link that sits at 99.5% needs to be
+	// able to say so.
+	for _, field := range []struct {
+		env    string
+		target *float64
+	}{
+		{envMinAvailability, &cfg.MinAvailabilityPercent},
+		{envMaxLatency, &cfg.MaxLatencyMs},
+		{envHighLoad, &cfg.HighLoadPercent},
+	} {
+		raw := lookup(field.env)
+		if raw == "" {
+			continue
+		}
+		parsed, err := strconv.ParseFloat(raw, 64)
 		if err != nil {
 			return Config{}, false, fmt.Errorf("invalid %s %q: %w", field.env, raw, err)
 		}

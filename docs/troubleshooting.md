@@ -549,12 +549,65 @@ kubectl -n reactor-system logs deploy/reactor | grep unifi-wan
 | `The gateway changed uplink but the ISP behind it did not change` | `wan` moved without your carrier changing. Normal if both uplinks are with the same ISP; suspicious otherwise. | Nothing, unless your two uplinks are with different carriers |
 | `The uplink believed to be live does not report itself as online` | The port Reactor thinks is carrying traffic reports something other than `online` in `last_wan_status`. | Note the exact status value on [#34](https://github.com/robbeverhelst/unifi-reactor/issues/34) — only `online` has ever been observed, and the failed value is unknown |
 | `is_uplink does not name a single live WAN port` | No port claimed the uplink, or both did. Reactor fell back to the gateway's uplink interface. | Nothing; this is the fallback working. Worth reporting if it persists rather than appearing for one poll during a switchover |
+| `The health endpoint accumulated uptime on an uplink other than the one wan names` | A **third** signal, from a different endpoint, disagrees — and the strongest one, because uptime is traffic the console watched pass rather than a statement about configuration. | This is the most useful thing you can report on [#34](https://github.com/robbeverhelst/unifi-reactor/issues/34). Post the `uptime_stats` block alongside the `wan1`/`wan2` fields |
 
 None of these stops anything: state is still published and Automations still run. They exist
 because the `wan` mapping has never been checked against a real failover, and a wrong mapping
 that says nothing is far worse than one that complains. If you have a gateway with two working
 uplinks, [#34](https://github.com/robbeverhelst/unifi-reactor/issues/34) is where these lines
 turn into an answer.
+
+### What is *not* a disagreement
+
+`internet: down` while `wan: primary` is not one of these, and Reactor will never
+log it as one. That combination is precisely the failure mode `internet` exists to
+observe — the link is up, the uplink is unchanged, and there is no internet — so
+treating it as a contradiction would fire a warning on exactly the case the key was
+added for. If you see it, believe it: your uplink is selected and useless.
+
+`wan.quality: degraded` while `internet: ok` is not one either. They answer different
+questions over different time horizons: `internet` is the console's judgement about
+reachability right now, `wan.quality` is availability and latency averaged over the
+console's uptime window (24 hours on the hardware it was captured from). A link that
+was down for twenty minutes this morning is legitimately `degraded` and `ok` at the
+same time for the rest of the day.
+
+---
+
+## 10a. `internet` or `wan.quality` never appears
+
+Both come from `stat/health`, which is a **separate request** from the one that
+produces `wan`, `isp` and the UPS keys. A console that answers one and not the other
+publishes the keys it can — that is the same per-key degradation as a UPS dropping
+off, and it is deliberate — so the two failures look different in the logs:
+
+```sh
+kubectl -n reactor-system logs deploy/reactor | grep -E 'unifi-health|unifi-observe'
+```
+
+| What you see | What it means |
+| --- | --- |
+| `The health endpoint failed; internet and wan.quality are unavailable this poll` | The request failed or returned a non-200. The device keys are still being published. Check the API key has access and that the console is not mid-reboot |
+| `The www subsystem reports a status this provider does not recognise` | Your console uses a status string this provider has never seen. **Please report it** — the mapping is inferred from one capture, and this line is the evidence that would fix it |
+| `The health response carries no uptime stats for the live uplink` | The `uptime_stats` block does not have an entry for the uplink `wan` names. Expected mid-switchover; worth reporting if it persists |
+| `The live uplink's health entry reports no availability` (at `log.level=debug`) | The console reported the uplink but no numbers for it, so `wan.quality` is withheld rather than guessed at zero |
+| Neither key ever appears, and no line above | `wan` itself is not derivable, which withholds `wan.quality` too — `internet` should still be there. Start at [§13](#13-reactor-is-running-but-nothing-is-reacting) |
+
+The same granularity applies to the UPS keys. `ups.runtime` is published only
+when the UPS reports a `timeToRemain` above zero, and `ups.load` only when it
+reports both an output and a non-zero budget — so a UPS that reports charge but
+no runtime estimate publishes `ups` and `ups.battery` and withholds
+`ups.runtime` alone. An Automation matching the withheld key goes
+`StateKeyUnavailable` and **holds its claim**, which during a power failure is
+the only safe answer: losing the estimate is not the outage ending.
+
+If `ups.runtime` is missing while the UPS is plainly reporting everything else,
+check `timeToRemain` in the device record directly. `0` and `-1` are both this
+firmware's way of saying "no estimate", and both are treated as one:
+
+```sh
+kubectl -n reactor-system logs deploy/reactor | grep 'state observed'   # needs log.level=debug
+```
 
 ---
 

@@ -74,6 +74,16 @@ spec:
               value: {{ .Values.unifi.ups.lowBatteryPercent | quote }}
             - name: UNIFI_UPS_CRITICAL_BATTERY_PERCENT
               value: {{ .Values.unifi.ups.criticalBatteryPercent | quote }}
+            - name: UNIFI_UPS_SHORT_RUNTIME_SECONDS
+              value: {{ .Values.unifi.ups.shortRuntimeSeconds | quote }}
+            - name: UNIFI_UPS_CRITICAL_RUNTIME_SECONDS
+              value: {{ .Values.unifi.ups.criticalRuntimeSeconds | quote }}
+            - name: UNIFI_UPS_HIGH_LOAD_PERCENT
+              value: {{ .Values.unifi.ups.highLoadPercent | quote }}
+            - name: UNIFI_WAN_QUALITY_MIN_AVAILABILITY_PERCENT
+              value: {{ .Values.unifi.wan.quality.minAvailabilityPercent | quote }}
+            - name: UNIFI_WAN_QUALITY_MAX_LATENCY_MS
+              value: {{ .Values.unifi.wan.quality.maxLatencyMs | quote }}
             - name: UNIFI_DEBOUNCE_DEFAULT
               value: {{ .Values.unifi.debounce.default | quote }}
             {{- with .Values.unifi.debounce.keys }}

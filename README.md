@@ -39,7 +39,7 @@ Your UniFi gear already knows all of this. **UniFi Reactor** is a Kubernetes ope
 ```mermaid
 flowchart LR
     U["UniFi console<br/>gateway · UPS"] -->|"poll — source of truth"| P["UniFi provider<br/>observe · normalize"]
-    P -->|"wan · ups · ups.battery"| E["Reactor engine<br/>match · detect transitions"]
+    P -->|"wan · internet · ups · ups.battery"| E["Reactor engine<br/>match · detect transitions"]
     E -->|"entered → actions<br/>left → onExit"| K["Kubernetes<br/>scale Deployments"]
 ```
 
@@ -433,9 +433,13 @@ Each key is published only when the matching hardware is adopted by your control
 | Key | Values | Meaning |
 | --- | --- | --- |
 | `wan` | `primary`, `backup` | which uplink the gateway is currently using |
+| `wan.quality` | `good`, `degraded` | how well that uplink has been performing, against the configured thresholds |
 | `isp` | a slug, e.g. `telenet`, or `unknown` | the carrier behind the live uplink |
+| `internet` | `ok`, `degraded`, `down` | whether the outside world is reachable at all |
 | `ups` | `online`, `on-battery` | whether a UniFi UPS is on mains or running on battery |
 | `ups.battery` | `normal`, `low`, `critical` | remaining charge against the configured thresholds |
+| `ups.runtime` | `ample`, `short`, `critical` | how long the UPS says it can carry its current load |
+| `ups.load` | `normal`, `high` | draw as a fraction of the UPS's power budget |
 
 `isp` is the one key whose values are not a closed set: it is the carrier name your console geolocated your public address to, lowercased with everything non-alphanumeric turned into a hyphen. Look it up before matching on it —
 
@@ -455,6 +459,34 @@ kubectl -n reactor-system logs deploy/reactor | grep 'key=isp'
 
 It exists for a second reason. `wan` and `isp` are independent answers to "did the uplink change", so Reactor compares them: if one moves and the other does not, it says so rather than quietly trusting either. Those lines are worth reading — see [`wan` and `isp` disagree](docs/troubleshooting.md#10-wan-and-isp-disagree-about-a-failover).
 
+### `internet` is the one `wan` cannot express
+
+`wan` says which uplink is *selected*. It stays `primary` when the link is up, the uplink is unchanged, and there is no internet — the failure your gateway's own failover may never act on, because from the gateway's point of view nothing is wrong. `internet` is the key for that case, and it comes from a different place: the console's own `www` health subsystem, which is its judgement about reachability rather than about link state.
+
+```yaml
+  when:
+    provider: unifi
+    state:
+      internet: down      # regardless of which uplink is carrying it
+```
+
+Both keys are [debounced at 3 samples](#settling-a-noisy-signal), so at the default 30s `pollInterval` an outage takes about **90 seconds** to be believed — and a recovery the same. That is a deliberate trade for not shedding load on one bad probe round; if you need it faster, lower `pollInterval` rather than the debounce, because the three samples are what make the signal trustworthy.
+
+`wan.quality` answers a third question, over a different time horizon: not *is the internet there* but *has this uplink been any good*. It buckets the availability and average latency the console measures against its uptime monitors into two levels, using [thresholds you configure](#configuration). Those numbers are averages over the console's uptime window — 24 hours on the hardware they were captured from — so `wan.quality` describes a link that has been bad rather than one that spiked, and a long outage keeps it `degraded` for the rest of that window.
+
+That is deliberate. A number cannot be a state value at all: `spec.when` matches strings, and a key whose values are continuous can never be exported as a metric label without one series per distinct reading. Bucketing is what makes it a state key, and the two levels are the whole vocabulary.
+
+```yaml
+  when:
+    provider: unifi
+    state:
+      wan.quality: degraded   # don't start the big sync on a link that has been flaky
+```
+
+Keep them apart when you write automations. `internet: down` is an outage; `wan.quality: degraded` is a bad day; matching both in one `state` block means *both must hold*.
+
+Together they also give the [unverified `wan` mapping](#compatibility) something it has never had — a third opinion from a different endpoint. `stat/health` accumulates uptime per uplink, and uptime is traffic the console watched pass, where `is_uplink` and `uplink.name` are both statements about configuration. If uptime is accumulating on a port other than the one `wan` names, Reactor says so rather than quietly trusting either ([what to do about it](docs/troubleshooting.md#10-wan-and-isp-disagree-about-a-failover)).
+
 `ups` and `ups.battery` are separate on purpose. An automation matching `ups: on-battery` stays matched for the whole outage as the battery drains — with a single escalating enum, dropping from `on-battery` to `low-battery` would leave the matching state and fire `onExit`, scaling workloads back **up** in the middle of a power failure. Express escalation by matching both keys instead; all keys in a `state` block must match.
 
 ```yaml
@@ -464,6 +496,26 @@ It exists for a second reason. `wan` and `isp` are independent answers to "did t
       ups: on-battery
       ups.battery: critical
 ```
+
+### Charge is a poor shutdown trigger; runtime is a better one
+
+`ups.battery` ignores load, and load is most of the answer: 30% at 300W and 30% at 900W are very different situations. `ups.runtime` is the UPS's own estimate of how long it can carry what is plugged into it *right now*, bucketed against [thresholds you configure](#configuration), and it is what a shutdown automation should actually match on.
+
+```yaml
+  when:
+    provider: unifi
+    state:
+      ups: on-battery
+      ups.runtime: critical   # not "the battery is low" — "we are about to run out"
+```
+
+`ups.load` is the other half of the same picture: the draw as a fraction of the UPS's power budget. It is what tells you *why* the runtime is short, and it is worth matching before an outage rather than during one — a UPS already running at 85% has no headroom to give you when the power goes.
+
+It is published on mains as well as on battery, deliberately. "Could we even survive an outage right now" is a question worth being able to ask while the lights are still on.
+
+Both are separate keys for the same reason `ups.battery` is: they are independent axes, and an automation matching one must not stop matching because another moved. All four UPS keys are only published when a UniFi UPS is adopted, and `ups.runtime` and `ups.load` are additionally omitted when the UPS reports no runtime estimate or no usable power figures — a missing measurement is never turned into a value.
+
+> ⚠️ `timeToRemain`'s unit is **inferred** to be seconds, from a single observation on a UPS that was not discharging. Nothing in Reactor depended on it before this key existed. Confirm it against a real outage before letting `ups.runtime: critical` shut anything down — [#7](https://github.com/robbeverhelst/unifi-reactor/issues/7) has the procedure.
 
 If a provider stops reporting a key at all — the hardware dropped off the controller — Reactor holds the last known state and reports `Ready=False` with `StateKeyUnavailable` rather than treating lost visibility as a condition that ended ([what to do about it](docs/troubleshooting.md#2-statekeyunavailable-and-held-state)).
 
@@ -477,12 +529,24 @@ unifi:
     default: 1          # react on the first observation
     keys:
       ups.battery: 2    # ...but let a threshold crossing settle
+      ups.runtime: 2
+      ups.load: 3       # ...a live wattage moves second to second
       isp: 2            # ...and let a re-geolocated carrier settle
+      internet: 3       # ...and don't believe one bad probe round
+      wan.quality: 3
 ```
 
 Each extra sample costs one `pollInterval` of reaction time, so the default is `1`: a WAN failover and a power cut both deserve an immediate reaction, and neither flaps. `ups.battery` ships at `2` because it is a threshold crossing — a charge hovering at 30% would otherwise report `low`, `normal`, `low` — and because a battery drains over minutes, so spending one more poll to be sure costs nothing. At the default 30s poll that makes a battery-level escalation react in 60s worst case instead of 30s.
 
-`isp` ships at `2` for a different reason: it is not a link state but the result of a geolocation lookup on whatever public address the gateway currently holds, so it can report `unknown` for a poll or two while a new address is being resolved — precisely during the failover you would be reacting to. One extra sample skips that window. Nothing else needs it: `wan` and `ups` are switch positions, and they do not flap.
+`isp` ships at `2` for a different reason: it is not a link state but the result of a geolocation lookup on whatever public address the gateway currently holds, so it can report `unknown` for a poll or two while a new address is being resolved — precisely during the failover you would be reacting to. One extra sample skips that window. `wan` and `ups` need none of this: they are switch positions, and they do not flap.
+
+`ups.runtime` matches `ups.battery` at `2`: it is the same kind of escalation, and its default thresholds are set against that delay rather than in isolation — 2 samples is 60s at the default poll, and a `critical` threshold of 180s leaves two minutes between Reactor believing the reading and the UPS running out. Move one and you have moved the other.
+
+`ups.load` is the exception at `3`, because it is the only key derived from an *instantaneous* measurement: a server spinning up shifts the draw by a few hundred watts in one poll, where a battery drains monotonically over minutes. A momentary burst past 80% must not be a reason to shed load.
+
+`internet` and `wan.quality` ship at `3`, the highest in the chart, because they are the two keys derived from probes to the outside world rather than from anything on your desk. A single poll in which a probe target rate-limits or a resolver blips must not shed a cluster's load. At the default 30s poll that is 90 seconds before either an outage or a recovery is believed — deliberately symmetric, because a link flapping in and out is exactly when repeatedly scaling workloads up and down does the most damage.
+
+Debounce is also the whole of the flap control for `wan.quality`, and that is worth being explicit about, because bucketing a measurement is where a threshold usually needs hysteresis. It does not need it here: debounce promotes a value only after N *consecutive* identical observations, so a measurement hovering on a threshold produces `good`, `degraded`, `good` and is never promoted at all — the key simply holds what it had. A second, differently-shaped flap control in the provider would be a second thing to reason about for a problem the engine already solves for every key.
 
 Debouncing happens in the shared state store, so every automation sees the same settled value. Two automations can never disagree about the current state and fight over a workload they share.
 
@@ -604,7 +668,7 @@ kubectl -n reactor-system logs deploy/reactor | grep -E 'version detected|tested
 
 Outside the range above it warns and **carries on**. Refusing to start against a console that would have worked fine is a worse failure than a log line, and most of them will work fine — the warning exists so that a missing state key reads as an incompatibility rather than as a configuration mistake. If your console is not in the table and it works, [say so](https://github.com/robbeverhelst/unifi-reactor/issues/new/choose): every row here started as somebody's report.
 
-State keys degrade one at a time, so a console with no UniFi UPS still reports `wan` and `isp`, and a gateway whose fields have moved still reports `ups`. Only observing nothing at all is an error.
+State keys degrade one at a time, so a console with no UniFi UPS still reports `wan` and `isp`, and a gateway whose fields have moved still reports `ups`. That holds across endpoints too: an observation reads `stat/device` and `stat/health`, and a console that answers one but not the other publishes the keys it can. Only observing nothing at all is an error.
 
 ## Configuration
 
@@ -615,12 +679,17 @@ Chart values ([full reference](charts/reactor/README.md)):
 | `crds.install` | `true` | install and upgrade the `Automation` CRD with the release |
 | `unifi.url` | — | UniFi console base URL; the provider stays disabled until this is set |
 | `unifi.site` | `default` | UniFi Network site |
-| `unifi.pollInterval` | `30s` | how often WAN and UPS state are observed |
+| `unifi.pollInterval` | `30s` | how often WAN, internet and UPS state are observed |
 | `unifi.insecureSkipVerify` | `true` | accept the console's self-signed certificate |
 | `unifi.existingSecret` | `unifi-reactor-credentials` | Secret holding `UNIFI_API_KEY`; re-read on every poll, so rotating the key needs no restart |
 | `log.level` | `info` | `debug` adds the per-observation lines used to work out why an automation did not fire |
 | `unifi.ups.lowBatteryPercent` | `30` | charge at or below this reports `ups.battery: low` |
 | `unifi.ups.criticalBatteryPercent` | `10` | charge at or below this reports `ups.battery: critical` |
+| `unifi.ups.shortRuntimeSeconds` | `600` | remaining runtime at or below this reports `ups.runtime: short` |
+| `unifi.ups.criticalRuntimeSeconds` | `180` | remaining runtime at or below this reports `ups.runtime: critical` |
+| `unifi.ups.highLoadPercent` | `80` | draw at or above this share of the power budget reports `ups.load: high` |
+| `unifi.wan.quality.minAvailabilityPercent` | `99` | availability below this reports `wan.quality: degraded` |
+| `unifi.wan.quality.maxLatencyMs` | `150` | average latency above this reports `wan.quality: degraded` |
 | `unifi.webhook.enabled` | `false` | webhook fast path (below) |
 | `actions.allowedDestinations` | `[]` | where outbound actions may go. Empty refuses all of them, and withholds the operator's read access to Secrets ([why](#telling-you-what-happened)) |
 | `metrics.enabled` | `false` | serve `/metrics` on `:8443` over HTTPS behind the API server's authn/authz filter ([above](#knowing-it-is-working)) |

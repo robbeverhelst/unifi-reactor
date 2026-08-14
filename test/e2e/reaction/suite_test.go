@@ -72,11 +72,24 @@ const (
 
 	// The state values the rehearsed console publishes, written the way an
 	// Automation's spec.when.state writes them.
-	keyWAN       = "wan"
-	keyUPS       = "ups"
-	wanPrimary   = "primary"
-	wanBackup    = "backup"
-	upsOnBattery = "on-battery"
+	keyWAN             = "wan"
+	keyWANQuality      = "wan.quality"
+	keyUPS             = "ups"
+	keyUPSBattery      = "ups.battery"
+	keyUPSRuntime      = "ups.runtime"
+	keyUPSLoad         = "ups.load"
+	keyInternet        = "internet"
+	wanPrimary         = "primary"
+	wanBackup          = "backup"
+	wanQualityDegraded = "degraded"
+	upsOnBattery       = "on-battery"
+	batteryNormal      = "normal"
+	upsRuntimeAmple    = "ample"
+	upsRuntimeCritical = "critical"
+	upsLoadNormal      = "normal"
+	upsLoadHigh        = "high"
+	internetOK         = "ok"
+	internetDown       = "down"
 
 	// settleWindow is how long a workload must hold a value for the suite to
 	// accept that nothing is going to move it. It spans several polls and at
@@ -172,7 +185,12 @@ var _ = AfterSuite(func() {
 // before it rehearsed.
 func resetConsole() {
 	Expect(mock.WAN(wanPrimary)).To(Succeed())
-	Expect(mock.UPS("mode=mains&level=100&present=true")).To(Succeed())
+	// runtime and output are put back to the captured figures explicitly: the
+	// mock holds an override until it is told otherwise, and a spec that
+	// inherited "850W" from the one before it would be testing the wrong thing.
+	Expect(mock.UPS("mode=mains&level=100&present=true&runtime=1043&output=310&budget=1000")).To(Succeed())
+	Expect(mock.Internet("present=true&status=ok")).To(Succeed())
+	Expect(mock.Quality("reset=true")).To(Succeed())
 }
 
 // workload renders a target Deployment. The pods run the mock's image because

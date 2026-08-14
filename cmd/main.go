@@ -436,6 +436,11 @@ func setupUniFi(mgr ctrl.Manager, cfg unifi.Config, store *engine.StateStore, wa
 	unifiClient := unifi.NewClient(cfg.URL, cfg.APIKey, cfg.Site, cfg.InsecureSkipVerify)
 	unifiClient.LowBatteryPercent = cfg.LowBatteryPercent
 	unifiClient.CriticalBatteryPercent = cfg.CriticalBatteryPercent
+	unifiClient.ShortRuntimeSeconds = cfg.ShortRuntimeSeconds
+	unifiClient.CriticalRuntimeSeconds = cfg.CriticalRuntimeSeconds
+	unifiClient.HighLoadPercent = cfg.HighLoadPercent
+	unifiClient.MinAvailabilityPercent = cfg.MinAvailabilityPercent
+	unifiClient.MaxLatencyMs = cfg.MaxLatencyMs
 
 	// What this provider's keys can hold, so reactor_state_info can report 0 for
 	// the values a key does not currently have instead of leaving a stale series

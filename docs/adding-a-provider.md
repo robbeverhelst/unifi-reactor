@@ -234,6 +234,17 @@ label. The UniFi provider leaves `isp` out for exactly that reason: one time
 series per carrier ever geolocated is how a Prometheus instance gets hurt. If
 you break the closed-set rule for a key, break it here too.
 
+**Bucket a measurement before it becomes a key.** The constraint above has a
+second edge, and it decides the shape of any key derived from a number rather
+than from a switch position. `spec.when` compares strings, so a continuous
+value cannot be matched at all; and it has no closed set, so it could never be
+declared here. `wan.quality` is the worked example: the console reports
+availability as a percentage and latency in milliseconds, and the provider
+publishes `good | degraded` against operator-configurable thresholds. The
+numbers stay in a debug log line, where they are diagnostics rather than API.
+Decide the bucket boundaries with the user's automation in mind — two levels
+they can act on beats five they have to reason about.
+
 **Key names are a compatibility promise.** They appear in user YAML. Renaming one breaks every Automation using it. Choose as if you cannot rename — because you cannot.
 
 ## Fixtures: capture, allowlist, commit
@@ -248,7 +259,7 @@ For a new provider, add a `hack/capture-<provider>.sh` in the same shape as `hac
 
 **Write a `testdata/<provider>/README.md`** recording what hardware and what software version produced the captures, which fields each file documents, and which mappings are *inferred* rather than observed. The UniFi one flags that the `wan` mapping has never seen a real failover, and that honesty is worth more than the fixture.
 
-**Consider a mock.** `hack/mock-unifi/` serves the captured payloads over HTTP and exposes endpoints to drive transitions by hand (`POST /flip`, `POST /ups?mode=battery&level=80`). It is what makes `make dev-mock` work without hardware, and it is roughly 150 lines. Do it for any provider whose hardware is not on every contributor's desk.
+**Consider a mock.** `hack/mock-unifi/` serves the captured payloads over HTTP and exposes endpoints to drive transitions by hand (`POST /flip`, `POST /ups?mode=battery&level=80`, `POST /internet?status=error`, `POST /quality?availability=97`). It is what makes `make dev-mock` work without hardware, and the e2e suites drive the same endpoints, so a key that cannot be rehearsed by hand also cannot be rehearsed in CI. Do it for any provider whose hardware is not on every contributor's desk.
 
 ## Tests
 

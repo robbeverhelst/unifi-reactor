@@ -161,6 +161,20 @@ func (m *Mock) WAN(uplink string) error { return m.post("/wan?link=" + uplink) }
 // present=false to make the UPS drop off the console entirely.
 func (m *Mock) UPS(query string) error { return m.post("/ups?" + query) }
 
+// Internet drives the console's www subsystem: status=ok|warning|error, or
+// present=false to remove the subsystem so the internet key vanishes rather
+// than reporting a value.
+//
+// It is the one rehearsal that cannot be reached through the WAN controls at
+// all, which is the point of the key: the link stays up, the uplink is
+// unchanged, and there is no internet.
+func (m *Mock) Internet(query string) error { return m.post("/internet?" + query) }
+
+// Quality drives the live uplink's uptime stats: availability=<percent>,
+// latency=<ms>, present=false for an uplink reporting no numbers, reset=true
+// to go back to the capture.
+func (m *Mock) Quality(query string) error { return m.post("/quality?" + query) }
+
 // Reachable reports whether the mock is answering yet.
 func (m *Mock) Reachable() error {
 	return m.request(http.MethodGet, "/proxy/network/api/s/default/stat/device")

@@ -28,6 +28,36 @@ unifi:
     # Only meaningful when a UniFi UPS is adopted; the ups keys are absent otherwise.
     lowBatteryPercent: 30
     criticalBatteryPercent: 10
+    # Remaining runtime (seconds) at or below which ups.runtime reports "short"
+    # / "critical". Runtime is a better shutdown trigger than charge because it
+    # already accounts for load: 30% at 300W and 30% at 900W are very different
+    # situations.
+    #
+    # These are set against the debounce ups.runtime ships with, not in
+    # isolation: 2 samples is 60s at the default pollInterval, so a critical
+    # threshold of 180s leaves two minutes between Reactor believing the
+    # reading and the UPS running out. Lower it and that headroom goes with it.
+    shortRuntimeSeconds: 600
+    criticalRuntimeSeconds: 180
+    # Draw as a percentage of the UPS's power budget at or above which ups.load
+    # reports "high".
+    highLoadPercent: 80
+  wan:
+    # Thresholds for wan.quality, which buckets how well the *live* uplink is
+    # performing into "good" or "degraded". Both numbers are averages the
+    # console keeps over its own uptime window — 24 hours on the hardware these
+    # were captured from — so they describe a link that has been bad, not one
+    # that spiked, and a long outage keeps the key degraded for the rest of
+    # that window.
+    #
+    # Only one link's numbers have ever been observed (100% available, 16ms),
+    # so treat these as starting points and tune them against your own uplink.
+    quality:
+      # Availability (%) below which the live uplink reports "degraded".
+      # 99% over a 24h window is roughly a quarter of an hour of loss.
+      minAvailabilityPercent: 99
+      # Average round-trip latency (ms) above which it reports "degraded".
+      maxLatencyMs: 150
   debounce:
     # How many consecutive observations a *changed* value needs before Reactor
     # acts on it. Each extra sample costs one pollInterval of reaction time,
@@ -41,9 +71,24 @@ unifi:
     # link state, so it can report "unknown" for a poll or two while a newly
     # assigned address is resolved — which is exactly during a failover.
     # Keys that flap by nature — client presence, once it exists — want more.
+    #
+    # internet and wan.quality are measurements rather than switch positions,
+    # and they are the two keys derived from probes to the outside world. A
+    # single poll in which a probe target rate-limits or a resolver blips must
+    # not shed a cluster's load, so both ship at 3 — 90s at the default poll
+    # interval before either an outage or a recovery is believed.
+    #
+    # ups.runtime matches ups.battery at 2 — the same escalation, and its
+    # thresholds are set to leave headroom for exactly that delay. ups.load is
+    # the only key derived from an instantaneous measurement that moves second
+    # to second (a server spinning up shifts the draw), so it takes 3.
     keys:
       ups.battery: 2
+      ups.runtime: 2
+      ups.load: 3
       isp: 2
+      internet: 3
+      wan.quality: 3
   # Name of an existing Secret containing the key UNIFI_API_KEY.
   # Create it with:
   #   kubectl -n <namespace> create secret generic unifi-reactor-credentials \

@@ -35,12 +35,37 @@ limitations under the License.
 // Only "clean" can be right, and possibly none of them is. The runbook for
 // finding out with real hardware is in testdata/unifi/README.md.
 //
+// Rehearse the internet going away while the link stays up — the failure mode
+// wan structurally cannot express, and the reason `internet` exists:
+//
+//	curl -X POST 'http://localhost:9443/internet?status=down'
+//	curl -X POST 'http://localhost:9443/internet?status=degraded'
+//	curl -X POST 'http://localhost:9443/internet?status=ok'
+//	curl -X POST 'http://localhost:9443/internet?present=false'   # www subsystem gone
+//
+// Rehearse the live uplink getting bad rather than going away, which is what
+// wan.quality buckets. Availability is a percentage and latency milliseconds,
+// both averaged by the console over its uptime window:
+//
+//	curl -X POST 'http://localhost:9443/quality?availability=97'
+//	curl -X POST 'http://localhost:9443/quality?latency=400'
+//	curl -X POST 'http://localhost:9443/quality?present=false'    # no numbers at all
+//	curl -X POST 'http://localhost:9443/quality?reset=true'       # back to the capture
+//
 // Rehearse a power outage (UPS on battery, draining):
 //
 //	curl -X POST 'http://localhost:9443/ups?mode=battery&level=80'
 //	curl -X POST 'http://localhost:9443/ups?level=25'    # drains to low
 //	curl -X POST 'http://localhost:9443/ups?level=5'     # drains to critical
 //	curl -X POST 'http://localhost:9443/ups?mode=mains'  # power restored
+//
+// Runtime and load are the other two axes, and the reason charge alone is a
+// poor shutdown trigger — 30% at 300W and 30% at 900W are different situations:
+//
+//	curl -X POST 'http://localhost:9443/ups?runtime=150'          # minutes become seconds
+//	curl -X POST 'http://localhost:9443/ups?runtime=-1'           # the UPS offers no estimate
+//	curl -X POST 'http://localhost:9443/ups?output=850'           # a heavy load on the same budget
+//	curl -X POST 'http://localhost:9443/ups?output=310&budget=1000'  # back to the capture
 //
 // Rehearse the UPS dropping off the console entirely — the ups keys vanish
 // from the state rather than reporting a value, which is what an Automation
@@ -103,6 +128,32 @@ const (
 	statusFailed = "failed"
 	statusOnline = "online"
 
+	// The stat/health subsystems and the uptime_stats keys this mock rewrites,
+	// named exactly as the capture spells them.
+	subsystemWWW     = "www"
+	subsystemWAN     = "wan"
+	uptimeKeyPrimary = "WAN"
+	uptimeKeyBackup  = "WAN2"
+
+	// The two uptime_stats fields wan.quality is bucketed from, and the query
+	// parameters that drive them.
+	fieldAvailability = "availability"
+	fieldLatency      = "latency_average"
+	paramAvailability = "availability"
+	paramLatency      = "latency"
+
+	// The battpool fields ups.runtime and ups.load are derived from.
+	fieldTimeToRemain = "timeToRemain"
+	fieldPowerOutput  = "device_total_power_output"
+	fieldPowerBudget  = "device_total_power_budget"
+
+	// statusHealthOK is what the capture's www subsystem reports. The other
+	// values this mock will happily serve — "warning", "error" — are the ones
+	// the provider maps to degraded and down, and neither has ever been seen
+	// on a real console's www subsystem. Serving them here rehearses what
+	// Reactor does with them; it does not confirm a console ever sends them.
+	statusHealthOK = "ok"
+
 	// What a variant says wan1/wan2 is_uplink do when the backup takes over.
 	uplinkMoves   = "moves"
 	uplinkPinned  = "pinned"
@@ -160,12 +211,34 @@ type mock struct {
 	// around without ever having to undo what it did.
 	pristine []byte
 
+	// pristineHealth is the captured stat/health response, kept for the same
+	// reason as pristine: every response is rebuilt from the capture rather
+	// than from the last one.
+	pristineHealth []byte
+
 	link           string
 	variant        string
 	backupISP      string
 	networkVersion string
 	onBatt         bool
 	battLvl        int
+	// runtime, output and budget override the battpool numbers ups.runtime and
+	// ups.load are derived from. Nil means "serve whatever the capture has".
+	runtime *int
+	output  *float64
+	budget  *float64
+
+	// wwwStatus is what the www subsystem reports, and noWWW drops the
+	// subsystem entirely — the case where the internet key vanishes rather
+	// than reporting a value.
+	wwwStatus string
+	noWWW     bool
+	// availability and latency override the live uplink's uptime_stats.
+	// Nil means "serve whatever the capture has"; noQuality strips the
+	// numbers out so the uplink reports none at all.
+	availability *float64
+	latency      *float64
+	noQuality    bool
 	// noUPS drops the UPS from the device list, as an unadopted or powered-off
 	// one would be. The provider then publishes no ups keys at all rather than
 	// a placeholder value, which is the case that must not be read as "the
@@ -194,6 +267,7 @@ func main() {
 		link:      linkPrimary,
 		variant:   defaultVariant,
 		backupISP: defaultBackupISP,
+		wwwStatus: statusHealthOK,
 		rules:     map[string]map[string]any{},
 	}
 	if raw, err := os.ReadFile(*deliveryFile); err == nil {
@@ -221,6 +295,12 @@ func main() {
 	}
 	m.pristine = pristine
 
+	health, err := os.ReadFile(*dir + "/stat-health.json")
+	if err != nil {
+		log.Fatalf("reading stat-health.json: %v", err)
+	}
+	m.pristineHealth = health
+
 	m.networkVersion = *networkVersion
 	if m.networkVersion == "" {
 		var info struct {
@@ -238,11 +318,14 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /proxy/network/api/s/{site}/stat/device", m.serveDevices)
+	mux.HandleFunc("GET /proxy/network/api/s/{site}/stat/health", m.serveHealth)
 	mux.HandleFunc("GET /proxy/network/integration/v1/info", m.serveInfo)
 	mux.HandleFunc("POST /flip", m.flipWAN)
 	mux.HandleFunc("GET /wan", m.describeWAN)
 	mux.HandleFunc("POST /wan", m.setWAN)
 	mux.HandleFunc("POST /ups", m.setUPS)
+	mux.HandleFunc("POST /internet", m.setInternet)
+	mux.HandleFunc("POST /quality", m.setQuality)
 
 	// The UniFi OS layer: no /proxy/network prefix, cookie session, csrf header.
 	mux.HandleFunc("POST /api/auth/login", m.login)
@@ -284,10 +367,31 @@ func (m *mock) devices() []any {
 			if pool, ok := vbms["battpool"].(map[string]any); ok {
 				pool["batteryLevel"] = m.battLvl
 				pool["ischarging"] = !m.onBatt
+				m.rewriteBattPool(pool)
 			}
 		}
 	}
 	return visible
+}
+
+// rewriteBattPool applies the runtime and load overrides. A runtime of exactly
+// zero deletes the field rather than serving 0, because "the UPS reports no
+// estimate" is a distinct case from "the UPS reports none left" and the
+// provider treats it as one.
+func (m *mock) rewriteBattPool(pool map[string]any) {
+	if m.runtime != nil {
+		if *m.runtime == 0 {
+			delete(pool, fieldTimeToRemain)
+		} else {
+			pool[fieldTimeToRemain] = *m.runtime
+		}
+	}
+	if m.output != nil {
+		pool[fieldPowerOutput] = *m.output
+	}
+	if m.budget != nil {
+		pool[fieldPowerBudget] = *m.budget
+	}
 }
 
 // failover rewrites a captured gateway record the way the current variant says
@@ -325,14 +429,173 @@ func (m *mock) failover(device map[string]any) {
 	device["isp"] = m.backupISP
 }
 
+// health rebuilds the captured stat/health response and rewrites it to match
+// the mock's current state, the way devices() does for stat/device.
+//
+// The uptime_stats half follows the mock's uplink, because the provider treats
+// uptime accumulating on a port other than the one wan names as evidence the
+// wan mapping is wrong. A mock that left uptime on WAN while claiming to be on
+// the backup would report a disagreement on every rehearsed failover.
+func (m *mock) health() []any {
+	var payload struct {
+		Data []any `json:"data"`
+	}
+	if err := json.Unmarshal(m.pristineHealth, &payload); err != nil {
+		log.Printf("re-reading the captured health: %v", err)
+		return nil
+	}
+	subsystems := payload.Data[:0]
+	for _, entry := range payload.Data {
+		subsystem, ok := entry.(map[string]any)
+		if !ok {
+			subsystems = append(subsystems, entry)
+			continue
+		}
+		switch subsystem["subsystem"] {
+		case subsystemWWW:
+			if m.noWWW {
+				continue
+			}
+			subsystem["status"] = m.wwwStatus
+		case subsystemWAN:
+			m.rewriteUptimeStats(subsystem)
+		}
+		subsystems = append(subsystems, entry)
+	}
+	return subsystems
+}
+
+// rewriteUptimeStats moves the live uplink's numbers onto whichever uplink the
+// mock says is carrying traffic, then applies any overrides.
+func (m *mock) rewriteUptimeStats(subsystem map[string]any) {
+	stats, ok := subsystem["uptime_stats"].(map[string]any)
+	if !ok {
+		return
+	}
+	live := uptimeKeyPrimary
+	if m.link == linkBackup {
+		live = uptimeKeyBackup
+		// The capture only ever had numbers on WAN, so a backup that is live
+		// has to be handed them: swap the two entries wholesale.
+		stats[uptimeKeyPrimary], stats[uptimeKeyBackup] = stats[uptimeKeyBackup], stats[uptimeKeyPrimary]
+	}
+	entry, ok := stats[live].(map[string]any)
+	if !ok {
+		return
+	}
+	if m.noQuality {
+		for _, field := range []string{fieldAvailability, fieldLatency, "monitors", "alerting_monitors"} {
+			delete(entry, field)
+		}
+		return
+	}
+	if m.availability != nil {
+		entry[fieldAvailability] = *m.availability
+	}
+	if m.latency != nil {
+		entry[fieldLatency] = *m.latency
+	}
+}
+
+func (m *mock) serveHealth(w http.ResponseWriter, _ *http.Request) {
+	m.mu.Lock()
+	subsystems := m.health()
+	m.mu.Unlock()
+	writeResponse(w, subsystems)
+}
+
+// writeResponse wraps a payload in the meta/data envelope every stat endpoint
+// answers with.
+func writeResponse(w http.ResponseWriter, data []any) {
+	writeJSON(w, map[string]any{
+		"meta": map[string]string{"rc": "ok"},
+		"data": data,
+	})
+}
+
+// setInternet drives the www subsystem, which is what the internet key reads.
+// present=false removes the subsystem entirely, so the key vanishes rather
+// than reporting a value — the case an Automation has to hold its claim
+// through rather than treat as recovery.
+func (m *mock) setInternet(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if status := query.Get("status"); status != "" {
+		m.wwwStatus = status
+	}
+	if raw := query.Get("present"); raw != "" {
+		present, err := strconv.ParseBool(raw)
+		if err != nil {
+			http.Error(w, "present must be a boolean", http.StatusBadRequest)
+			return
+		}
+		m.noWWW = !present
+	}
+	log.Printf("www subsystem is now %s (present=%v)", m.wwwStatus, !m.noWWW)
+	writeJSON(w, map[string]any{"status": m.wwwStatus, "present": !m.noWWW})
+}
+
+// setQuality drives the live uplink's uptime_stats, which is what wan.quality
+// buckets. Both numbers are averages the console keeps over its uptime window,
+// so they move slowly on real hardware and instantly here.
+func (m *mock) setQuality(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if raw := query.Get("reset"); raw != "" {
+		m.availability, m.latency, m.noQuality = nil, nil, false
+	}
+	for _, field := range []struct {
+		name   string
+		target **float64
+	}{
+		{paramAvailability, &m.availability},
+		{paramLatency, &m.latency},
+	} {
+		raw := query.Get(field.name)
+		if raw == "" {
+			continue
+		}
+		value, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			http.Error(w, field.name+" must be a number", http.StatusBadRequest)
+			return
+		}
+		*field.target = &value
+	}
+	if raw := query.Get("present"); raw != "" {
+		present, err := strconv.ParseBool(raw)
+		if err != nil {
+			http.Error(w, "present must be a boolean", http.StatusBadRequest)
+			return
+		}
+		m.noQuality = !present
+	}
+	log.Printf("uplink quality overrides: availability=%s latency=%s present=%v",
+		describeFloat(m.availability), describeFloat(m.latency), !m.noQuality)
+	writeJSON(w, map[string]any{
+		paramAvailability: m.availability,
+		paramLatency:      m.latency,
+		"present":         !m.noQuality,
+		"note":            "both are averages over the console's uptime window (time_period, 86400s in the capture)",
+	})
+}
+
+func describeFloat(value *float64) string {
+	if value == nil {
+		return "captured"
+	}
+	return strconv.FormatFloat(*value, 'f', -1, 64)
+}
+
 func (m *mock) serveDevices(w http.ResponseWriter, _ *http.Request) {
 	m.mu.Lock()
 	devices := m.devices()
 	m.mu.Unlock()
-	writeJSON(w, map[string]any{
-		"meta": map[string]string{"rc": "ok"},
-		"data": devices,
-	})
+	writeResponse(w, devices)
 }
 
 // serveInfo answers the Integration API endpoint Reactor's compatibility guard
@@ -454,12 +717,52 @@ func (m *mock) setUPS(w http.ResponseWriter, r *http.Request) {
 		}
 		m.noUPS = !present
 	}
+	// runtime is seconds, and 0 means "the UPS reports no estimate at all"
+	// rather than "no time left" — the case the provider omits the key for.
+	if raw := r.URL.Query().Get("runtime"); raw != "" {
+		seconds, err := strconv.Atoi(raw)
+		if err != nil {
+			http.Error(w, "runtime must be an integer number of seconds", http.StatusBadRequest)
+			return
+		}
+		m.runtime = &seconds
+	}
+	for _, field := range []struct {
+		name   string
+		target **float64
+	}{
+		{"output", &m.output},
+		{"budget", &m.budget},
+	} {
+		raw := r.URL.Query().Get(field.name)
+		if raw == "" {
+			continue
+		}
+		watts, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			http.Error(w, field.name+" must be a number of watts", http.StatusBadRequest)
+			return
+		}
+		*field.target = &watts
+	}
+
 	state := map[bool]string{false: "online", true: "on-battery"}[m.onBatt]
 	if m.noUPS {
 		state = "absent"
 	}
-	log.Printf("ups is now %s at %d%%", state, m.battLvl)
-	_, _ = fmt.Fprintf(w, `{"ups":%q,"battery":%d}`+"\n", state, m.battLvl)
+	log.Printf("ups is now %s at %d%% (runtime=%s output=%s budget=%s)",
+		state, m.battLvl, describeInt(m.runtime), describeFloat(m.output), describeFloat(m.budget))
+	writeJSON(w, map[string]any{
+		"ups": state, "battery": m.battLvl,
+		"runtime": m.runtime, "output": m.output, "budget": m.budget,
+	})
+}
+
+func describeInt(value *int) string {
+	if value == nil {
+		return "captured"
+	}
+	return strconv.Itoa(*value)
 }
 
 // --- Alarm Manager (UniFi OS layer) -----------------------------------------
