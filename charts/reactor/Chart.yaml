@@ -14,3 +14,116 @@ keywords:
   - automation
   - operator
   - homelab
+  - ups
+  - wan-failover
+# Contact is deliberately a GitHub handle rather than an address: it is the
+# channel CODE_OF_CONDUCT.md and SECURITY.md already name, and it is the one
+# that keeps working when an address does not. There is no
+# artifacthub.io/maintainers annotation for the same reason — that annotation
+# exists to override this list by matching on email, and there is no email
+# here to match.
+maintainers:
+  - name: Robbe Verhelst
+    url: https://github.com/robbeverhelst
+
+# Artifact Hub metadata. The registration runbook, and the two steps that can
+# only be done from a signed-in Artifact Hub session, are in
+# docs/distribution.md.
+annotations:
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/operator: "true"
+  artifacthub.io/category: networking
+  artifacthub.io/prerelease: "false"
+
+  # There is deliberately no artifacthub.io/signKey.
+  #
+  # Both the image and the chart are cosign-signed keylessly from the release
+  # workflow, and Artifact Hub detects that on its own: for any OCI-backed Helm
+  # repository its tracker asks the registry whether a cosign signature is
+  # attached to each version, and badges the version `cosign` when one is. No
+  # annotation opts into it.
+  #
+  # artifacthub.io/signKey is a different thing — it describes a PGP key used
+  # for Helm's provenance-file signing, and it takes a `fingerprint` and a
+  # `url` to a public key. Keyless signing has neither: there is no key, which
+  # is the point of it. Filling those fields with anything would render a
+  # fingerprint in the UI that verifies nothing. The cosign identity and issuer
+  # a reader actually needs are in SECURITY.md, linked below.
+  artifacthub.io/links: |
+    - name: source
+      url: https://github.com/robbeverhelst/unifi-reactor
+    - name: support
+      url: https://github.com/robbeverhelst/unifi-reactor/issues
+    - name: Documentation
+      url: https://reactor.robbeverhelst.com
+    - name: Chart reference
+      url: https://github.com/robbeverhelst/unifi-reactor/blob/main/charts/reactor/README.md
+    - name: Verifying a signed release
+      url: https://github.com/robbeverhelst/unifi-reactor/blob/main/SECURITY.md#verifying-a-release
+    - name: Changelog
+      url: https://github.com/robbeverhelst/unifi-reactor/releases
+
+  artifacthub.io/crds: |
+    - kind: Automation
+      version: v1alpha1
+      name: automations.reactor.robbeverhelst.com
+      displayName: Automation
+      description: |
+        Reacts to observed provider state. `spec.when` names a provider and the
+        state keys that must hold; `spec.actions` declares what the cluster
+        should look like while they do, and `spec.onExit` what it should look
+        like once they stop. Namespaced. A target shared by several Automations
+        is arbitrated to the most restrictive level any of them asks for, and
+        `status` reports the level in force and which Automation set it.
+
+  artifacthub.io/crdsExamples: |
+    - apiVersion: reactor.robbeverhelst.com/v1alpha1
+      kind: Automation
+      metadata:
+        name: pause-downloads-on-backup-wan
+        namespace: media
+      spec:
+        when:
+          provider: unifi
+          state:
+            wan: backup
+        actions:
+          - type: kubernetes.scale
+            target:
+              kind: Deployment
+              name: qbittorrent
+            replicas: 0
+        onExit:
+          - type: kubernetes.scale
+            target:
+              kind: Deployment
+              name: qbittorrent
+            replicas: 1
+    - apiVersion: reactor.robbeverhelst.com/v1alpha1
+      kind: Automation
+      metadata:
+        name: shed-load-on-battery
+        namespace: media
+      spec:
+        when:
+          provider: unifi
+          state:
+            ups: on-battery
+        actions:
+          - type: kubernetes.scale
+            target:
+              kind: Deployment
+              name: qbittorrent
+            replicas: 0
+          - type: kubernetes.cronjob.suspend
+            target:
+              kind: CronJob
+              name: velero-backup
+              namespace: velero
+
+  # artifacthub.io/changes is written at package time by
+  # hack/artifacthub-changes.sh, from the commits in the tag being released —
+  # the same source the GitHub release notes are generated from. It is not
+  # hand-maintained here for the reason CHANGELOG.md gives for not
+  # hand-maintaining a changelog at all: two sources of truth drift, and a
+  # stale one is worse than none because it is confidently wrong.

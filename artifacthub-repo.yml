@@ -1,0 +1,29 @@
+# Artifact Hub repository metadata.
+#
+# This file is what proves to Artifact Hub that whoever registers the chart
+# repository is the person who publishes it. It is not read from this
+# repository: the chart is published to an OCI registry, and Artifact Hub looks
+# for this file there, pushed as a separate artifact under the reserved tag
+# `artifacthub.io`. It lives here so that it is reviewed, versioned and
+# diffable like anything else, and is pushed from here.
+#
+#   oras push \
+#     ghcr.io/robbeverhelst/charts/reactor:artifacthub.io \
+#     --config /dev/null:application/vnd.cncf.artifacthub.config.v1+yaml \
+#     artifacthub-repo.yml:application/vnd.cncf.artifacthub.repository-metadata.layer.v1.yaml
+#
+# The full runbook, including which steps can only be done from a signed-in
+# Artifact Hub session, is in docs/distribution.md.
+
+# The email below must match the address the Artifact Hub account signs in
+# with, or the ownership claim is refused. It is this project's commit-author
+# address; change it here before pushing if a different one is used.
+owners:
+  - name: Robbe Verhelst
+    email: robbe.verhelst@gmail.com
+# repositoryID is issued by Artifact Hub when the repository is first added, so
+# it cannot be filled in before that. It is what earns the Verified publisher
+# badge; the ownership claim above works without it. Add it, then push this
+# file again with the same oras command.
+#
+# repositoryID: <issued by Artifact Hub — see docs/distribution.md>
