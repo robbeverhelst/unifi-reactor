@@ -247,15 +247,17 @@ UniFi also has a `network:ups_overload_detected` alarm trigger, which corroborat
 
 ## What the write path has, which is nothing
 
-`unifi.wlan.*` writes to the console, and **no capture backs any of it**. There is no
-`rest/wlanconf` response here, so the fields that action reads are inferred rather than observed.
-See [docs/unifi-write-api.md](../../docs/unifi-write-api.md), which splits the two, and note that
-`hack/mock-unifi` builds its WLAN table **in code**, clearly labelled, precisely so nothing in
-`testdata/` claims to have come off a console when it did not.
+`unifi.wlan.*` and `unifi.poe.cycle` write to the console, and **no capture backs any of it**. There
+is no `rest/wlanconf` response here and no switch record — every device capture above is a gateway
+or a UPS — so the fields those actions read are inferred rather than observed. See
+[docs/unifi-write-api.md](../../docs/unifi-write-api.md), which splits the two, and note that
+`hack/mock-unifi` builds its WLAN table and its PoE switch **in code**, clearly labelled, precisely
+so nothing in `testdata/` claims to have come off a console when it did not.
 
-If a capture is ever wanted for that endpoint it goes through `hack/capture-unifi.sh` with the
+If a capture is ever wanted for those endpoints it goes through `hack/capture-unifi.sh` with the
 allowlist extended one field at a time, like everything else here. A `wlanconf` record carries
-pre-shared keys and RADIUS secrets — exactly the material the allowlist policy exists for.
+pre-shared keys and RADIUS secrets, and a switch record carries the same management keys the
+gateway one does — which is exactly the material the allowlist policy exists for.
 
 ## Webhooks
 

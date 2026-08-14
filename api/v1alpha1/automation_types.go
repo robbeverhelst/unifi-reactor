@@ -337,6 +337,67 @@ type WLAN struct {
 	Name string `json:"name"`
 }
 
+// PoEPort is the switch port a unifi.poe.cycle power-cycles.
+//
+// This is the most dangerous action Reactor has, and the danger is not the
+// write — it is the identity. Cutting power to the wrong port drops an access
+// point, a camera, or the uplink carrying the cluster, and it does so silently
+// from Reactor's point of view: the console accepts the command either way.
+//
+// So a port is identified by three things that must all agree, checked against
+// the switch's own port table immediately before the command is sent:
+//
+//   - device, the switch's MAC. Not its name, which is a label somebody can
+//     change without changing which hardware it is.
+//   - port, the index on that switch.
+//   - portName, the name that port carries in the switch's configuration.
+//
+// The third is the one doing the real work, and it is required rather than
+// optional for that reason. A port index alone means something different after
+// somebody re-patches a rack: slot 7 is still slot 7, and the thing plugged
+// into it is not. Naming what is supposed to be there turns a re-patch from a
+// silent mis-cycle into a refused action with a sentence saying the port is
+// called something else now.
+//
+// Three refusals apply whatever the install's allowlist says, in the same way
+// the outbound dialer refuses loopback whatever the destination allowlist says.
+// A port the switch reports as its uplink is never cycled — that is the port
+// carrying everything behind the switch, including, possibly, Reactor's own
+// path to the console. A port the switch does not report as PoE-capable is
+// never cycled, because there is nothing there to cycle and the identity is
+// probably wrong. And a switch that does not report those fields at all is
+// refused rather than assumed safe: a guard that silently does not apply is
+// worse than one that declines.
+//
+// Which ports may be cycled at all is the operator's decision at install time —
+// unifi.actions.allowedPoePorts, empty by default and refusing everything.
+type PoEPort struct {
+	// Device is the MAC address of the switch, lowercase and colon-separated,
+	// e.g. "aa:bb:cc:00:11:22". A MAC rather than a device name because a name
+	// is a label: renaming a switch would silently repoint this action, and a
+	// MAC identifies the hardware.
+	// +kubebuilder:validation:Pattern="^[0-9a-f]{2}(:[0-9a-f]{2}){5}$"
+	Device string `json:"device"`
+
+	// Port is the port index on that switch, as the console numbers it — the
+	// number on the front panel, starting at 1.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=64
+	Port int32 `json:"port"`
+
+	// PortName is the name that port carries in the switch's configuration, and
+	// it is checked before anything is sent. It is required, and it is the whole
+	// defence against a re-patched rack: an index means "whatever is in slot 7
+	// now", and this means "the thing I meant".
+	//
+	// If it stops matching, the action is refused and says so. That is the
+	// intended outcome — name your ports, and a change to the wiring becomes a
+	// visible refusal instead of a power cut to something else.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	PortName string `json:"portName"`
+}
+
 // Notification is the message a notification.* action sends.
 //
 // The destination is not expressible here at all: it comes from the referenced
@@ -368,7 +429,7 @@ type Notification struct {
 // kubernetes.cronjob.suspend) declares a level and is arbitrated continuously
 // across every Automation sharing its target. An edge action (kubernetes.restart,
 // http.request, notification.*, homeassistant.service, qbittorrent.*,
-// unifi.wlan.*) expresses an occurrence: it fires on this Automation's own
+// unifi.wlan.*, unifi.poe.cycle) expresses an occurrence: it fires on this Automation's own
 // transitions, owns no target and arbitrates with nothing.
 //
 // The dividing line is not "does this express a level" — pausing a torrent
@@ -386,6 +447,7 @@ type Notification struct {
 // +kubebuilder:validation:XValidation:rule="(self.type == 'homeassistant.service') == has(self.homeAssistant)",message="spec.actions: homeAssistant is required by homeassistant.service and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type.startsWith('qbittorrent.') == has(self.qbittorrent)",message="spec.actions: qbittorrent is required by the qbittorrent.* types and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type.startsWith('unifi.wlan.') == has(self.wlan)",message="spec.actions: wlan is required by the unifi.wlan.* types and rejected on every other type"
+// +kubebuilder:validation:XValidation:rule="(self.type == 'unifi.poe.cycle') == has(self.poe)",message="spec.actions: poe is required by unifi.poe.cycle and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type.startsWith('notification.') == has(self.notification)",message="spec.actions: notification is required by the notification.* types and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type.startsWith('kubernetes.') == has(self.target)",message="spec.actions: target is required by the kubernetes.* actions and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type == 'kubernetes.scale' || !has(self.replicas)",message="spec.actions: replicas belongs to kubernetes.scale"
@@ -397,7 +459,7 @@ type Notification struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.target) || self.type != 'kubernetes.restart' || self.target.kind in ['Deployment', 'StatefulSet']",message="spec.actions: kubernetes.restart targets a kind with a pod template: Deployment or StatefulSet"
 type Action struct {
 	// Type of the action, e.g. "kubernetes.scale".
-	// +kubebuilder:validation:Enum=kubernetes.scale;kubernetes.cronjob.suspend;kubernetes.cordon;kubernetes.restart;http.request;notification.ntfy;notification.discord;notification.slack;homeassistant.service;qbittorrent.pause;qbittorrent.resume;unifi.wlan.enable;unifi.wlan.disable
+	// +kubebuilder:validation:Enum=kubernetes.scale;kubernetes.cronjob.suspend;kubernetes.cordon;kubernetes.restart;http.request;notification.ntfy;notification.discord;notification.slack;homeassistant.service;qbittorrent.pause;qbittorrent.resume;unifi.wlan.enable;unifi.wlan.disable;unifi.poe.cycle
 	Type string `json:"type"`
 
 	// Target of a kubernetes.* action.
@@ -455,6 +517,10 @@ type Action struct {
 	// WLAN is the wireless network a unifi.wlan.* action acts on.
 	// +optional
 	WLAN *WLAN `json:"wlan,omitempty"`
+
+	// PoE is the switch port a unifi.poe.cycle power-cycles.
+	// +optional
+	PoE *PoEPort `json:"poe,omitempty"`
 
 	// TimeoutSeconds bounds a single attempt at this action, so an
 	// unreachable target or endpoint cannot occupy a reconcile indefinitely.

@@ -545,7 +545,7 @@ func setupUniFi(
 	switch {
 	case !writer.Enabled():
 		setupLog.Info("UniFi console actions disabled (nothing is allowlisted); " +
-			"unifi.wlan.* actions will be refused")
+			"unifi.wlan.* and unifi.poe.cycle actions will be refused")
 	case !writer.Credentialed():
 		// Not fatal, on the same rule the webhook fast path follows: this is not
 		// the mechanism of record, and an operator whose poller works should not
@@ -554,7 +554,9 @@ func setupUniFi(
 			"UniFi console actions are allowlisted but cannot authenticate; "+
 				"set UNIFI_USERNAME and UNIFI_PASSWORD (the poller's API key does not write)")
 	default:
-		setupLog.Info("UniFi console actions enabled", "allowedWlans", len(cfg.Actions.AllowedWLANs))
+		setupLog.Info("UniFi console actions enabled",
+			"allowedWlans", len(cfg.Actions.AllowedWLANs),
+			"allowedPoePorts", len(cfg.Actions.AllowedPoEPorts))
 	}
 	return writer, nil
 }

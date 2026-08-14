@@ -157,7 +157,7 @@ So the RBAC that would make it possible is not granted under any setting: `rbac.
 | | Declares | Arbitrated? | Types |
 | --- | --- | --- | --- |
 | **Desired-state** | a *level* — what a target should be | yes, continuously across every automation sharing the target | `kubernetes.scale`, `kubernetes.cronjob.suspend`, `kubernetes.cordon` |
-| **Edge** | an *occurrence* | no — fires on this automation's own transition and owns nothing | `kubernetes.restart`, `http.request`, `notification.*`, `homeassistant.service`, `qbittorrent.*`, `unifi.wlan.*` |
+| **Edge** | an *occurrence* | no — fires on this automation's own transition and owns nothing | `kubernetes.restart`, `http.request`, `notification.*`, `homeassistant.service`, `qbittorrent.*`, `unifi.wlan.*`, `unifi.poe.cycle` |
 
 `kubernetes.scale` works through the [scale subresource](https://kubernetes.io/docs/reference/using-api/api-concepts/#subresources), so `kind: Deployment` and `kind: StatefulSet` take the same path and Reactor never has to know where a kind keeps its replicas. `target.kind` is still a closed list, on purpose: a kind is only reachable if the chart granted RBAC for it, and RBAC has to name resources explicitly — so an open field would turn a typo into a `Forbidden` discovered *during* the outage, instead of a rejected write at admission.
 
@@ -199,6 +199,7 @@ unifi:
 
 The shipped default is `1` — react on the first observation — because `wan` and `ups` are switch positions that do not flap, and a failover deserves an immediate reaction. That default is chosen for `kubernetes.scale`. **If a key drives a restart, raise its debounce**, and accept the cost: each extra sample is one `pollInterval` of extra reaction time. Before adding a restart to an automation, ask what the key does when the hardware behind it is halfway broken rather than cleanly up or down — that is the state a restart loop is born in.
 
+The same paragraph applies word for word to [`unifi.poe.cycle`](#power-cycling-a-poe-port), only more so: there the repeated act is a power cut to a physical device.
 
 ## When two automations share a workload
 
@@ -605,17 +606,17 @@ Three details that follow:
 
 ## Changing things on your UniFi console
 
-Everything above reaches *out* of the cluster to an address you allowlisted. The action here reaches *back at the console Reactor watches*, and they are a different kind of risk: they are the first things Reactor changes on your network rather than reads from it, and the people they affect are not running the cluster.
+Everything above reaches *out* of the cluster to an address you allowlisted. The two actions here reach *back at the console Reactor watches*, and they are a different kind of risk: they are the first things Reactor changes on your network rather than reads from it, and the people they affect are not running the cluster.
 
 > ⚠️ **Nothing here has ever been run against a real console.** The way Reactor authenticates a write was worked out against a live UDM Pro, but every endpoint under it is inferred from how UniFi's own web UI is understood to work. [`docs/unifi-write-api.md`](docs/unifi-write-api.md) says exactly which is which. Everything is exercised against `hack/mock-unifi`, and a mock proves the wiring, not the protocol.
 
-Three properties hold for anything in this section, and they are what make it safe enough to ship at all:
+Three properties hold for both, and they are what make them safe enough to ship at all:
 
-- **You decide what may be touched, at install time.** `unifi.actions.allowedWlans` is a Helm value, empty by default, and empty refuses everything with a reason naming the value to add. There is no per-automation override — `spec.actions` is writable by anyone who can create an `Automation` in their own namespace, and turning the WiFi off is not a decision that belongs there.
+- **You decide what may be touched, at install time.** `unifi.actions.allowedWlans` and `unifi.actions.allowedPoePorts` are Helm values, both empty by default, and empty refuses everything with a reason naming the value to add. There is no per-automation override — `spec.actions` is writable by anyone who can create an `Automation` in their own namespace, and turning the WiFi off is not a decision that belongs there.
 - **Every step checks before it writes.** Read the object, confirm it is the one the automation meant, then act. A check that fails abandons the action and says what did not match; it never writes anyway and it never writes something else.
 - **Attempted exactly once.** No retry, in either direction. See [when an action fails](#when-an-action-fails) — the next transition corrects a miss, and nothing corrects a duplicate.
 
-It needs a **UniFi OS local account**, because the API key the poller reads with does not write:
+They need a **UniFi OS local account**, because the API key the poller reads with does not write:
 
 ```sh
 kubectl -n reactor-system create secret generic unifi-reactor-console \
@@ -661,6 +662,58 @@ So, two limitations, and the second is louder here than anywhere else in this RE
 - **Nothing hands it back.** If the exit transition never arrives — you delete the automation, you uninstall Reactor, the state key stops being observable — **the network stays off until a human turns it back on.** There is no baseline, no release, and no pre-delete sweep that can reach it.
 
 Point it at a network whose absence is an inconvenience, not at the one carrying your phones, your cameras, or Reactor's own path to the controller. Reactor has no way to know which is which, which is why the allowlist is yours to write and is empty until you do.
+
+### Power-cycling a PoE port
+
+The classic fix for a wedged access point or camera, and the natural partner of a `device.<name>: offline` key:
+
+```yaml
+  actions:
+    - type: unifi.poe.cycle
+      poe:
+        device: aa:bb:cc:00:11:22   # the switch's MAC
+        port: 7
+        portName: hallway-ap        # what that port is called, checked first
+```
+
+```yaml
+# values.yaml
+unifi:
+  actions:
+    allowedPoePorts:
+      - aa:bb:cc:00:11:22/7
+```
+
+**This is the action where a wrong target does visible damage** — the wrong port drops an access point, a camera, or the switch uplink carrying your cluster — and the console will accept the wrong one exactly as readily as the right one. So a port is identified by three things that must all agree with the switch's own port table, checked immediately before the command is sent:
+
+| | Why |
+| --- | --- |
+| `device`, a **MAC** | A device name is a label. Renaming a switch would silently repoint the action; a MAC identifies the hardware. |
+| `port`, an index | What the console addresses. |
+| `portName`, **required** | The one that does the real work. An index alone means "whatever is in slot 7 *now*", and after somebody re-patches a rack that is a different thing. Naming what is supposed to be there turns a re-patch into a refused action with a sentence, instead of a power cut to something else. |
+
+Both halves are required in the allowlist too, for the same reason: `aa:bb:cc:00:11:22/7`, never just `7`.
+
+Three refusals apply **whatever you allowlist**, in the same way the [outbound dialer refuses loopback](SECURITY.md#outbound-actions) whatever the destination allowlist says:
+
+- **The switch's own uplink is never cycled.** That port carries everything behind the switch — quite possibly including Reactor's path to the console.
+- **A port the switch does not report as PoE-capable is never cycled.** There is nothing there to cut, and the identity is probably wrong.
+- **A switch that does not report those fields at all is refused**, rather than assumed safe. A guard that silently stops applying is worse than one that declines out loud.
+
+#### The loop, and why debounce is the answer rather than a cooldown
+
+[#25](https://github.com/robbeverhelst/unifi-reactor/issues/25) warns about the obvious disaster: an AP fails to come back, the automation stays matched, and something keeps bouncing the port. **The shape of this engine is what prevents it.** Reactor acts on *transitions*, and an AP that never comes back leaves the automation **matched** — matched is not a transition, so nothing fires again. There is no retry either, in the reconcile or across reconciles.
+
+What can still drive it repeatedly is a **flapping** key, and there the answer is the same one [`kubernetes.restart` uses](#restart-is-why-debounce-matters) — the engine's debounce, not a cooldown inside the action:
+
+```yaml
+unifi:
+  debounce:
+    keys:
+      device.hallway-ap: 3    # three observations before Reactor believes it is down
+```
+
+A cooldown was considered and not built. It would be a second, weaker debounce living inside one action, invisible to the engine and to every other action beside it, and it would swallow a *legitimate* second cycle as readily as a pathological one. Reactor already has a mechanism for "do not believe this too quickly", and adding a private one next to it would make both harder to reason about. If a key drives a power cut, raise its debounce and accept one `pollInterval` per extra sample.
 
 ## State keys
 

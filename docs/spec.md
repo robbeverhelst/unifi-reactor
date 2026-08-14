@@ -781,8 +781,9 @@ about torrents.
 
 ### UniFi console actions
 
-Shipped as `unifi.wlan.enable` / `unifi.wlan.disable` (#24). They are the first
-actions that **write** to the console the provider observes, rather than to the cluster or to an address an
+Shipped as `unifi.wlan.enable` / `unifi.wlan.disable` (#24) and
+`unifi.poe.cycle` (#25). They are the first actions that **write** to the
+console the provider observes, rather than to the cluster or to an address an
 automation named, and three things about them are decisions rather than
 implementation.
 
@@ -797,24 +798,33 @@ release half is worse here than for qBittorrent: handing a WLAN back means a
 credentials by design. So the actions are named as verbs, they arbitrate with
 nothing, and the fact that a disabled network stays disabled if the exit
 transition never arrives is stated in the CRD doc, the README and the chart
-values rather than discovered.
+values rather than discovered. `unifi.poe.cycle` needs no argument at all: a
+cycle has no level.
 
 **The destination control is the console-side equivalent of
 `actions.allowedDestinations`.** `spec.actions` is writable by anyone who can
 create an `Automation` in their own namespace, so what may be changed on the
 console is decided by the operator at install time —
-`unifi.actions.allowedWlans`, empty by default, refusing everything, with no
-per-automation override.
+`unifi.actions.allowedWlans` and `unifi.actions.allowedPoePorts`, both empty by
+default, both refusing everything, with no per-automation override. A PoE entry
+names a switch MAC *and* a port index, because an index alone means something
+different after somebody re-patches a rack.
 
-**Identity is checked before every write.** The WLAN is read and confirmed to be
-the one the automation named, and the record written back is the record just
-read with exactly one key changed — so Reactor never invents a value for a field
-it does not understand.
+**Identity is checked before every write, and some refusals are floors.** A
+port is identified by MAC, index and name, all three confirmed against the
+switch's own port table immediately before the command is sent; the switch's
+uplink port and any non-PoE port are refused whatever the allowlist says, the
+way the outbound dialer refuses loopback whatever the destination allowlist
+says. A switch that does not report those fields is refused rather than assumed
+safe.
 
-The retry policy is at-most-once, recorded with the others on
-`maxActionAttempts`: the write is a read-modify-write against an endpoint with
-no version to compare against, so a retry after an ambiguous failure re-reads a
-document the failed attempt may already have half-changed.
+The retry policy is at-most-once for all three, recorded with the others on
+`maxActionAttempts`. The loop #25 warns about — an AP that fails to come back
+being bounced repeatedly — cannot occur, because the automation stays *matched*
+and matched is not a transition. Flapping can still drive repeated cycles, and
+the answer there is the engine's debounce rather than a cooldown inside the
+action; a private cooldown would be a second, weaker debounce invisible to
+everything beside it.
 
 Every endpoint on this path is **inferred**, and
 [docs/unifi-write-api.md](unifi-write-api.md) splits what was observed on a real

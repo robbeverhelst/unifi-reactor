@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -41,6 +42,12 @@ const (
 	guestWLANID  = "019ff10d-1111-0000-0000-000000000002"
 	// envelopeData is the key every stat endpoint wraps its payload in.
 	envelopeData = "data"
+
+	// The PoE fixtures. Inside the documentation-ish MAC prefix the captures
+	// use, so nothing here looks like a real device.
+	testSwitchMAC = "aa:bb:cc:00:11:33"
+	testAPPort    = int32(7)
+	testAPName    = "test-ap"
 )
 
 // consoleStub is a UniFi console far enough along to exercise the write path:
@@ -62,12 +69,38 @@ type consoleStub struct {
 	// mode an undocumented endpoint is most likely to have.
 	silentWrite bool
 
+	// ports is the synthetic switch's port table, and cycles records every
+	// power-cycle command that got through. The stub accepts a cycle of any
+	// port it has, exactly as a console would: refusing here would let the
+	// checks that matter rot untested.
+	ports  []map[string]any
+	cycles []portCommand
+
 	server *httptest.Server
+}
+
+// portCommand is one command the stub was sent, as it decoded it.
+type portCommand struct {
+	mac   string
+	index int32
 }
 
 func newConsoleStub(t *testing.T) *consoleStub {
 	t.Helper()
-	stub := &consoleStub{wlans: map[string]map[string]any{
+	stub := &consoleStub{ports: []map[string]any{
+		{
+			fieldPortIndex: 1.0, fieldPortName: "test-uplink",
+			fieldIsUplink: true, fieldPortPoE: true, fieldPoEEnable: true,
+		},
+		{
+			fieldPortIndex: float64(testAPPort), fieldPortName: testAPName,
+			fieldIsUplink: false, fieldPortPoE: true, fieldPoEEnable: true,
+		},
+		{
+			fieldPortIndex: 8.0, fieldPortName: "test-desk",
+			fieldIsUplink: false, fieldPortPoE: false,
+		},
+	}, wlans: map[string]map[string]any{
 		"019ff10d-1111-0000-0000-000000000001": {
 			fieldWLANID: "019ff10d-1111-0000-0000-000000000001", fieldWLANName: mainWLAN,
 			fieldWLANEnabled: true, "security": "wpapsk",
@@ -86,6 +119,8 @@ func newConsoleStub(t *testing.T) *consoleStub {
 	})
 	mux.HandleFunc("GET /proxy/network/api/s/{site}/rest/wlanconf", stub.listWLANs)
 	mux.HandleFunc("PUT /proxy/network/api/s/{site}/rest/wlanconf/{id}", stub.updateWLAN)
+	mux.HandleFunc("GET /proxy/network/api/s/{site}/stat/device", stub.listDevices)
+	mux.HandleFunc("POST /proxy/network/api/s/{site}/cmd/devmgr", stub.deviceCommand)
 
 	stub.server = httptest.NewServer(mux)
 	t.Cleanup(stub.server.Close)
@@ -164,6 +199,71 @@ func (s *consoleStub) updateWLAN(w http.ResponseWriter, r *http.Request) {
 	writeStubJSON(w, []any{maps.Clone(stored)})
 }
 
+func (s *consoleStub) listDevices(w http.ResponseWriter, r *http.Request) {
+	s.record(r, nil)
+	s.mu.Lock()
+	table := make([]any, 0, len(s.ports))
+	for _, port := range s.ports {
+		table = append(table, maps.Clone(port))
+	}
+	s.mu.Unlock()
+	writeStubJSON(w, []any{map[string]any{
+		// A gateway with no port table, so the search has something to skip
+		// past before it finds the switch.
+		fieldMAC: "aa:bb:cc:00:11:22", fieldWLANName: "test-gateway",
+	}, map[string]any{
+		fieldMAC: testSwitchMAC, fieldWLANName: "test-switch", fieldPortTable: table,
+	}})
+}
+
+func (s *consoleStub) deviceCommand(w http.ResponseWriter, r *http.Request) {
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"message":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+	s.record(r, body)
+	if r.Header.Get(csrfHeader) != testCSRF {
+		http.Error(w, `{"message":"csrf token mismatch"}`, http.StatusForbidden)
+		return
+	}
+	mac, _ := body[fieldMAC].(string)
+	index, _ := body[fieldPortIndex].(float64)
+
+	s.mu.Lock()
+	s.cycles = append(s.cycles, portCommand{mac: mac, index: int32(index)})
+	s.mu.Unlock()
+	writeStubJSON(w, []any{})
+}
+
+// cycled is every power-cycle that actually reached the console. Almost every
+// PoE test below asserts this is empty: the point of the checks is that the
+// command is never sent, not that it is sent and then regretted.
+func (s *consoleStub) cycled() []portCommand {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]portCommand(nil), s.cycles...)
+}
+
+// setPort changes one field of one port, which is how each identity check is
+// broken in turn.
+func (s *consoleStub) setPort(t *testing.T, index int32, key string, value any) {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, port := range s.ports {
+		if got, _ := port[fieldPortIndex].(float64); int32(got) == index {
+			if value == nil {
+				delete(port, key)
+			} else {
+				port[key] = value
+			}
+			return
+		}
+	}
+	t.Fatalf("no port %d in the stub", index)
+}
+
 func writeStubJSON(w http.ResponseWriter, data []any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"meta": map[string]string{"rc": "ok"}, envelopeData: data})
@@ -183,6 +283,32 @@ func writerFor(t *testing.T, stub *consoleStub, allowed ...string) *Writer {
 	}
 	return writer
 }
+
+// poeWriterFor builds a Writer with the named ports allowed.
+func poeWriterFor(t *testing.T, stub *consoleStub, allowed ...string) *Writer {
+	t.Helper()
+	writer, err := NewWriter(Config{
+		URL:     stub.server.URL,
+		Site:    defaultSite,
+		Actions: ActionsConfig{AllowedPoEPorts: allowed},
+		Webhook: WebhookConfig{Username: testConsoleUser, Password: testPassword},
+	})
+	if err != nil {
+		t.Fatalf("building the writer: %v", err)
+	}
+	return writer
+}
+
+func poeAction(port int32, name string) reactorv1alpha1.Action {
+	return reactorv1alpha1.Action{
+		Type: actions.TypeUniFiPoECycle,
+		PoE:  &reactorv1alpha1.PoEPort{Device: testSwitchMAC, Port: port, PortName: name},
+	}
+}
+
+// allowedAP is the allowlist entry for the one port these tests are allowed to
+// cycle.
+var allowedAP = fmt.Sprintf("%s/%d", testSwitchMAC, testAPPort)
 
 func wlanAction(actionType, name string) reactorv1alpha1.Action {
 	return reactorv1alpha1.Action{Type: actionType, WLAN: &reactorv1alpha1.WLAN{Name: name}}
@@ -456,4 +582,225 @@ func slicesEqual(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+// TestPoECycleChecksTheSwitchBeforeCuttingPower is the happy path, and it is
+// mostly an assertion about ORDER: the port table is read and checked, and only
+// then is the command sent.
+func TestPoECycleChecksTheSwitchBeforeCuttingPower(t *testing.T) {
+	stub := newConsoleStub(t)
+	writer := poeWriterFor(t, stub, allowedAP)
+
+	result, err := writer.Apply(context.Background(), poeAction(testAPPort, testAPName), 0)
+	if err != nil {
+		t.Fatalf("cycling the port: %v", err)
+	}
+	if want := fmt.Sprintf("unifi/port/%s/%d", testSwitchMAC, testAPPort); result.Origin != want {
+		t.Errorf("origin = %q, want %q", result.Origin, want)
+	}
+	if result.Attempts != 1 {
+		t.Errorf("attempts = %d, want exactly one: a power cut is at-most-once", result.Attempts)
+	}
+
+	want := []string{
+		"POST /api/auth/login",
+		"GET /proxy/network/api/s/default/stat/device",
+		"POST /proxy/network/api/s/default/cmd/devmgr",
+		"POST /api/auth/logout",
+	}
+	if got := stub.seen(); !slicesEqual(got, want) {
+		t.Errorf("requests = %v, want %v", got, want)
+	}
+	if got := stub.cycled(); len(got) != 1 || got[0].mac != testSwitchMAC || got[0].index != testAPPort {
+		t.Errorf("cycles = %v, want one on %s port %d", got, testSwitchMAC, testAPPort)
+	}
+	// The command addresses the port by the console's own index, not by a
+	// position in the table it happened to be found at.
+	written := stub.written()
+	if len(written) != 1 || written[0]["cmd"] != "power-cycle" {
+		t.Fatalf("body = %v, want one power-cycle command", written)
+	}
+	if written[0][fieldPortIndex] != float64(testAPPort) {
+		t.Errorf("port_idx = %v, want %d", written[0][fieldPortIndex], testAPPort)
+	}
+}
+
+// TestPoECycleRefusesAPortThatDrifted is the reason portName is required. The
+// index still exists and is still allowlisted; what is plugged into it has a
+// different name, so it is probably a different thing.
+func TestPoECycleRefusesAPortThatDrifted(t *testing.T) {
+	stub := newConsoleStub(t)
+	stub.setPort(t, testAPPort, fieldPortName, "test-something-else")
+	writer := poeWriterFor(t, stub, allowedAP)
+
+	_, err := writer.Apply(context.Background(), poeAction(testAPPort, testAPName), 0)
+	if err == nil {
+		t.Fatal("a renamed port was cycled anyway")
+	}
+	for _, expected := range []string{"test-something-else", testAPName} {
+		if !strings.Contains(err.Error(), expected) {
+			t.Errorf("error %q does not say what the port is called now versus what was expected", err)
+		}
+	}
+	if got := stub.cycled(); len(got) != 0 {
+		t.Errorf("power was cut to %v despite the name not matching", got)
+	}
+}
+
+// TestPoECycleRefusesTheUplink is the floor. The allowlist says yes and the
+// answer is still no, because this port carries everything behind the switch.
+func TestPoECycleRefusesTheUplink(t *testing.T) {
+	stub := newConsoleStub(t)
+	writer := poeWriterFor(t, stub, fmt.Sprintf("%s/1", testSwitchMAC))
+
+	_, err := writer.Apply(context.Background(), poeAction(1, "test-uplink"), 0)
+	if err == nil {
+		t.Fatal("the switch uplink was cycled")
+	}
+	if !strings.Contains(err.Error(), "uplink") || !strings.Contains(err.Error(), "whatever the allowlist says") {
+		t.Errorf("error = %q, want one saying the uplink is refused regardless of the allowlist", err)
+	}
+	if got := stub.cycled(); len(got) != 0 {
+		t.Errorf("power was cut to the uplink: %v", got)
+	}
+}
+
+// TestPoECycleRefusesWhatItCannotCheck covers the fields that are read
+// strictly. A switch that does not report one of them is refused rather than
+// assumed safe: a guard that silently stops applying is worse than one that
+// declines.
+func TestPoECycleRefusesWhatItCannotCheck(t *testing.T) {
+	for name, breakage := range map[string]struct {
+		key   string
+		value any
+		want  string
+	}{
+		"no port name":     {key: fieldPortName, value: nil, want: "reports no name"},
+		"no uplink flag":   {key: fieldIsUplink, value: nil, want: fieldIsUplink},
+		"no poe flag":      {key: fieldPortPoE, value: nil, want: fieldPortPoE},
+		"not a poe port":   {key: fieldPortPoE, value: false, want: "does not supply PoE"},
+		"poe switched off": {key: fieldPoEEnable, value: false, want: "switched off"},
+		"uplink not a bool": {
+			key: fieldIsUplink, value: "yes", want: "cannot tell whether it is the switch's uplink",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stub := newConsoleStub(t)
+			stub.setPort(t, testAPPort, breakage.key, breakage.value)
+			writer := poeWriterFor(t, stub, allowedAP)
+
+			_, err := writer.Apply(context.Background(), poeAction(testAPPort, testAPName), 0)
+			if err == nil {
+				t.Fatal("the port was cycled despite the check being unmakeable")
+			}
+			if !strings.Contains(err.Error(), breakage.want) {
+				t.Errorf("error = %q, want one containing %q", err, breakage.want)
+			}
+			if got := stub.cycled(); len(got) != 0 {
+				t.Errorf("power was cut anyway: %v", got)
+			}
+		})
+	}
+}
+
+func TestPoECycleRefusesAnUnknownDeviceOrPort(t *testing.T) {
+	for name, test := range map[string]struct {
+		action reactorv1alpha1.Action
+		allow  string
+		want   string
+	}{
+		"no such switch": {
+			action: reactorv1alpha1.Action{
+				Type: actions.TypeUniFiPoECycle,
+				PoE: &reactorv1alpha1.PoEPort{
+					Device: "aa:bb:cc:00:11:99", Port: testAPPort, PortName: testAPName,
+				},
+			},
+			allow: fmt.Sprintf("aa:bb:cc:00:11:99/%d", testAPPort),
+			want:  "no device with mac",
+		},
+		"no such port": {
+			action: poeAction(42, testAPName),
+			allow:  fmt.Sprintf("%s/42", testSwitchMAC),
+			want:   "has no port 42",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stub := newConsoleStub(t)
+			writer := poeWriterFor(t, stub, test.allow)
+
+			_, err := writer.Apply(context.Background(), test.action, 0)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want one containing %q", err, test.want)
+			}
+			if got := stub.cycled(); len(got) != 0 {
+				t.Errorf("power was cut anyway: %v", got)
+			}
+		})
+	}
+}
+
+func TestPoECycleRefusedWithoutAnAllowlistEntry(t *testing.T) {
+	for name, allowed := range map[string][]string{
+		"nothing allowed":      nil,
+		"another port allowed": {fmt.Sprintf("%s/8", testSwitchMAC)},
+		"another switch allowed": {
+			fmt.Sprintf("aa:bb:cc:00:11:44/%d", testAPPort),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stub := newConsoleStub(t)
+			writer := poeWriterFor(t, stub, allowed...)
+
+			_, err := writer.Apply(context.Background(), poeAction(testAPPort, testAPName), 0)
+			if err == nil {
+				t.Fatal("the port was cycled with no allowlist entry for it")
+			}
+			if !strings.Contains(err.Error(), "unifi.actions.allowedPoePorts") {
+				t.Errorf("error %q does not name the value to set", err)
+			}
+			// A refused action must not even open a session on the console.
+			if got := stub.seen(); len(got) != 0 {
+				t.Errorf("a refused action still talked to the console: %v", got)
+			}
+		})
+	}
+}
+
+// TestPoEAllowlistNeedsBothHalves pins the format decision from #25: a port
+// index on its own means something different after somebody re-patches a rack,
+// so an entry that names no switch is a configuration error rather than a
+// wildcard.
+func TestPoEAllowlistNeedsBothHalves(t *testing.T) {
+	for name, entry := range map[string]string{
+		"no switch":         "7",
+		"no port":           testSwitchMAC + "/",
+		"port zero":         testSwitchMAC + "/0",
+		"negative port":     testSwitchMAC + "/-1",
+		"not a mac":         "test-switch/7",
+		"port not a number": testSwitchMAC + "/seven",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := NewWritePolicy(ActionsConfig{AllowedPoEPorts: []string{entry}}); err == nil {
+				t.Fatalf("allowlist entry %q was accepted", entry)
+			}
+		})
+	}
+}
+
+// TestPoEAllowlistNormalizesTheMAC keeps a capital letter or a hyphen from
+// being the reason an allowed port is refused during an incident.
+func TestPoEAllowlistNormalizesTheMAC(t *testing.T) {
+	policy, err := NewWritePolicy(ActionsConfig{
+		AllowedPoEPorts: []string{" AA-BB-CC-00-11-33/7 "},
+	})
+	if err != nil {
+		t.Fatalf("parsing the policy: %v", err)
+	}
+	if !policy.allowsPort(portRef{mac: testSwitchMAC, port: 7}) {
+		t.Error("an allowlist entry written with hyphens and capitals did not match")
+	}
+	if policy.allowsPort(portRef{mac: testSwitchMAC, port: 8}) {
+		t.Error("allowing port 7 also allowed port 8")
+	}
 }

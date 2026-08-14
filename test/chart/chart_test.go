@@ -45,6 +45,7 @@ const (
 	// allowlist and the permission it implies appear in the rendered release.
 	envAllowedDestinations = "REACTOR_ACTION_ALLOWED_DESTINATIONS"
 	envAllowedWLANs        = "UNIFI_ACTIONS_ALLOWED_WLANS"
+	envAllowedPoEPorts     = "UNIFI_ACTIONS_ALLOWED_POE_PORTS"
 	secretsRule            = `resources: ["secrets"]`
 	// tokenReviews is how the metrics endpoint's authn/authz filter appears in
 	// the rendered RBAC.
@@ -442,7 +443,7 @@ func TestAllowedDestinationsGrantSecretReads(t *testing.T) {
 // empty by default, and empty means the variable is not rendered at all.
 func TestConsoleActionsAreOffByDefault(t *testing.T) {
 	manifests := render(t, unifiURL)
-	for _, absent := range []string{envAllowedWLANs, "UNIFI_USERNAME"} {
+	for _, absent := range []string{envAllowedWLANs, envAllowedPoEPorts, "UNIFI_USERNAME"} {
 		if strings.Contains(manifests, absent) {
 			t.Fatalf("%s was rendered on an install that allowed no console write", absent)
 		}
@@ -468,12 +469,30 @@ func TestAllowedWLANsCarryTheConsoleCredential(t *testing.T) {
 	}
 }
 
+// TestAllowedPoEPortsCarryTheConsoleCredential is the same pairing for the
+// action that cuts power, which reaches the console the same way.
+func TestAllowedPoEPortsCarryTheConsoleCredential(t *testing.T) {
+	manifests := render(t, unifiURL, `unifi.actions.allowedPoePorts={aa:bb:cc:00:11:22/7}`)
+	if !strings.Contains(manifests, `value: "aa:bb:cc:00:11:22/7"`) {
+		t.Fatal("the PoE port allowlist was not passed to the operator")
+	}
+	if !strings.Contains(manifests, "UNIFI_USERNAME") {
+		t.Fatal("console writes cannot authenticate without a UniFi OS local account")
+	}
+	// Listing a port must not quietly allow an SSID as well: the two lists are
+	// separate decisions.
+	if strings.Contains(manifests, envAllowedWLANs) {
+		t.Fatal("allowing a PoE port also rendered the WLAN allowlist")
+	}
+}
+
 // TestConsoleCredentialsAreInjectedOnce guards the one thing that could go
 // wrong by having two features want the same pair: a duplicate env entry is a
 // deployment the API server rejects.
 func TestConsoleCredentialsAreInjectedOnce(t *testing.T) {
 	manifests := render(t, unifiURL,
 		"unifi.actions.allowedWlans={Guest}",
+		`unifi.actions.allowedPoePorts={aa:bb:cc:00:11:22/7}`,
 		"unifi.webhook.enabled=true",
 		"unifi.webhook.registration.enabled=true",
 		"unifi.webhook.registration.publicURL=http://192.0.2.5:9090/webhooks/unifi")

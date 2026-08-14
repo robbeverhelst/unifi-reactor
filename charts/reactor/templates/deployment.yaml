@@ -137,9 +137,13 @@ spec:
             {{- end }}
             {{- with .Values.unifi.actions.allowedWlans }}
             # What Reactor may change on the console. Empty is the default and
-            # refuses every unifi.* action, so this variable is absent unless
+            # refuses every unifi.* action, so these variables are absent unless
             # the operator listed something.
             - name: UNIFI_ACTIONS_ALLOWED_WLANS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.unifi.actions.allowedPoePorts }}
+            - name: UNIFI_ACTIONS_ALLOWED_POE_PORTS
               value: {{ join "," . | quote }}
             {{- end }}
             {{- with (include "reactor.consoleSecret" .) }}

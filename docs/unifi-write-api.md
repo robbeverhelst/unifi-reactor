@@ -43,7 +43,13 @@ prefix the poller reads through — while authenticating at the UniFi OS layer a
 | --- | --- | --- |
 | `GET /proxy/network/api/s/<site>/rest/wlanconf` | `unifi.wlan.*`, the read half | inferred |
 | `PUT /proxy/network/api/s/<site>/rest/wlanconf/<_id>` | `unifi.wlan.*`, the write | inferred |
+| `GET /proxy/network/api/s/<site>/stat/device` | `unifi.poe.cycle`, the port check | **observed** as a read; the `port_table` fields below are not |
+| `POST /proxy/network/api/s/<site>/cmd/devmgr` | `unifi.poe.cycle`, the command | inferred |
 | `POST /api/auth/logout` | ending the session | inferred |
+
+`stat/device` is the one endpoint here the poller already reads on every cycle, so *that it answers*
+is observed. Which fields a **switch** record carries is not: every committed capture is of a
+gateway or a UPS, and `testdata/unifi/README.md` lists them.
 
 ### Fields read, and what happens when one is missing
 
@@ -52,11 +58,18 @@ prefix the poller reads through — while authenticating at the UniFi OS layer a
 | `_id` | WLAN write | refused — there is no address to PUT to |
 | `name` (WLAN) | WLAN lookup | the WLAN is not found, and the refusal does not list the ones that are |
 | `enabled` | WLAN read and write | refused — the state this action assumes is not the one the console describes |
+| `mac` | PoE device lookup | the device is not found |
+| `port_table[].port_idx` | PoE port lookup | the port is not found |
+| `port_table[].name` | PoE drift check | **refused** |
+| `port_table[].is_uplink` | PoE uplink floor | **refused** |
+| `port_table[].port_poe` | PoE capability floor | **refused** |
+| `port_table[].poe_enable` | PoE state check | allowed — capability is the load-bearing check |
 
-A field this action cannot read is a refusal rather than an assumption, because a check that
-silently stops applying on some firmware is worse than one that declines out loud. If a real console
-turns out not to report one, the error says which field was missing — that is a code change and a
-bug report, not something to work around.
+The three bold rows are the design decision worth arguing with. A missing field could have been
+treated as "not an uplink" and "probably fine", and it is treated as a refusal instead, because a
+safety check that silently stops applying on some firmware is worse than one that declines out
+loud. If a real console turns out not to report them, the error says which field was missing — that
+is a code change and a bug report, not something to work around.
 
 ## The WLAN write is a read-modify-write, and that is a real limitation
 
@@ -79,6 +92,20 @@ The write is checked afterwards, too — the console answers a write with the ob
 `200` that did not take is reported as a failure rather than assumed to be a success. That is the
 failure mode an undocumented endpoint is most likely to have.
 
+## The PoE command
+
+```json
+{"cmd": "power-cycle", "mac": "<switch mac>", "port_idx": 7}
+```
+
+Addressed by the console's own port index rather than by a position in the table, because the table
+is not guaranteed to be ordered or complete.
+
+Almost all of `cyclePoEPort` is the check rather than the command, and that is the right
+proportion: the console will accept a cycle of the wrong port exactly as readily as the right one,
+and Reactor would never hear about the difference. See the `PoEPort` type in `api/v1alpha1` for why
+a port is identified by a MAC, an index **and** a name.
+
 ## Rehearsing it without hardware
 
 `hack/mock-unifi` serves and enforces all of the above:
@@ -88,11 +115,21 @@ make dev-mock
 
 curl http://localhost:9443/wlan                                   # what the console holds
 curl -X POST 'http://localhost:9443/wlan?name=mock-guest&enabled=false'
+curl http://localhost:9443/poe                                    # ports, and every cycle so far
+
+# break each identity check on purpose, and watch Reactor refuse
+curl -X POST 'http://localhost:9443/poe?port=7&name=re-patched'
+curl -X POST 'http://localhost:9443/poe?port=7&uplink=true'
+curl -X POST 'http://localhost:9443/poe?port=7&poe=false'
 ```
 
-The WLAN records there are **not a capture** and are labelled as such in the mock's
+The WLAN records and the switch there are **not captures** and are labelled as such in the mock's
 own output. They are built from the field names on this page. Registration working against the mock
 means Reactor sends what this page describes; it does not mean a console accepts it.
+
+One deliberate asymmetry: **the mock does not refuse a cycle of the uplink.** A real console would
+accept that command without complaint, so a mock that refused it would let Reactor's own refusal rot
+untested — and on real hardware, Reactor's is the only guard there is.
 
 ## What would settle this
 
@@ -100,7 +137,9 @@ The equivalent of the failover runbook in [`testdata/unifi/README.md`](../testda
 and it needs a console somebody is willing to change. In rough order of value:
 
 1. Does `PUT rest/wlanconf/<id>` accept a full record and apply only the changed field?
-2. Does `POST /api/auth/logout` end the session, and does the console mind being logged in and out
+2. Does `cmd/devmgr` accept `power-cycle` with `mac` + `port_idx`, and on which device types?
+3. Does a switch's `port_table` actually carry `is_uplink`, `port_poe` and `poe_enable` as booleans?
+4. Does `POST /api/auth/logout` end the session, and does the console mind being logged in and out
    once per action?
 
 Nothing here should be captured into `testdata/` by hand. If a fixture is ever wanted for these,

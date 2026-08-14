@@ -62,7 +62,8 @@ const (
 	envUsername           = "UNIFI_USERNAME"
 	envPassword           = "UNIFI_PASSWORD"
 
-	envActionsAllowedWLANs = "UNIFI_ACTIONS_ALLOWED_WLANS"
+	envActionsAllowedWLANs    = "UNIFI_ACTIONS_ALLOWED_WLANS"
+	envActionsAllowedPoEPorts = "UNIFI_ACTIONS_ALLOWED_POE_PORTS"
 )
 
 // Config is the UniFi provider's install-level configuration. There is one
@@ -163,7 +164,8 @@ func ConfigFromEnv(lookup func(string) string) (Config, bool, error) {
 			Password:           lookup(envPassword),
 		},
 		Actions: ActionsConfig{
-			AllowedWLANs: splitList(lookup(envActionsAllowedWLANs)),
+			AllowedWLANs:    splitList(lookup(envActionsAllowedWLANs)),
+			AllowedPoEPorts: splitList(lookup(envActionsAllowedPoEPorts)),
 		},
 	}
 

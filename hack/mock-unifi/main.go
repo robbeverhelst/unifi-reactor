@@ -81,6 +81,15 @@ limitations under the License.
 //
 //	curl http://localhost:9443/wlan                               # what the console holds
 //	curl -X POST 'http://localhost:9443/wlan?name=mock-guest&enabled=false'
+//	curl http://localhost:9443/poe                                # ports, and every cycle so far
+//
+// The PoE half is where the identity checks live, so the dev endpoint exists to
+// break them on purpose — rename a port, make it the uplink, take its PoE away
+// — and watch Reactor refuse rather than cut power to the wrong thing:
+//
+//	curl -X POST 'http://localhost:9443/poe?port=7&name=re-patched'
+//	curl -X POST 'http://localhost:9443/poe?port=7&uplink=true'
+//	curl -X POST 'http://localhost:9443/poe?port=7&poe=false'
 //
 // Enforcement is the point rather than a bonus. Like the alarm rule endpoint
 // rejecting a flat triggers_data, the WLAN endpoint demands the csrf header,
@@ -172,6 +181,15 @@ const (
 	// is and is not evidence of.
 	fieldEnabled = "enabled"
 	keyNote      = "note"
+
+	// The port_table fields the PoE check reads, and the WLAN field it matches
+	// on. Named here because the mock and the checks have to agree on them
+	// exactly: a typo would make the mock rehearse a check nobody is making.
+	fieldName      = "name"
+	fieldPortIndex = "port_idx"
+	fieldIsUplink  = "is_uplink"
+	fieldPortPoE   = "port_poe"
+	fieldPoEEnable = "poe_enable"
 
 	// statusHealthOK is what the capture's www subsystem reports. The other
 	// values this mock will happily serve — "warning", "error" — are the ones
@@ -275,6 +293,12 @@ type mock struct {
 	// — see the package comment — and keyed by the id the mock made up.
 	wlans map[string]map[string]any
 
+	// switchDevice is a synthetic PoE switch, and cycles records every
+	// power-cycle command it was sent. No switch record has ever been captured
+	// either, so this carries only the port_table fields the check reads.
+	switchDevice map[string]any
+	cycles       []string
+
 	// delivery is the synthetic body /alarm-fire posts. It is a stand-in, not
 	// a capture: no real Alarm Manager delivery has been recorded yet.
 	delivery []byte
@@ -300,6 +324,8 @@ func main() {
 		wwwStatus: statusHealthOK,
 		rules:     map[string]map[string]any{},
 		wlans:     mockWLANs(),
+
+		switchDevice: mockSwitch(),
 	}
 	if raw, err := os.ReadFile(*deliveryFile); err == nil {
 		m.delivery = raw
@@ -362,8 +388,11 @@ func main() {
 	// authenticated the UniFi OS way — a session cookie plus the csrf header.
 	mux.HandleFunc("GET /proxy/network/api/s/{site}/rest/wlanconf", m.serveWLANConf)
 	mux.HandleFunc("PUT /proxy/network/api/s/{site}/rest/wlanconf/{id}", m.updateWLANConf)
+	mux.HandleFunc("POST /proxy/network/api/s/{site}/cmd/devmgr", m.deviceCommand)
 	mux.HandleFunc("GET /wlan", m.describeWLANs)
 	mux.HandleFunc("POST /wlan", m.setWLAN)
+	mux.HandleFunc("GET /poe", m.describePoE)
+	mux.HandleFunc("POST /poe", m.setPoEPort)
 
 	// The UniFi OS layer: no /proxy/network prefix, cookie session, csrf header.
 	mux.HandleFunc("POST /api/auth/login", m.login)
@@ -410,7 +439,26 @@ func (m *mock) devices() []any {
 			}
 		}
 	}
-	return visible
+	// The synthetic switch is appended rather than substituted: the captured
+	// records are the ground truth and this one is not, so it never replaces
+	// anything that came off a console. The state parser ignores it — it has
+	// neither WAN ports nor a vbms_table — which is what makes it safe to serve
+	// on the same endpoint.
+	return append(visible, cloneJSON(m.switchDevice))
+}
+
+// cloneJSON deep-copies a decoded document, so a handler cannot hand a caller a
+// reference into the mock's own state.
+func cloneJSON(value map[string]any) map[string]any {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	var clone map[string]any
+	if err := json.Unmarshal(encoded, &clone); err != nil {
+		return nil
+	}
+	return clone
 }
 
 // rewriteBattPool applies the runtime and load overrides. A runtime of exactly
@@ -707,7 +755,7 @@ func (m *mock) describeWAN(w http.ResponseWriter, _ *http.Request) {
 	variants := make(map[string]any, len(failoverVariants))
 	for name, variant := range failoverVariants {
 		variants[name] = map[string]any{
-			"is_uplink":    variant.isUplink,
+			fieldIsUplink:  variant.isUplink,
 			"contextMoves": variant.context,
 			"hypothesis":   variant.why,
 		}
@@ -824,7 +872,7 @@ func mockWLANs() map[string]map[string]any {
 		id := fmt.Sprintf("019ff10d-1111-0000-0000-%012d", i+1)
 		table[id] = map[string]any{
 			"_id":          id,
-			"name":         wlan.name,
+			fieldName:      wlan.name,
 			fieldEnabled:   wlan.enabled,
 			"security":     "wpapsk",
 			"wpa_mode":     "wpa2",
@@ -862,7 +910,7 @@ func (m *mock) serveWLANConf(w http.ResponseWriter, r *http.Request) {
 
 func wlanName(record any) string {
 	wlan, _ := record.(map[string]any)
-	name, _ := wlan["name"].(string)
+	name, _ := wlan[fieldName].(string)
 	return name
 }
 
@@ -907,7 +955,7 @@ func (m *mock) updateWLANConf(w http.ResponseWriter, r *http.Request) {
 
 	enabled, _ := submitted[fieldEnabled].(bool)
 	stored[fieldEnabled] = enabled
-	log.Printf("wlan %q is now enabled=%v", stored["name"], enabled)
+	log.Printf("wlan %q is now enabled=%v", stored[fieldName], enabled)
 	writeResponse(w, []any{maps.Clone(stored)})
 }
 
@@ -944,7 +992,7 @@ func (m *mock) describeWLANs(w http.ResponseWriter, _ *http.Request) {
 	defer m.mu.Unlock()
 	state := map[string]any{}
 	for _, wlan := range m.wlans {
-		name, _ := wlan["name"].(string)
+		name, _ := wlan[fieldName].(string)
 		state[name] = wlan[fieldEnabled]
 	}
 	writeJSON(w, map[string]any{
@@ -966,7 +1014,7 @@ func (m *mock) setWLAN(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, wlan := range m.wlans {
-		if wlan["name"] != name {
+		if wlan[fieldName] != name {
 			continue
 		}
 		wlan[fieldEnabled] = enabled
@@ -975,6 +1023,162 @@ func (m *mock) setWLAN(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Error(w, fmt.Sprintf("no wlan named %q", name), http.StatusNotFound)
+}
+
+// --- PoE ports (the other half of the write path) ----------------------------
+
+// mockSwitchMAC is inside the documentation-ish prefix the captures use, so
+// nothing here looks like a real device. hack/verify-testdata.sh enforces that
+// prefix on committed fixtures; this file is not one, and follows it anyway.
+const mockSwitchMAC = "aa:bb:cc:00:11:33"
+
+// mockSwitch builds a PoE switch. NOT A CAPTURE: no switch record has ever been
+// recorded from a console, so this carries only the port_table fields the PoE
+// check reads. The four ports are the four cases worth rehearsing — a normal
+// PoE port, the uplink, a port with no PoE, and a port whose power is off.
+func mockSwitch() map[string]any {
+	return map[string]any{
+		"mac": mockSwitchMAC, "model": "MOCKPOE", "type": "usw", fieldName: "mock-switch",
+		"port_table": []any{
+			map[string]any{
+				fieldPortIndex: 1, fieldName: "mock-uplink",
+				fieldIsUplink: true, fieldPortPoE: true, fieldPoEEnable: true,
+			},
+			map[string]any{
+				fieldPortIndex: 7, fieldName: "mock-ap",
+				fieldIsUplink: false, fieldPortPoE: true, fieldPoEEnable: true,
+			},
+			map[string]any{
+				fieldPortIndex: 8, fieldName: "mock-desk",
+				fieldIsUplink: false, fieldPortPoE: false,
+			},
+			map[string]any{
+				fieldPortIndex: 9, fieldName: "mock-spare",
+				fieldIsUplink: false, fieldPortPoE: true, fieldPoEEnable: false,
+			},
+		},
+	}
+}
+
+// deviceCommand is the enforcing half of the PoE path.
+//
+// It deliberately does NOT refuse a cycle of the uplink. A real console would
+// accept that command without complaint, and a mock that refused it would let
+// Reactor's own refusal rot untested — the guard has to be Reactor's, because
+// on real hardware nothing else is going to apply it. What this does enforce is
+// what the console genuinely would: the session, the csrf header, a known
+// command, a device it has, and a port index on that device.
+func (m *mock) deviceCommand(w http.ResponseWriter, r *http.Request) {
+	if !m.sessionCookiePresent(r) {
+		http.Error(w, `{"message":"api.err.LoginRequired"}`, http.StatusUnauthorized)
+		return
+	}
+	if r.Header.Get("x-csrf-token") != mockCSRF {
+		http.Error(w, `{"message":"csrf token mismatch"}`, http.StatusForbidden)
+		return
+	}
+	var command map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&command); err != nil {
+		http.Error(w, `{"message":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+	if command["cmd"] != "power-cycle" {
+		http.Error(w, `{"message":"api.err.InvalidCmd"}`, http.StatusBadRequest)
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if command["mac"] != m.switchDevice["mac"] {
+		http.Error(w, `{"message":"api.err.UnknownDevice"}`, http.StatusBadRequest)
+		return
+	}
+	index, ok := command[fieldPortIndex].(float64)
+	if !ok || !m.hasPort(int(index)) {
+		http.Error(w, `{"message":"api.err.InvalidPort"}`, http.StatusBadRequest)
+		return
+	}
+
+	entry := fmt.Sprintf("%v/%d", command["mac"], int(index))
+	m.cycles = append(m.cycles, entry)
+	log.Printf("POWER-CYCLED %s (%d so far)", entry, len(m.cycles))
+	writeResponse(w, []any{})
+}
+
+func (m *mock) hasPort(index int) bool {
+	_, found := m.portByIndex(index)
+	return found
+}
+
+func (m *mock) portByIndex(index int) (map[string]any, bool) {
+	table, ok := m.switchDevice["port_table"].([]any)
+	if !ok {
+		return nil, false
+	}
+	for _, entry := range table {
+		port, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		if got, ok := port[fieldPortIndex].(int); ok && got == index {
+			return port, true
+		}
+	}
+	return nil, false
+}
+
+// describePoE reports the port table and every cycle the mock has been sent, so
+// "did Reactor cut power, and to what" is one request rather than a log search.
+func (m *mock) describePoE(w http.ResponseWriter, _ *http.Request) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	writeJSON(w, map[string]any{
+		"switch": m.switchDevice,
+		"cycles": m.cycles,
+		keyNote: "synthetic, not a capture: no switch record has ever been recorded from a console, " +
+			"and no power-cycle command has ever been sent to one. See docs/unifi-write-api.md.",
+	})
+}
+
+// setPoEPort breaks the identity checks on purpose. Renaming a port is the
+// re-patched rack; marking one as the uplink or as non-PoE is each of the two
+// floors. All three should produce a refusal from Reactor and no cycle here.
+func (m *mock) setPoEPort(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	index, err := strconv.Atoi(query.Get("port"))
+	if err != nil {
+		http.Error(w, "port must be an integer index, e.g. ?port=7&name=re-patched", http.StatusBadRequest)
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	port, found := m.portByIndex(index)
+	if !found {
+		http.Error(w, fmt.Sprintf("no port %d on the mock switch", index), http.StatusNotFound)
+		return
+	}
+	if name := query.Get(fieldName); name != "" {
+		port[fieldName] = name
+	}
+	for _, field := range []struct{ param, key string }{
+		{"uplink", fieldIsUplink},
+		{"poe", fieldPortPoE},
+		{"powered", fieldPoEEnable},
+	} {
+		raw := query.Get(field.param)
+		if raw == "" {
+			continue
+		}
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			http.Error(w, field.param+" must be a boolean", http.StatusBadRequest)
+			return
+		}
+		port[field.key] = value
+	}
+	log.Printf("port %d is now %v", index, port)
+	writeJSON(w, port)
 }
 
 // --- Alarm Manager (UniFi OS layer) -----------------------------------------

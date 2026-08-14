@@ -405,16 +405,18 @@ Worth knowing before switching it on:
 
 ## Console actions
 
-`unifi.wlan.enable` and `unifi.wlan.disable` **change** things on your console rather than reading from it. They are off until you name what may be touched:
+`unifi.wlan.enable`, `unifi.wlan.disable` and `unifi.poe.cycle` **change** things on your console rather than reading from it. They are off until you name what may be touched:
 
 ```yaml
 unifi:
   actions:
     allowedWlans:
       - Guest
+    allowedPoePorts:
+      - aa:bb:cc:00:11:22/7     # switch MAC, then port index
 ```
 
-With the list empty — the default — every `unifi.*` action is refused, and the Automation says which value to add. There is no `*`: "any SSID" is not a choice this chart offers.
+With both lists empty — the default — every `unifi.*` action is refused, and the Automation says which value to add. There is no `*`: "any SSID" and "any port" are not choices this chart offers.
 
 **These need a second credential.** The API key the poller reads with does not write; the write path uses a UniFi OS local account, the same one Alarm Manager self-registration uses:
 
@@ -424,10 +426,12 @@ kubectl -n reactor-system create secret generic unifi-reactor-console \
   --from-literal=UNIFI_PASSWORD='...'
 ```
 
-Setting that list injects the Secret. **No new RBAC** — a console write goes to your gateway, not to the API server — and no new outbound destination, since the console's address is `unifi.url` and not something an `Automation` chooses.
+Setting either list injects that Secret. **No new RBAC** — a console write goes to your gateway, not to the API server — and no new outbound destination, since the console's address is `unifi.url` and not something an `Automation` chooses.
 
-One thing worth knowing before listing anything:
+Three things worth knowing before listing anything:
 
+- **A PoE entry names a switch and a port, never a port alone**, and the `Automation` must also name what the port is *called*. An index means "whatever is in slot 7 now"; after a re-patch that is a different device. Reactor checks the name against the switch before cutting power and refuses if it moved.
+- **The switch's own uplink is never cycled**, whatever you list, and neither is a port the switch does not report as PoE-capable.
 - **A disabled WLAN is not handed back.** These are edge actions with no baseline: if the exit transition never arrives — the `Automation` is deleted, the release is uninstalled, the state key stops being observable — the network stays off until a human turns it on. The pre-delete sweep runs with no credentials and cannot reach the console. List SSIDs whose absence is an inconvenience.
 
 Every endpoint on this path is inferred rather than observed; only the authentication has been seen working on real hardware. See [`docs/unifi-write-api.md`](../../docs/unifi-write-api.md) and [SECURITY.md](../../SECURITY.md#console-actions).
@@ -828,6 +832,7 @@ publishing — which fails as silence rather than as an error.
 | `unifi.webhook.registration.publicURL` | `""` | URL the console should POST to (required when registering) |
 | `unifi.webhook.registration.ruleTitle` | `unifi-reactor` | Title of the rule Reactor creates and recognizes |
 | `unifi.actions.allowedWlans` | `[]` | SSIDs `unifi.wlan.enable` / `unifi.wlan.disable` may switch. **Empty refuses every SSID** |
+| `unifi.actions.allowedPoePorts` | `[]` | Switch ports `unifi.poe.cycle` may power-cycle, as `<mac>/<port>`. **Empty refuses every port** |
 | `unifi.actions.existingSecret` | `unifi-reactor-console` | Secret containing `UNIFI_USERNAME` and `UNIFI_PASSWORD`; the write path needs a UniFi OS local account |
 | `unifi.webhook.registration.existingSecret` | `unifi-reactor-console` | Secret containing `UNIFI_USERNAME` and `UNIFI_PASSWORD` |
 | `actions.allowedDestinations` | `[]` | Where outbound actions may go. Empty refuses all of them; see [Outbound actions](#outbound-actions) |

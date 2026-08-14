@@ -48,6 +48,17 @@ const (
 	// all, to hand it back. See the WLAN type in api/v1alpha1.
 	TypeUniFiWLANEnable  = "unifi.wlan.enable"
 	TypeUniFiWLANDisable = "unifi.wlan.disable"
+	// TypeUniFiPoECycle power-cycles one PoE switch port. It needs no argument
+	// about which column of the taxonomy it belongs in: there is no value a port
+	// can be held at that means "cycled", so it is an occurrence in the world as
+	// well as here, exactly like kubernetes.restart.
+	//
+	// It is the action in this repository where getting the target wrong does
+	// the most visible damage — the wrong port drops an access point, a camera,
+	// or the uplink carrying the cluster — which is why identifying the port
+	// takes three things that must agree rather than an index. See the PoEPort
+	// type in api/v1alpha1.
+	TypeUniFiPoECycle = "unifi.poe.cycle"
 )
 
 // IsConsole reports whether an action type writes to a provider's own console,
@@ -55,7 +66,7 @@ const (
 // outbound client.
 func IsConsole(actionType string) bool {
 	switch actionType {
-	case TypeUniFiWLANEnable, TypeUniFiWLANDisable:
+	case TypeUniFiWLANEnable, TypeUniFiWLANDisable, TypeUniFiPoECycle:
 		return true
 	}
 	return false

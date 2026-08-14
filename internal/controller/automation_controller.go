@@ -144,6 +144,17 @@ const (
 	//                       action reads before it writes and does nothing when
 	//                       the WLAN is already where it should be, so the next
 	//                       transition corrects a miss rather than a retry.
+	//   - unifi.poe.cycle   AT-MOST-ONCE, unconditionally, for the same reason
+	//                       kubernetes.restart is: every execution is a real
+	//                       power cut, so a retry after an ambiguous failure is
+	//                       a second one rather than a correction. It is also
+	//                       where the loop #25 warns about would do the most
+	//                       damage — and the shape of this engine is what stops
+	//                       it. An AP that fails to come back leaves the
+	//                       Automation MATCHED, and matched is not a
+	//                       transition, so nothing re-fires. What can still
+	//                       drive it repeatedly is a flapping key, and debounce
+	//                       is the answer to that, exactly as for restart.
 	maxActionAttempts = 5
 	// retryBackoffBase and retryBackoffCap bound the exponential delay between
 	// those attempts.
@@ -191,6 +202,7 @@ func retryBackoff(attempts int32) time.Duration {
 // meet is not what is missing: what is missing is anywhere to record the value
 // the WLAN held before Reactor changed it that would outlive this Automation
 // and be readable by an uninstall. See the WLAN type in api/v1alpha1.
+// unifi.poe.cycle needs no such argument: a cycle has no level at all.
 //
 // The rule for a new action type: if you cannot define a meet with an identity
 // element for it, it is an edge action and belongs out of this map.

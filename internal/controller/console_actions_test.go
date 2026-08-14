@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,7 +38,11 @@ import (
 // The WLAN fixture. It is never on any console: every test here stops at the
 // seam, and what happens past it is covered in internal/providers/unifi against
 // a stub that speaks the console's shape.
-const testWLANName = "test-guest"
+const (
+	testWLANName  = "test-guest"
+	testSwitchMAC = "aa:bb:cc:00:11:33"
+	testPortName  = "test-ap"
+)
 
 // recordingConsole stands in for a provider's console writer. What is being
 // tested here is that the right actions reach it, with the right timeout, and
@@ -59,7 +64,10 @@ func (c *recordingConsole) Apply(
 	defer c.mu.Unlock()
 	c.applied = append(c.applied, action)
 	c.timeouts = append(c.timeouts, timeout)
-	origin := "unifi/wlan/" + action.WLAN.Name
+	origin := "unifi/poe/cycle"
+	if action.WLAN != nil {
+		origin = "unifi/wlan/" + action.WLAN.Name
+	}
 	if c.fail != nil {
 		return actions.Result{Origin: origin, Attempts: 1}, c.fail
 	}
@@ -315,6 +323,43 @@ var _ = Describe("Console actions", func() {
 				Type: actions.TypeUniFiWLANDisable,
 				WLAN: &reactorv1alpha1.WLAN{Name: ""},
 			})
+		})
+
+		It("rejects a unifi.poe.cycle with no poe block", func() {
+			rejects("poe-no-block", reactorv1alpha1.Action{Type: actions.TypeUniFiPoECycle})
+		})
+
+		It("rejects a poe block on an action that is not unifi.poe.cycle", func() {
+			rejects("poe-wrong-type", reactorv1alpha1.Action{
+				Type: actions.TypeUniFiWLANDisable,
+				WLAN: &reactorv1alpha1.WLAN{Name: testWLANName},
+				PoE:  &reactorv1alpha1.PoEPort{Device: testSwitchMAC, Port: 7, PortName: testPortName},
+			})
+		})
+
+		// The identity rules, enforced by the API server rather than only by the
+		// writer: a device name where a MAC belongs, a port index outside what a
+		// switch has, and — the one that matters most — an unnamed port.
+		It("rejects a port that is not identified the way it has to be", func() {
+			for name, port := range map[string]reactorv1alpha1.PoEPort{
+				"a device name instead of a MAC": {Device: "test-switch", Port: 7, PortName: testPortName},
+				"an uppercase MAC":               {Device: "AA:BB:CC:00:11:33", Port: 7, PortName: testPortName},
+				"port zero":                      {Device: testSwitchMAC, Port: 0, PortName: testPortName},
+				"a port index no switch has":     {Device: testSwitchMAC, Port: 999, PortName: testPortName},
+				"no port name at all":            {Device: testSwitchMAC, Port: 7},
+			} {
+				rejects("poe-"+strings.ReplaceAll(name, " ", "-"),
+					reactorv1alpha1.Action{Type: actions.TypeUniFiPoECycle, PoE: &port})
+			}
+		})
+
+		It("accepts a fully identified port", func() {
+			create("poe-identified", onBackup(reactorv1alpha1.Action{
+				Type: actions.TypeUniFiPoECycle,
+				PoE: &reactorv1alpha1.PoEPort{
+					Device: testSwitchMAC, Port: 7, PortName: testPortName,
+				},
+			}))
 		})
 
 		It("accepts disable on the way in and enable on the way out", func() {
