@@ -40,6 +40,7 @@ Shedding load during a power cut is the same shape, matching `ups: on-battery` i
 
 ## Where to go next
 
+- [Guides](/guides/shut-down-kubernetes-when-the-ups-is-on-battery/) — the same shape applied to a real job: shedding load on battery, pausing downloads on a metered uplink, suspending a CronJob, getting told about a failover.
 - [The two shapes an action has](/concepts/levels-and-occurrences/) — why some actions are arbitrated and some just fire.
 - [Kubernetes actions](/actions/kubernetes/) — suspending a CronJob, cordoning a node, restarting a workload.
 - [State keys](/state-keys/) — everything else Reactor can match on.

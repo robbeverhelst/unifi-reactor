@@ -14,7 +14,7 @@ description: "wan says which uplink is selected, internet says whether the outsi
       internet: down      # regardless of which uplink is carrying it
 ```
 
-Both keys are [debounced at 3 samples](/concepts/settling-a-noisy-signal/), so at the default 30s `pollInterval` an outage takes about **90 seconds** to be believed — and a recovery the same. That is a deliberate trade for not shedding load on one bad probe round; if you need it faster, lower `pollInterval` rather than the debounce, because the three samples are what make the signal trustworthy.
+`internet` is [debounced at 3 samples](/concepts/settling-a-noisy-signal/), so at the default 30s `pollInterval` an outage takes about **90 seconds** to be believed — and a recovery the same. That is a deliberate trade for not shedding load on one bad probe round; if you need it faster, lower `pollInterval` rather than the debounce, because the three samples are what make the signal trustworthy. `wan` is different: it is a switch position rather than a probe, so it ships at the default of 1 sample and reacts on the first observation.
 
 `wan.quality` answers a third question, over a different time horizon: not *is the internet there* but *has this uplink been any good*. It buckets the availability and average latency the console measures against its uptime monitors into two levels, using [thresholds you configure](/operations/configuration/). Those numbers are averages over the console's uptime window — 24 hours on the hardware they were captured from — so `wan.quality` describes a link that has been bad rather than one that spiked, and a long outage keeps it `degraded` for the rest of that window.
 

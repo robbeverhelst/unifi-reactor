@@ -50,6 +50,35 @@ export default defineConfig({
           ],
         },
         {
+          // Task-shaped, and ordered by how many people arrive looking for
+          // each one rather than by how the features are grouped. A guide is
+          // titled with the sentence somebody typed into a search box, which
+          // is why none of these labels matches a section name above.
+          label: 'Guides',
+          items: [
+            {
+              label: 'Shut down Kubernetes when the UPS is on battery',
+              slug: 'guides/shut-down-kubernetes-when-the-ups-is-on-battery',
+            },
+            {
+              label: 'Pause downloads on a metered connection',
+              slug: 'guides/pause-downloads-on-a-metered-connection',
+            },
+            {
+              label: 'Get notified when the WAN fails over',
+              slug: 'guides/get-notified-when-the-wan-fails-over',
+            },
+            {
+              label: 'Suspend CronJobs during an outage',
+              slug: 'guides/suspend-cronjobs-during-an-outage',
+            },
+            {
+              label: 'Run alongside an HPA',
+              slug: 'guides/run-alongside-an-hpa',
+            },
+          ],
+        },
+        {
           label: 'Concepts',
           items: [
             { label: 'State, not events', slug: 'concepts/state-not-events' },
