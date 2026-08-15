@@ -1,0 +1,15 @@
+# Configuration for crd-ref-docs, which renders api/v1alpha1 into the site's
+# Automation API reference. See hack/gen-reference.sh and `make docs`.
+processor:
+  ignoreTypes:
+    # A List type is generated boilerplate and documents nothing an operator
+    # writes.
+    - "AutomationList$"
+  ignoreFields:
+    - "TypeMeta$"
+
+render:
+  # Only used to build the links to the upstream API reference for the types
+  # this API embeds — ObjectMeta, Condition, Time. Reactor supports a range of
+  # versions; this is the one those links point at.
+  kubernetesVersion: 1.34

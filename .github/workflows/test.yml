@@ -43,3 +43,36 @@ jobs:
             git diff
             exit 1
           fi
+
+  # The site's Reference section is generated from the API types, the chart's
+  # values, the metric definitions and the controller's Event reasons. Without
+  # this job those pages rot the first time somebody adds a field in a hurry,
+  # and a reference nobody has noticed is stale is worse than none, because
+  # people trust it.
+  docs:
+    permissions:
+      contents: read
+    name: Check generated docs are committed
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Regenerate the Reference section
+        run: make docs
+
+      - name: Check generated docs are committed
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::The Reference section is out of date; run 'make docs' and commit the result"
+            git status --porcelain
+            git diff
+            exit 1
+          fi

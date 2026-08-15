@@ -52,6 +52,10 @@ manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and Cust
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt",year=$(YEAR) paths="./..."
 
+.PHONY: docs
+docs: crd-ref-docs ## Generate the documentation site's Reference section from the API, chart, metrics and Events.
+	./hack/gen-reference.sh "$(CRD_REF_DOCS)"
+
 .PHONY: fmt
 fmt: ## Run go fmt against code.
 	go fmt ./...
@@ -141,7 +145,7 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 ##@ Build
 
 .PHONY: build
-build: manifests generate fmt vet ## Build manager binary.
+build: manifests generate docs fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
 
 .PHONY: run
@@ -281,12 +285,15 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+CRD_REF_DOCS ?= $(LOCALBIN)/crd-ref-docs
 
 ## Tool Versions
 # renovate: datasource=github-releases depName=kubernetes-sigs/kustomize extractVersion=^kustomize/(?<version>.+)$
 KUSTOMIZE_VERSION ?= v5.8.1
 # renovate: datasource=github-releases depName=kubernetes-sigs/controller-tools
 CONTROLLER_TOOLS_VERSION ?= v0.21.0
+# renovate: datasource=github-releases depName=elastic/crd-ref-docs
+CRD_REF_DOCS_VERSION ?= v0.3.0
 
 #ENVTEST_VERSION is the controller-runtime version to use for setup-envtest, derived from go.mod
 ENVTEST_VERSION ?= $(shell v='$(call gomodver,sigs.k8s.io/controller-runtime)'; \
@@ -309,6 +316,11 @@ $(KUSTOMIZE): $(LOCALBIN)
 controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary.
 $(CONTROLLER_GEN): $(LOCALBIN)
 	$(call go-install-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_TOOLS_VERSION))
+
+.PHONY: crd-ref-docs
+crd-ref-docs: $(CRD_REF_DOCS) ## Download crd-ref-docs locally if necessary.
+$(CRD_REF_DOCS): $(LOCALBIN)
+	$(call go-install-tool,$(CRD_REF_DOCS),github.com/elastic/crd-ref-docs,$(CRD_REF_DOCS_VERSION))
 
 .PHONY: setup-envtest
 setup-envtest: envtest ## Download the binaries required for ENVTEST in the local bin directory.

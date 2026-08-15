@@ -1,6 +1,14 @@
 ---
 title: UniFi Reactor
 description: A Kubernetes operator that turns what your UniFi gear already knows — which WAN is live, whether the UPS is on mains — into declarative actions on your cluster.
+head:
+  # Starlight builds every page title as "<page title> | <site title>", which is
+  # right everywhere except here, where the two halves are the same string and it
+  # renders "UniFi Reactor | UniFi Reactor" — in the one place a search result
+  # shows it. Overriding the tag for this page only leaves that pattern intact
+  # on the other 48.
+  - tag: title
+    content: UniFi Reactor
 template: splash
 hero:
   tagline: Your WAN fails over to the 5G backup at 3am. Nothing in the cluster notices. UniFi Reactor is the operator that makes it notice.

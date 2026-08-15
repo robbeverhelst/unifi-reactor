@@ -28,18 +28,7 @@ That is the whole failover, in order, including the part where it deliberately d
 
 Volume is bounded by the same rule everywhere: **Events fire on edges, not on states.** A reconcile happens at least every 15s, so anything raised from a steady condition would be an API write every 15 seconds per automation, forever. A target already at the right value produces nothing. A condition that keeps reporting the same reason produces nothing after the first. `ActionFailed` stops at the retry budget, and `RetryBudgetExhausted` replaces it exactly once.
 
-| Reason | Type | Raised when |
-| --- | --- | --- |
-| `StateEntered` / `StateExited` | Normal | the condition started or stopped holding, naming the key that moved |
-| `TargetHeld` / `TargetReleased` | Normal | a write to a target actually happened; the message names the level in words |
-| `DeferredToOtherAutomation` | Normal | a peer's more restrictive claim is the one in effect |
-| `EdgeActionSent` | Normal | a notification or HTTP request was delivered |
-| `StateKeyUnavailable` | Warning | a provider stopped reporting a key, so state is being held |
-| `ActionFailed` | Warning | a desired-state action could not be applied |
-| `RetryBudgetExhausted` | Warning | Reactor stopped retrying and is waiting for the next state change |
-| `EdgeActionFailed` / `EdgeActionSkipped` | Warning | a notification or HTTP request did not go out |
-| `ReleaseFailed` | Warning | deletion could not hand a target back and let the object go anyway |
-| `EventTriggerRemoved` | Warning | a leftover `spec.trigger` automation that does nothing; delete it |
+Every reason Reactor raises, whether it is `Normal` or `Warning`, and what each one means is in the [Events and condition reasons reference](/reference/events/) — generated from the controller, so it cannot drift from what the operator actually emits.
 
 Events are where a state key with an **open value set** is reported: `isp` is not a metric label, so `isp moved from "carrier-a" to "carrier-b"` lives here and in `status.observedState`. The two halves are complementary on purpose — Prometheus keeps what is bounded, Kubernetes keeps what is specific.
 
