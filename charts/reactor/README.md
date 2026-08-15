@@ -63,7 +63,7 @@ helm upgrade reactor oci://ghcr.io/robbeverhelst/charts/reactor \
 
 ## Values
 
-Every value, its default and what it does: **[chart values reference](https://reactor.robbeverhelst.com/reference/chart-values/)**, generated from `values.yaml` so it cannot drift from the chart.
+Every value, its default and what it does: **[Chart values](https://reactor.robbeverhelst.com/reference/values/)**, generated from `values.yaml` so it cannot drift from the chart.
 
 [`values.yaml`](values.yaml) itself is the source of truth and is written to be read while you configure — each key carries its reasoning in the comment above it.
 
@@ -76,12 +76,12 @@ Everything explanatory about running this lives on the site rather than here, so
 | [Configuration](https://reactor.robbeverhelst.com/operations/configuration/) | thresholds, poll interval, log level, rotating the API key, PodDisruptionBudget |
 | [RBAC and security](https://reactor.robbeverhelst.com/operations/rbac-and-security/) | both RBAC modes, Pod Security, NetworkPolicy |
 | [Suspend and dry run](https://reactor.robbeverhelst.com/operations/suspend-and-dry-run/) | `safety.dryRun` and `spec.dryRun`, and why the chart enforces the first one too |
-| [Metrics, alerts and dashboard](https://reactor.robbeverhelst.com/operations/metrics-and-alerts/) | `metrics.*`, the ServiceMonitor, the alert rules, the Grafana dashboard |
-| [Events and status](https://reactor.robbeverhelst.com/operations/events/) | what Reactor records on an `Automation`, and the RBAC it needs to |
+| [Metrics, alerts and dashboard](https://reactor.robbeverhelst.com/operations/metrics-and-alerts/) | `metrics.*`, the ServiceMonitor, the alert rules, the Grafana dashboard — and [every series](https://reactor.robbeverhelst.com/reference/metrics/) turning them on publishes |
+| [Events and status](https://reactor.robbeverhelst.com/operations/events/) | what Reactor records on an `Automation`, and the RBAC it needs to — [every reason](https://reactor.robbeverhelst.com/reference/events/) it can raise |
 | [Webhook fast path](https://reactor.robbeverhelst.com/operations/webhook-fast-path/) | `unifi.webhook.*`, exposing the receiver, and self-registration |
 | [Upgrading](https://reactor.robbeverhelst.com/operations/upgrading/) | what `helm upgrade` does, and what it does not |
 | [Uninstalling](https://reactor.robbeverhelst.com/operations/uninstalling/) | the pre-delete hook that hands every held workload back, and `--no-hooks` |
 | [Actions](https://reactor.robbeverhelst.com/actions/kubernetes/) | every action type, including the allowlists under `actions.*` and `unifi.actions.*` |
 | [Troubleshooting](https://reactor.robbeverhelst.com/troubleshooting/) | nothing is happening, credentials, CRD upgrades, RBAC, stranded workloads |
 
-Start at [Your first Automation](https://reactor.robbeverhelst.com/start/first-automation/) if this is a fresh install.
+Start at [Your first Automation](https://reactor.robbeverhelst.com/start/first-automation/) if this is a fresh install; [the Automation API reference](https://reactor.robbeverhelst.com/reference/automation/) has every field of `spec` and `status`.
