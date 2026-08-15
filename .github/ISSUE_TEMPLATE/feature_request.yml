@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        The [design spec](https://github.com/robbeverhelst/unifi-reactor/blob/main/docs/spec.md)
+        The [design spec](https://reactor.robbeverhelst.com/design/spec/)
         records what is planned and, just as usefully, what is a deliberate non-goal —
         Reactor is not a general-purpose workflow engine and does not execute arbitrary
         commands.

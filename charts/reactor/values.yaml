@@ -19,9 +19,10 @@ crds:
   # only in that case, and cleans itself up when it succeeds. A CRD owned by
   # another release is never adopted; that upgrade stops and says whose it is.
   #
-  # Set to false to do it by hand instead (docs/troubleshooting.md has the two
-  # kubectl commands). Ignored when install is false, which already says the
-  # CRD is somebody else's to manage.
+  # Set to false to do it by hand instead
+  # (https://reactor.robbeverhelst.com/troubleshooting/ has the two kubectl
+  # commands). Ignored when install is false, which already says the CRD is
+  # somebody else's to manage.
   adopt: true
 
 image:

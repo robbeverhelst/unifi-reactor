@@ -209,9 +209,10 @@ const (
 // isp is deliberately absent. Its values are carrier names derived from
 // whatever public address the gateway currently holds, so the set is open by
 // construction — the one exception to the closed-vocabulary rule argued in
-// docs/adding-a-provider.md — and an open set is the one thing that must never
-// become a metric label. Its transitions are still counted, and its current
-// value is still in every referencing Automation's status.
+// https://reactor.robbeverhelst.com/contributing/adding-a-provider/ — and an
+// open set is the one thing that must never become a metric label. Its
+// transitions are still counted, and its current value is still in every
+// referencing Automation's status.
 //
 // wan.quality is here, and it is here because it was bucketed. The console
 // reports the availability and average latency behind it as continuous

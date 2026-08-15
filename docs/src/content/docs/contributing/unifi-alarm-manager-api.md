@@ -1,4 +1,7 @@
-# UniFi Alarm Manager API (undocumented, reverse-engineered)
+---
+title: "UniFi Alarm Manager API notes"
+description: "Reverse-engineered notes on UniFi’s webhook configuration API: cookie plus CSRF authentication, the create-rule body that does not match the GET representation, and how sure we are."
+---
 
 Discovered against UniFi OS / Network **10.5.67** on a UDM Pro (2026-08-11) by sniffing the
 Alarm Manager UI (`https://<udm>/network/default/alarm-manager`) and iterating on the API's

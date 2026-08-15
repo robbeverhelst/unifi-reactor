@@ -9,7 +9,7 @@ body:
 
         **Two things first:**
 
-        1. [docs/troubleshooting.md](https://github.com/robbeverhelst/unifi-reactor/blob/main/docs/troubleshooting.md)
+        1. The [troubleshooting guide](https://reactor.robbeverhelst.com/troubleshooting/)
            covers the most common reports — nothing happening after a state change,
            `StateKeyUnavailable`, rotated credentials, a CRD that did not upgrade,
            RBAC on cross-namespace targets, and workloads left scaled down.

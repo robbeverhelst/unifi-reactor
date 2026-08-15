@@ -1,4 +1,7 @@
-# Distribution
+---
+title: "Distribution"
+description: "Where UniFi Reactor is published and what is automated: the Artifact Hub listing, why the chart carries no signKey, and which community lists it does and does not qualify for."
+---
 
 Where this project is published, what is automated, and what is left for a human to do. Everything here
 is a fact about the repository or a criterion quoted from somebody else's contribution rules — where a
@@ -16,7 +19,7 @@ project does not meet one, that is written down rather than worked around.
 The chart is published to an OCI registry, so nothing about the listing works the way the HTTP-repository
 documentation describes. Two things follow from that and both are already in the repository.
 
-**The chart metadata** is in [`charts/reactor/Chart.yaml`](../charts/reactor/Chart.yaml) as
+**The chart metadata** is in [`charts/reactor/Chart.yaml`](https://github.com/robbeverhelst/unifi-reactor/blob/main/charts/reactor/Chart.yaml) as
 `artifacthub.io/*` annotations: the license and category, `operator: "true"`, the links, and the
 `Automation` CRD together with two working examples — pausing downloads on a backup uplink, and shedding
 load when the UPS goes to battery. Artifact Hub renders each CRD as a card and each example as something
@@ -24,9 +27,9 @@ you can open from it. The examples are the ones from the README, so there is one
 rather than two.
 
 **`artifacthub.io/changes` is not in that file.** It describes a single release, so a copy of it in git
-would be stale the moment the next tag is cut — the failure [CHANGELOG.md](../CHANGELOG.md) refuses to
+would be stale the moment the next tag is cut — the failure [CHANGELOG.md](https://github.com/robbeverhelst/unifi-reactor/blob/main/CHANGELOG.md) refuses to
 sign up for anywhere else in this repository. It is generated at package time instead, by
-[`hack/artifacthub-changes.sh`](../hack/artifacthub-changes.sh), from the commits between the tag being
+[`hack/artifacthub-changes.sh`](https://github.com/robbeverhelst/unifi-reactor/blob/main/hack/artifacthub-changes.sh), from the commits between the tag being
 released and the one before it. That is the same source the GitHub release notes come from, which is why
 conventional commits are required. Run it by hand to see what a tag would publish:
 
@@ -39,7 +42,7 @@ dropped rather than folded into `changed`, because a release note listing a lint
 that mattered. A release containing nothing else is a normal outcome: the annotation is simply absent,
 the workflow logs a warning, and the release proceeds.
 
-**The ownership metadata** is [`artifacthub-repo.yml`](../artifacthub-repo.yml) at the repository root.
+**The ownership metadata** is [`artifacthub-repo.yml`](https://github.com/robbeverhelst/unifi-reactor/blob/main/artifacthub-repo.yml) at the repository root.
 For an OCI-backed repository Artifact Hub does not fetch this over HTTP — it pulls it from the registry,
 as a separate artifact under the reserved tag `artifacthub.io`. The file lives in git so that it is
 reviewed and diffable, and is pushed from there with `oras`; the command is in the file's own header.
@@ -58,7 +61,7 @@ the tag that produced the artifact, and there is nothing to hold or leak. Fillin
 anything at all would render a fingerprint in the Artifact Hub UI that verifies nothing.
 
 So the annotation is omitted, and the `Verifying a signed release` link in `artifacthub.io/links` points
-at [SECURITY.md](../SECURITY.md#verifying-a-release), which carries the certificate identity and the OIDC
+at [SECURITY.md](https://github.com/robbeverhelst/unifi-reactor/blob/main/SECURITY.md#verifying-a-release), which carries the certificate identity and the OIDC
 issuer that a reader actually needs to run `cosign verify`.
 
 ### Security report
@@ -80,7 +83,7 @@ What a listing actually costs is a bundle, and the bundle is not the hard part:
 - `bundle/manifests/` containing a ClusterServiceVersion and the CRD, plus `bundle/metadata/annotations.yaml`
   and a `bundle.Dockerfile`, passing `operator-sdk bundle validate --select-optional suite=operatorframework`.
 - A CSV that restates the Deployment, the ServiceAccount and **every RBAC rule** in its own schema. That
-  is the objection that matters. [SECURITY.md](../SECURITY.md) argues from the permissions the chart
+  is the objection that matters. [SECURITY.md](https://github.com/robbeverhelst/unifi-reactor/blob/main/SECURITY.md) argues from the permissions the chart
   grants, and several of those are conditional — `get` on Secrets only when outbound actions are
   configured, a `ClusterRole` over nodes only when `rbac.allowNodeActions` is on, and two whole RBAC modes
   from `rbac.clusterWide`. A CSV expresses one install. Restating the rules there creates a second source
@@ -119,7 +122,7 @@ better list.
 
 ## Community posts
 
-Drafted and **unposted**, in [`docs/community-posts.md`](community-posts.md): r/Ubiquiti, r/homelab,
+Drafted and **unposted**, in [`docs/community-posts.md`](https://github.com/robbeverhelst/unifi-reactor/blob/main/docs/src/content/docs/contributing/community-posts.md): r/Ubiquiti, r/homelab,
 r/selfhosted, the Ubiquiti community forum, and a Show HN. Each has its own framing and each carries the
 project's two documented uncertainties — the unobserved WAN failover, and the three keys parsed against a
 documented shape rather than a capture. That file also records the self-promotion rule for each venue,
@@ -138,7 +141,7 @@ In order. The first four are the Artifact Hub listing and are worth doing togeth
    battery — with declarative actions on your cluster" matches what ships. It is a repository setting, not
    a file.
 2. **Add the repository on Artifact Hub**, signed in as the account whose email matches the `owners` entry
-   in [`artifacthub-repo.yml`](../artifacthub-repo.yml). Kind: Helm charts. URL, exactly:
+   in [`artifacthub-repo.yml`](https://github.com/robbeverhelst/unifi-reactor/blob/main/artifacthub-repo.yml). Kind: Helm charts. URL, exactly:
    `oci://ghcr.io/robbeverhelst/charts/reactor`. One OCI repository is one chart; the package name comes
    from `Chart.yaml`, not from the URL.
 3. **Push the ownership metadata** with the `oras` command in that file's header, then take the

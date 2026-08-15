@@ -31,6 +31,6 @@ limitations under the License.
 // (/proxy/network/api/s/<site>/...) as of Network 10.5. The Alarm Manager API
 // used for optional self-registration sits at the UniFi OS layer, rejects that
 // header, and needs a cookie session plus a CSRF token — see alarm.go and
-// docs/unifi-alarm-manager-api.md, which is reverse-engineered and version
-// fragile.
+// https://reactor.robbeverhelst.com/contributing/unifi-alarm-manager-api/,
+// which is reverse-engineered and version fragile.
 package unifi

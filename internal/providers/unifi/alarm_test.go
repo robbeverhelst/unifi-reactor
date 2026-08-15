@@ -60,7 +60,8 @@ func sessionJWT(t *testing.T, claims map[string]string) string {
 }
 
 // fakeConsole stands in for a UniFi OS console's alarms API, matching the
-// shapes recorded in docs/unifi-alarm-manager-api.md.
+// shapes recorded in
+// https://reactor.robbeverhelst.com/contributing/unifi-alarm-manager-api/.
 type fakeConsole struct {
 	manifest any
 	rules    []any

@@ -101,7 +101,8 @@ spec:
                         that is already running. Evicting those — draining — is not offered, and
                         not because it was not built: an eviction cannot be reversed, so it has no
                         level to arbitrate and no reversal to declare, which is the one property
-                        every other action here has. See docs/spec.md.
+                        every other action here has. See
+                        https://reactor.robbeverhelst.com/design/spec/.
 
                         Node actions need cluster-scoped RBAC that the chart grants only when
                         rbac.allowNodeActions is set. Without it the Automation reports the target
@@ -596,7 +597,8 @@ spec:
                         that is already running. Evicting those — draining — is not offered, and
                         not because it was not built: an eviction cannot be reversed, so it has no
                         level to arbitrate and no reversal to declare, which is the one property
-                        every other action here has. See docs/spec.md.
+                        every other action here has. See
+                        https://reactor.robbeverhelst.com/design/spec/.
 
                         Node actions need cluster-scoped RBAC that the chart grants only when
                         rbac.allowNodeActions is set. Without it the Automation reports the target

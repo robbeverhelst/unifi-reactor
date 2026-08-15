@@ -74,10 +74,10 @@ const (
 	// is reversible, and applying it twice is applying it once.
 	//
 	// Its sibling in #18, kubernetes.drain, is deliberately not here and is not
-	// implemented anywhere. See docs/spec.md for the reasoning; the short form
-	// is that an eviction cannot be un-evicted, so a drain has no level to
-	// arbitrate, no reversal to declare, and no way to be a pure function of
-	// which conditions currently hold.
+	// implemented anywhere. See https://reactor.robbeverhelst.com/design/spec/
+	// for the reasoning; the short form is that an eviction cannot be
+	// un-evicted, so a drain has no level to arbitrate, no reversal to declare,
+	// and no way to be a pure function of which conditions currently hold.
 	actionKubernetesCordon = "kubernetes.cordon"
 	// actionKubernetesRestart rolls a workload's pods, the way `kubectl rollout
 	// restart` does. It is an edge action: a restart is an occurrence, not a

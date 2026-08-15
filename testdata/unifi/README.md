@@ -476,7 +476,7 @@ or a UPS — so the fields those actions read are inferred rather than observed.
 > `port_poe`, and a port name replaced by its index) alongside the `poe` state key's. One capture
 > would therefore give the PoE half of both paths its first ground truth at once. The WLAN half
 > still has none, and `wlanconf` is the record that carries pre-shared keys. See
-[docs/unifi-write-api.md](../../docs/unifi-write-api.md), which splits the two, and note that
+[Writing to a UniFi console](https://reactor.robbeverhelst.com/contributing/unifi-write-api/), which splits the two, and note that
 `hack/mock-unifi` builds its WLAN table and its PoE switch **in code**, clearly labelled, precisely
 so nothing in `testdata/` claims to have come off a console when it did not.
 

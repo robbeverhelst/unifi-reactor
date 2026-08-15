@@ -36,9 +36,10 @@ import (
 )
 
 // The Alarm Manager API is undocumented and reverse-engineered; every constant
-// here comes from docs/unifi-alarm-manager-api.md, observed on UniFi Network
-// 10.5.67. It lives at the UniFi OS layer, so none of these paths carry the
-// /proxy/network prefix the poller uses.
+// here comes from
+// https://reactor.robbeverhelst.com/contributing/unifi-alarm-manager-api/,
+// observed on UniFi Network 10.5.67. It lives at the UniFi OS layer, so none of
+// these paths carry the /proxy/network prefix the poller uses.
 const (
 	alarmLoginPath    = "/api/auth/login"
 	alarmRulesPath    = "/api/v2/alarms/network"
@@ -221,7 +222,8 @@ func (c *AlarmClient) do(ctx context.Context, method, path string, body any) (an
 
 // alarmRule is the create-rule body. triggers_data and actions_data are arrays
 // of arrays — the API rejects a flat array of objects — and this is not the
-// shape GET returns. See docs/unifi-alarm-manager-api.md.
+// shape GET returns. See
+// https://reactor.robbeverhelst.com/contributing/unifi-alarm-manager-api/.
 type alarmRule struct {
 	Title        string          `json:"title"`
 	Scope        alarmScope      `json:"scope"`

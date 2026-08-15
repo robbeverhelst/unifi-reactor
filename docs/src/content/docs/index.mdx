@@ -1,0 +1,80 @@
+---
+title: UniFi Reactor
+description: A Kubernetes operator that turns what your UniFi gear already knows — which WAN is live, whether the UPS is on mains — into declarative actions on your cluster.
+template: splash
+hero:
+  tagline: Your WAN fails over to the 5G backup at 3am. Nothing in the cluster notices. UniFi Reactor is the operator that makes it notice.
+  actions:
+    - text: What Reactor is
+      link: /start/what-reactor-is/
+      icon: right-arrow
+      variant: primary
+    - text: Install it
+      link: /start/install/
+      icon: rocket
+      variant: secondary
+    - text: View on GitHub
+      link: https://github.com/robbeverhelst/unifi-reactor
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+<CardGrid stagger>
+  <Card title="State, not events" icon="approve-check">
+    Reactor polls the UniFi Network API and reconciles against what it observes. A
+    dropped webhook, a network blip or a controller restart cannot strand your
+    cluster in the wrong mode, because the next observation corrects it.
+
+    [How it works](/concepts/state-not-events/)
+  </Card>
+  <Card title="Reversal is explicit" icon="seti:config">
+    An Automation says what to do when a condition starts holding, and separately
+    what it wants once it stops. Nothing is inferred, undoing is never guessed,
+    and every execution is recorded in the resource's status.
+
+    [Reversal and baselines](/concepts/reversal-and-baselines/)
+  </Card>
+  <Card title="One workload, many Automations" icon="random">
+    A target's level is arbitrated across every Automation pointing at it. Two can
+    pause the same workload for unrelated reasons, and it stays paused until
+    *neither* wants it down.
+
+    [Arbitration](/concepts/arbitration/)
+  </Card>
+  <Card title="Safe by default" icon="shield">
+    A dedicated ServiceAccount with exactly the verbs it needs, no `cluster-admin`,
+    no arbitrary shell execution, and credentials read from Kubernetes Secrets.
+    The actions that leave the cluster are refused until you say where they may go.
+
+    [RBAC and security](/operations/rbac-and-security/)
+  </Card>
+</CardGrid>
+
+## Start here
+
+<CardGrid>
+  <Card title="What Reactor is" icon="open-book">
+    The problem it solves, and the five properties that decide how it behaves.
+
+    [Read it](/start/what-reactor-is/)
+  </Card>
+  <Card title="Install" icon="rocket">
+    A Helm install, an API key, and a log line that proves it can see your hardware.
+
+    [Install Reactor](/start/install/)
+  </Card>
+  <Card title="Your first Automation" icon="pencil">
+    Pause downloads while the WAN is on the backup uplink, and resume them when it
+    recovers — one resource covers both directions.
+
+    [Write one](/start/first-automation/)
+  </Card>
+  <Card title="State keys" icon="list-format">
+    Everything Reactor can match on: WAN and internet, power and UPS, the device
+    fleet, and switchable UPS outlets.
+
+    [The vocabulary](/state-keys/)
+  </Card>
+</CardGrid>

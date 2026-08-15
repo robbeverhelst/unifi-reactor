@@ -1,4 +1,8 @@
-# Community posts — drafts, unposted
+---
+title: "Community posts (drafts, unposted)"
+description: "Drafts for the maintainer to send, edit or discard. Checked in so their claims can be reviewed against the code, and marked draft so they are never part of a production build."
+draft: true
+---
 
 **Nothing in this file has been posted anywhere.** These are drafts for the maintainer to send, edit, or
 discard. They are checked in rather than kept in a scratchpad so that the claims in them can be reviewed

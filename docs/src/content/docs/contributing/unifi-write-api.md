@@ -1,4 +1,7 @@
-# Writing to a UniFi console (undocumented, and mostly unverified)
+---
+title: "Writing to a UniFi console"
+description: "What the unifi.* actions send, split honestly into what was observed against real hardware and what is inferred — including the read-modify-write the WLAN endpoint forces."
+---
 
 The `unifi.*` actions are the first things Reactor **changes** on a UniFi console. Everything
 else the provider does is read-only, apart from creating its own Alarm Manager rule.
@@ -6,7 +9,7 @@ else the provider does is read-only, apart from creating its own Alarm Manager r
 This page exists for one reason: to say plainly which parts of that write path have been seen
 working against real hardware and which have not. The short version is that the **authentication**
 is observed and **every endpoint below it is inferred**. Read [the Alarm Manager
-notes](unifi-alarm-manager-api.md) first — the auth is the same, and this page does not repeat it.
+notes](/contributing/unifi-alarm-manager-api/) first — the auth is the same, and this page does not repeat it.
 
 > ⚠️ **No write in this document has ever been made to a real console from this repository.**
 > The paths and field names come from how UniFi's own web UI is understood to drive the Network
@@ -133,7 +136,7 @@ untested — and on real hardware, Reactor's is the only guard there is.
 
 ## What would settle this
 
-The equivalent of the failover runbook in [`testdata/unifi/README.md`](../testdata/unifi/README.md),
+The equivalent of the failover runbook in [`testdata/unifi/README.md`](https://github.com/robbeverhelst/unifi-reactor/blob/main/testdata/unifi/README.md),
 and it needs a console somebody is willing to change. In rough order of value:
 
 1. Does `PUT rest/wlanconf/<id>` accept a full record and apply only the changed field?

@@ -1,4 +1,7 @@
-# Adding a provider
+---
+title: "Adding a provider"
+description: "The Observe contract in three types, walked through the UniFi provider: designing a state vocabulary, capturing fixtures, and when the engine has to change instead."
+---
 
 A provider answers one question: **what is true right now?** It converts vendor-specific reality — an API response, a socket, a scrape — into a flat `map[string]string` of normalized state. Everything else is the engine's job.
 
@@ -354,7 +357,7 @@ If you find yourself adding a provider name, a key name, or a value string to an
 
 ## See also
 
-- [Design spec](spec.md) — the state-first rationale in full, and the sketched future providers (NUT, Proxmox, Prometheus, Home Assistant)
-- [Development](development.md) — the dev loop, the mock, and the capture policy
-- [Captured UniFi payloads](../testdata/unifi/README.md) — the fixtures and what they document
-- [Troubleshooting](troubleshooting.md) — what the failure modes look like from the user's side
+- [Design spec](/design/spec/) — the state-first rationale in full, and the sketched future providers (NUT, Proxmox, Prometheus, Home Assistant)
+- [Development](/contributing/development/) — the dev loop, the mock, and the capture policy
+- [Captured UniFi payloads](https://github.com/robbeverhelst/unifi-reactor/blob/main/testdata/unifi/README.md) — the fixtures and what they document
+- [Troubleshooting](/troubleshooting/) — what the failure modes look like from the user's side

@@ -36,3 +36,7 @@ go.work
 *.kubeconfig
 dist
 .DS_Store
+
+# docs site (Astro + Starlight); dist above already covers docs/dist
+node_modules/
+docs/.astro/
