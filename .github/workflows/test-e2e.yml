@@ -1,8 +1,37 @@
 name: E2E Tests
 
+# These suites cost roughly 13 and 3 minutes because each one builds a Kind
+# cluster, so a change that provably cannot reach the reaction flow should not
+# pay for them. The list below is deliberately short: only the documentation
+# site, Markdown anywhere, the two README banners and the licence. Everything
+# else runs the suites, including hack/ (mock-unifi is the console the suites
+# run against) and charts/ (the lifecycle suite installs the chart) — a false
+# negative here ships a regression under a green tick, which is far worse than
+# the minutes it saves.
+#
+# Skipping by path means the job does not run at all and reports no status.
+# That is safe today because main has neither branch protection nor a ruleset,
+# so none of these are required checks. If that changes, revisit this: a
+# required check that never runs is reported as passing, and this filter would
+# then let a docs pull request merge with a green Reaction that never executed.
+# The fix in that case is a job that runs and reports success without doing the
+# work, not an absent job.
+#
+# The two lists are identical and have to stay that way; Actions does not
+# support YAML anchors, so they are written out twice.
 on:
   push:
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - '.github/assets/**'
+      - 'LICENSE'
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - '.github/assets/**'
+      - 'LICENSE'
 
 permissions: {}
 
