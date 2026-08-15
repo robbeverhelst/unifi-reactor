@@ -1,6 +1,6 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/banner-dark.svg">
-  <img src=".github/assets/banner-light.svg" alt="UniFi Reactor — event-driven automation for UniFi networks and Kubernetes">
+  <img src=".github/assets/banner-light.svg" alt="UniFi Reactor — state-driven automation for UniFi networks and Kubernetes">
 </picture>
 
 <p align="center">
@@ -14,10 +14,9 @@
   <a href="#quickstart">Quickstart</a> ·
   <a href="#your-first-automation">First automation</a> ·
   <a href="#state-keys">State keys</a> ·
+  <a href="#actions">Actions</a> ·
   <a href="#compatibility">Compatibility</a> ·
-  <a href="#configuration">Configuration</a> ·
-  <a href="docs/troubleshooting.md">Troubleshooting</a> ·
-  <a href="docs/spec.md">Design spec</a>
+  <a href="https://reactor.robbeverhelst.com">Documentation</a>
 </p>
 
 ---
@@ -46,6 +45,8 @@ flowchart LR
 The engine knows nothing about UniFi. A provider converts vendor-specific reality into normalized state, and the engine reconciles your `Automation` resources against it. That seam is what lets other providers — a UPS over NUT, Proxmox, Prometheus alerts — arrive later without touching the core.
 
 Observing `wan: backup` fifty times in a row does nothing fifty times. Scaling is a **desired state**, not a command: Reactor works out what every automation currently wants for a workload and reconciles it there, so the result depends only on which conditions hold — never on the order they were observed in.
+
+> The reasoning in full: [State, not events](https://reactor.robbeverhelst.com/concepts/state-not-events/) · [Arbitration](https://reactor.robbeverhelst.com/concepts/arbitration/) · [Reversal and baselines](https://reactor.robbeverhelst.com/concepts/reversal-and-baselines/)
 
 ## Quickstart
 
@@ -77,6 +78,10 @@ kubectl -n reactor-system logs deploy/reactor | grep 'state transition'
 ```
 
 The first observation reports every key it can see, so these lines are your inventory. For the full per-poll state, set `log.level=debug`.
+
+Nothing is written to your cluster until you create an `Automation`. If you would rather it never write at all while you find out what it would do, install it with `--set safety.dryRun=true`: everything is evaluated, arbitrated and reported, nothing is written, and the chart withholds the permissions that could — so it is the API server holding Reactor to the promise, not just Reactor. `spec.dryRun` does the same for one automation on a live install.
+
+> Thresholds, poll interval, RBAC mode and every other chart value: [Configuration](https://reactor.robbeverhelst.com/operations/configuration/) · [Suspend and dry run](https://reactor.robbeverhelst.com/operations/suspend-and-dry-run/) · [RBAC and security](https://reactor.robbeverhelst.com/operations/rbac-and-security/). If nothing shows up: [Troubleshooting](https://reactor.robbeverhelst.com/troubleshooting/).
 
 ## Your first automation
 
@@ -111,46 +116,45 @@ kubectl -n media get automation
 # pause-downloads-on-backup-wan  unifi      false      false       True    12s
 ```
 
-Shedding load during a power cut is the same shape, matching `ups: on-battery` instead.
+Shedding load during a power cut is the same shape, matching `ups: on-battery` instead — and qBittorrent genuinely should pause for *both*. Point both automations at it and nothing has to be coordinated by hand:
 
-### Stopping scheduled work
-
-Scaling cannot express "do not start the nightly backup tonight" — that is `spec.suspend` on a CronJob, and it is the single highest-value thing to stop during an outage or on a metered uplink:
-
-```yaml
-  actions:
-    - type: kubernetes.cronjob.suspend
-      target: { kind: CronJob, name: velero-backup, namespace: velero }
+```sh
+kubectl -n media get automation
+# NAME                           PROVIDER   MATCHING   SUSPENDED   READY   AGE
+# pause-downloads-on-backup-wan  unifi      false      false       True    3h
+# shed-on-battery                unifi      true       false       True    3h
 ```
 
-`suspended` defaults to `true`, which is what the action is named after; write `suspended: false` in `onExit` to ask for it back explicitly, or omit `onExit` and Reactor restores whatever the CronJob was set to before it claimed it.
+While *any* automation's condition holds, the workload stays at the **most restrictive** level asked for. The WAN recovering above does not bring qBittorrent back, because the UPS automation still wants it down — and the automation that lost says so plainly:
 
-**Suspending stops new Jobs being created and does nothing to a Job already running.** That is deliberate, and Reactor is not granted any permission over Jobs at all, so it could not delete one if it wanted to: declining to start more work is a very different act from killing work in flight, and killing work in flight is not a decision an outage should make on your behalf. If a running backup is what you need stopped, stop it yourself.
-
-### Closing a node to new work
-
-The endgame of a power cut is a graceful shutdown, not a hard cut. Cordoning a worker running on a dying battery stops new pods landing there, so replacements come up on the node still on mains:
-
-```yaml
-  actions:
-    - type: kubernetes.cordon
-      target: { kind: Node, name: worker-03 }
+```sh
+kubectl -n media get automation pause-downloads-on-backup-wan -o jsonpath='{.status.targets[0]}'
+# {"ref":"Deployment/media/qbittorrent","desired":1,"effective":0,
+#  "deferredBy":["media/shed-on-battery"]}
 ```
 
-Cordoning is desired-state, like scaling: `spec.unschedulable` is a level, `cordoned` wins over `schedulable` in a fold, and applying it twice is applying it once. `cordoned` defaults to `true`; write `cordoned: false` in `onExit` to reopen explicitly, or omit `onExit` and Reactor restores what it found — **including leaving a node cordoned that you had already cordoned by hand.**
+The workload comes back only once **no** automation wants it down, at what `onExit` declares or — if you omit it — at the baseline Reactor recorded on the target before it first claimed it.
 
-> **It is opt-in, and it is the only permission Reactor asks for that reaches outside the workloads you installed it to manage.** Nodes are cluster-scoped, so `--set rbac.allowNodeActions=true` creates a `ClusterRole` *even in a namespace-scoped install*. It grants `get` and `patch` on nodes; Kubernetes cannot narrow `patch` to one field, so that also permits writing node labels and annotations. Decide whether that is worth it before turning it on. Without it, an automation using `kubernetes.cordon` reports the node as unreachable and names the value to set. The manifest bundle (`install.yaml`) does not offer it at all.
+> Walked through line by line, with what to check after applying it: [Your first Automation](https://reactor.robbeverhelst.com/start/first-automation/) · [Arbitration](https://reactor.robbeverhelst.com/concepts/arbitration/) · [Reversal and baselines](https://reactor.robbeverhelst.com/concepts/reversal-and-baselines/)
 
-#### Why there is no `kubernetes.drain`
+## Actions
 
-Draining was proposed alongside cordoning and is **deliberately not implemented** — not deferred, not behind a flag. Four reasons, and the first is the one that decides it:
+`actions` declare what an automation wants while its condition holds; `onExit` declares what it wants once nothing holds the target any more.
 
-1. **An eviction cannot be un-evicted.** Every other action here declares a *level* that is a pure function of which conditions currently hold, which is what makes the outcome independent of ordering and a controller restart harmless. A drain has no such value: there is no state a node can be held at that means "drained", `onExit` cannot express undoing it, and a flapping key would empty the node again on every flap with nothing to correct it.
-2. **In a small cluster it makes things worse.** Draining assumes somewhere else to go. In a three-node homelab on one UPS, the evicted pods do not reschedule — they go `Pending`, so you lose the workload *before* the battery runs out instead of when it does. Cordoning gets the actual benefit here without that cost.
-3. **It can evict the operator.** If Reactor's own pod is on the node being drained, the action kills the thing performing and reporting it, mid-action. Nothing else Reactor does can do that.
-4. **It hangs, by design.** Eviction respects PodDisruptionBudgets, and a single-replica workload with `minAvailable: 1` blocks forever. That is a bounded-timeout problem on paper and an unbounded blast-radius problem in practice.
+| Type | What it does |
+| --- | --- |
+| `kubernetes.scale` | hold a Deployment or StatefulSet at a replica count |
+| `kubernetes.cronjob.suspend` | stop a CronJob creating new Jobs — the highest-value thing to stop during an outage |
+| `kubernetes.cordon` | close a Node to new pods. The one permission that reaches outside your workloads, and opt-in |
+| `kubernetes.restart` | roll a workload, exactly as `kubectl rollout restart` does |
+| `http.request` | `GET`, `POST`, `PUT` or `PATCH` to an allowlisted destination |
+| `notification.ntfy`<br>`notification.discord`<br>`notification.slack` | send a templated message, with the destination and credentials from a Secret |
+| `homeassistant.service` | call a Home Assistant service |
+| `qbittorrent.pause`<br>`qbittorrent.resume` | pause or resume every torrent on an instance |
+| `unifi.wlan.enable`<br>`unifi.wlan.disable` | switch a wireless network on your console on or off |
+| `unifi.poe.cycle` | power-cycle one allowlisted PoE port |
 
-So the RBAC that would make it possible is not granted under any setting: `rbac.allowNodeActions` gives access to `nodes` and nothing to `pods` or `pods/eviction`. If your outage plan genuinely needs a drain, `kubernetes.cordon` plus a `notification.*` telling you to run `kubectl drain` yourself is the honest shape — a human is the right thing to make an irreversible cluster-wide decision at 3am.
+Everything that leaves the cluster is refused until you say where it may go: `actions.allowedDestinations`, `unifi.actions.allowedWlans` and `unifi.actions.allowedPoePorts` are all empty by default, and empty refuses everything with a reason naming the value to add. There is deliberately no `kubernetes.drain` — [an eviction cannot be un-evicted](https://reactor.robbeverhelst.com/actions/kubernetes/#why-there-is-no-kubernetesdrain).
 
 ### The two shapes an action has
 
@@ -159,609 +163,9 @@ So the RBAC that would make it possible is not granted under any setting: `rbac.
 | **Desired-state** | a *level* — what a target should be | yes, continuously across every automation sharing the target | `kubernetes.scale`, `kubernetes.cronjob.suspend`, `kubernetes.cordon` |
 | **Edge** | an *occurrence* | no — fires on this automation's own transition and owns nothing | `kubernetes.restart`, `http.request`, `notification.*`, `homeassistant.service`, `qbittorrent.*`, `unifi.wlan.*`, `unifi.poe.cycle` |
 
-`kubernetes.scale` works through the [scale subresource](https://kubernetes.io/docs/reference/using-api/api-concepts/#subresources), so `kind: Deployment` and `kind: StatefulSet` take the same path and Reactor never has to know where a kind keeps its replicas. `target.kind` is still a closed list, on purpose: a kind is only reachable if the chart granted RBAC for it, and RBAC has to name resources explicitly — so an open field would turn a typo into a `Forbidden` discovered *during* the outage, instead of a rejected write at admission.
+A level is ordered and nothing else: **lower is more restrictive, and a shared target resolves to the lowest anyone asked for.** What decides which column an action lands in is not whether it expresses a level — pausing torrents plainly does, and it is an edge action anyway — but whether there is somewhere to record the value the target held *before* Reactor claimed it, because without that, release cannot put it back.
 
-A level is ordered and nothing else: **lower is more restrictive, and a shared target resolves to the lowest anyone asked for.** For `kubernetes.scale` that is the replica count, so shedding wins. For `kubernetes.cronjob.suspend` and `kubernetes.cordon` it is a switch, ordered so that *suspended* and *cordoned* are the restrictive answers — which means suspended wins over running for exactly the same reason 0 replicas wins over 3, and with no new rule to learn. `status.targets[].level` says which in words.
-
-**What decides which column an action lands in is not whether it expresses a level.** [Pausing torrents](#qbittorrent) plainly does, and so does [a WLAN being enabled](#switching-a-wireless-network-off), and both are edge actions anyway. It is whether there is somewhere to record the value the target held *before* Reactor claimed it — because without that, release cannot put it back, and an automation that cannot hand a target back has no business claiming it. For a Kubernetes object that place is an annotation on the object. For anything else there is no answer yet, which is why every desired-state action so far is a `kubernetes.*` one, and why the actions that reach outside the cluster are named as verbs.
-
-The [HPA decline path](#when-something-else-already-owns-the-workload) is the same rule seen from the other side: a scalable target another controller drives can be refused *and handed back to what it was*, and it can be handed back precisely because the baseline is on the object. Nothing outside the cluster has that, so nothing outside the cluster can be declined back to anything.
-
-### Restarting a workload
-
-The standard remedy for something wedged — a service that needs to re-resolve DNS or re-establish upstream connections once connectivity returns:
-
-```yaml
-  onExit:
-    - type: kubernetes.restart
-      target: { kind: Deployment, name: sonarr }
-```
-
-It stamps `kubectl.kubernetes.io/restartedAt` on the pod template, exactly as `kubectl rollout restart` does, so the workload controller rolls the pods under whatever update strategy and disruption budget the workload already declares. Reactor never deletes a pod.
-
-Restart is an **edge** action: there is no value a workload can be held at that means "restarted", so it owns nothing, arbitrates with nothing, and fires on this automation's own transition. Put it in `onExit` when you want it on recovery, as above, and in `actions` when you want it on the way in.
-
-> **It is at-most-once, and it has to be.** Every execution rolls the workload, so a retry after an ambiguous failure would be a second outage rather than a correction. Reactor attempts it exactly once per transition, records the outcome in `status.edgeActions`, and never tries again — the failures that actually happen here (a conflict, a `Forbidden`) are not ones a retry fixes. A restart that did not happen is reported as a `Warning` and leaves the automation `Ready`.
-
-#### Restart is why debounce matters
-
-Everything else Reactor does is safe to repeat: scaling to 0 twice is one scale, suspending a suspended CronJob is nothing. **A restart is not.** The engine only acts on transitions, so a steady condition never restarts anything twice — but a *flapping* state key is a stream of transitions, and each one is a real rollout. A `wan` key oscillating every poll would roll the workload every poll.
-
-The engine's answer is [debounce](#settling-a-noisy-signal), and with `kubernetes.restart` it stops being an optimization:
-
-```yaml
-unifi:
-  debounce:
-    default: 1
-    keys:
-      wan: 3      # if wan drives a restart, make it prove itself first
-```
-
-The shipped default is `1` — react on the first observation — because `wan` and `ups` are switch positions that do not flap, and a failover deserves an immediate reaction. That default is chosen for `kubernetes.scale`. **If a key drives a restart, raise its debounce**, and accept the cost: each extra sample is one `pollInterval` of extra reaction time. Before adding a restart to an automation, ask what the key does when the hardware behind it is halfway broken rather than cleanly up or down — that is the state a restart loop is born in.
-
-The same paragraph applies word for word to [`unifi.poe.cycle`](#power-cycling-a-poe-port), only more so: there the repeated act is a power cut to a physical device.
-
-## When two automations share a workload
-
-qBittorrent genuinely should pause for *both* a metered uplink and a power cut. Point both automations at it and nothing has to be coordinated by hand:
-
-```sh
-kubectl -n media get automation
-# NAME                    PROVIDER   MATCHING   SUSPENDED   READY   AGE
-# pause-on-backup-wan     unifi      false      false       True    3h
-# shed-on-battery         unifi      true       false       True    3h
-```
-
-While *any* automation's condition holds, the workload stays at the **most restrictive** level asked for. The WAN recovering above does not bring qBittorrent back, because the UPS automation still wants it down — and the automation that lost says so plainly:
-
-```sh
-kubectl -n media get automation pause-on-backup-wan -o jsonpath='{.status.targets[0]}'
-# {"ref":"Deployment/media/qbittorrent","desired":1,"effective":0,
-#  "deferredBy":["media/shed-on-battery"]}
-```
-
-The workload comes back only once **no** automation wants it down.
-
-### What "coming back" means
-
-`onExit` declares the level an automation wants once nothing is holding the workload down. Omit it and Reactor restores the **baseline** — what the target was set to before it first claimed it, recorded on the target itself:
-
-```sh
-kubectl -n media get deploy qbittorrent -o jsonpath='{.metadata.annotations}'
-# {"reactor.robbeverhelst.com/baseline-replicas":"1",
-#  "reactor.robbeverhelst.com/claimed-by":"media/shed-on-battery",
-#  "reactor.robbeverhelst.com/claimed-at":"2026-08-13T02:41:07Z"}
-```
-
-The baseline annotation is named for what it records, so a CronJob carries `baseline-suspend: "false"` rather than a replica count that would mean nothing there — `baseline-replicas` keeps meaning exactly one replica count, forever. Those annotations are how a workload explains itself at 3am, and they are removed the moment nothing claims it — after which Reactor asserts nothing and you can scale it by hand freely.
-
-| `spec.reversal` | What the automation wants once nothing claims the target | Default when |
-| --- | --- | --- |
-| `Declared` | the values in `onExit` | `onExit` is set |
-| `Baseline` | whatever the target was before Reactor first claimed it | `onExit` is omitted |
-| `None` | nothing — leave it wherever it was left | never; opt in explicitly |
-
-> **Upgrading from v0.3.0:** an automation with no `onExit` used to leave its workload scaled down permanently. It now restores the baseline instead. Set `reversal: None` to keep the old behaviour.
-
-> **GitOps:** Reactor writes `spec.replicas` and the three annotations above onto target Deployments. If Flux or Argo CD manages those Deployments it will report drift and revert them. Exclude the fields on any workload you let Reactor act on — Argo CD `ignoreDifferences` on `/spec/replicas` and the `reactor.robbeverhelst.com` annotations, or a Flux `patch` with the same exclusions.
-
-### When they disagree about coming back
-
-Two automations can share a workload and still not agree on what its normal size is:
-
-```yaml
-# shed-a                          # shed-b
-onExit:                           onExit:
-  - type: kubernetes.scale          - type: kubernetes.scale
-    target: {kind: Deployment, name: qbittorrent}
-    replicas: 1                       replicas: 3
-```
-
-While either matches, the workload sits at 0 and everything above applies. When both stop matching, the reversals are folded the same way live claims are — `min(1, 3) = 1` — and the workload comes back at 1 and stays there.
-
-**Reactor keeps taking `min`, and does not try to resolve this.** It cannot know which number was meant, and picking the more restrictive one is defensible, documented and order-independent, exactly as it is for a live claim.
-
-**What it will not do is resolve it silently.** Two automations declaring different reversal levels for one target is a contradiction visible in the specs themselves — no intent has to be guessed to see it — so it is reported from the moment it exists, not at the moment the workload comes back at the wrong number:
-
-```sh
-kubectl -n media get automation shed-a -o jsonpath='{.status.targets[0].reversalDisagreement}'
-# [{"claimant":"media/shed-a","desired":1,"level":"1 replicas"},
-#  {"claimant":"media/shed-b","desired":3,"level":"3 replicas"}]
-```
-
-```sh
-kubectl -n media describe automation shed-a | tail -3
-# Warning  ReversalDisagreement  Deployment/media/qbittorrent: media/shed-a wants 1 replicas,
-#          media/shed-b wants 3 replicas. They cannot both be its normal level — Reactor takes
-#          the most restrictive, 1 replicas, and changing one of the specs is the only thing
-#          that resolves it
-```
-
-and `reactor_reversal_disagreements_total` for the fleet-wide version.
-
-It is a **Warning**, unlike being outvoted on a live claim, and the difference is not severity for its own sake. Two automations wanting a workload down for different reasons are both right, and arbitration between them is the design working — that is `Normal`. Two automations declaring different normal sizes for one workload cannot both be right; nothing Reactor does resolves it, and the number it picks is only a tie-break. Somebody has to change one of the specs.
-
-`reversal: None` contributes no level at all, so it is never part of a disagreement. Two automations both on `Baseline` agree by construction — they resolve to the same recorded baseline — so the cases this catches are `Declared` against `Declared`, and `Declared` against `Baseline`.
-
-### When an action fails
-
-Each action is bounded by `timeoutSeconds` (default 30), so a target that has stopped answering fails and is retried rather than occupying the reconciler. Retries back off exponentially from 2s to a 1-minute cap and stop after five consecutive failures — at which point the automation says so and waits for the next state change instead of retrying forever:
-
-```sh
-kubectl -n media get automation pause-on-backup-wan -o jsonpath='{.status.conditions[?(@.type=="Applied")]}'
-# {"type":"Applied","status":"False","reason":"RetryBudgetExhausted",
-#  "message":"giving up after 5 attempts, will try again on the next state change: ..."}
-```
-
-`Ready` tells you whether an automation is healthy; `Applied` tells you whether what it wants is what its targets have. An automation that is outvoted by a more restrictive claim is `Ready=True, Applied=False` — working exactly as intended.
-
-### Pausing an automation
-
-`spec.suspend: true` takes an automation out of force without deleting it — during an incident, while testing, or when one is misbehaving:
-
-```sh
-kubectl -n media patch automation shed-on-battery --type=merge -p '{"spec":{"suspend":true}}'
-
-kubectl -n media get automation
-# NAME                    PROVIDER   MATCHING   SUSPENDED   READY   AGE
-# pause-on-backup-wan     unifi      false      false       True    3h
-# shed-on-battery         unifi      true       true        True    3h
-```
-
-**Suspending is a reversible delete, not a freeze.** A suspended automation keeps observing state and reporting `matching`, `observedState` and `lastTransition` — that is what makes it worth leaving in place while you debug — and stops claiming its targets entirely. Each target is arbitrated as if the automation were not there, so it goes back to whatever the other automations claiming it want, or to this one's [`reversal`](#what-coming-back-means) if none do. It reports `Ready=True`, `Applied=False` with reason `Suspended`.
-
-Deletion gives the same answer, on purpose: "pause this" and "remove this" should not mean different things to a workload one of them is holding down. Two consequences worth knowing:
-
-- **A suspended automation cannot strand a workload**, because it is not holding one. Deleting one is equally uneventful — its finalizer has nothing left to release.
-- **It never fights you.** A suspended automation writes nothing. If it was the only claimant, Reactor's annotations come off the target as it lets go and you can scale that workload by hand; if another automation still claims it, that one is still in charge and `claimed-by` names it.
-
-Resuming re-evaluates against current state and replays nothing: an automation whose condition still holds re-claims its targets on the next reconcile, recording a fresh baseline from whatever the workload is at then.
-
-If what you wanted was "leave the workload exactly where it is", say that explicitly — with nothing else claiming the target, this pauses the automation *and* stops Reactor asserting a value for it:
-
-```sh
-kubectl -n media patch automation shed-on-battery --type=merge \
-  -p '{"spec":{"suspend":true,"reversal":"None"}}'
-```
-
-### Asking what an automation would do
-
-Writing an automation means deciding what should happen to somebody's production workload during an incident you cannot rehearse. `spec.dryRun: true` lets you apply one and be told the answer instead of finding out:
-
-```sh
-kubectl -n media get automation shed-on-battery \
-  -o jsonpath='{.status.targets[0]}' | jq
-# {"ref": "Deployment/media/qbittorrent",
-#  "effective": 1,                                  # what it is held at now, by somebody else
-#  "preview": {
-#    "desired": 0,                                  # what this automation would ask for
-#    "effective": 0, "level": "0 replicas",         # what the arbitration would then resolve to
-#    "wouldDefer": ["media/pause-on-backup-wan"],   # who would stop getting what they want
-#    "onExit": "3 replicas"                         # what it would hand back afterwards
-#  }}
-```
-
-A dry run is **out of force**, exactly as [suspending](#pausing-an-automation) one is: it claims nothing, writes nothing, and — the part that makes it safe to apply next to policies that are live — cannot change what any other automation's targets resolve to. What it adds is `preview`, which is the same fold run once more with its claim in it. Turning `dryRun` off is the only change needed to make it real.
-
-It answers the question **whether or not the condition currently holds**, because the automation you most want to check is the one for a power cut and you are writing it on a Tuesday afternoon. And it says what it would do at the moment it would have done it:
-
-```sh
-kubectl -n media describe automation shed-on-battery | tail -3
-# Normal  DryRun  dry run: nothing was written. In force, this automation would
-#                 hold Deployment/media/qbittorrent at 0 replicas, outvoting media/pause-on-backup-wan
-```
-
-**What a preview cannot promise.** It is computed from the peers, the observed state and the target as they are at that moment, and all three can differ by the time the condition actually holds — another automation may have been written, the workload may have been scaled by hand, the baseline it would restore may not be the one it eventually records. It also says nothing about whether the write would *succeed*: RBAC, an admission webhook, a target that has since been deleted, and [a controller that already owns the field](#when-something-else-already-owns-the-workload) are all outside what arbitration can know. A preview is a fact about a moment, not a forecast.
-
-For a **whole install** that has never acted — a first rollout into a cluster — there is `safety.dryRun: true`, and it is a different thing on purpose:
-
-| | `spec.dryRun` on one automation | `safety.dryRun` on the install |
-| --- | --- | --- |
-| What it is for | trying one policy on a working install | bringing up an install that has never acted |
-| Arbitration | this automation is out of force, so it perturbs nothing | everything stays in force and resolves normally |
-| Reported as | `status.targets[].preview` | `status.targets[].effective` — the real fold, unwritten |
-| Edge actions | not fired; it is out of force | recorded as `Skipped`, so you can see what would have been sent |
-| Enforced by | the operator | the operator **and** the chart, which withholds every permission that could write to a target |
-
-That last row is the point of the install-wide switch: `--dry-run` is Reactor promising not to write, and the missing `patch` and `update` grants are the API server holding it to that. Turning it on for an install that is *already* holding workloads down freezes them where they are, because releasing a claim is a write too — suspend or delete those automations first.
-
-### When something else already owns the workload
-
-Arbitration works because Reactor can see every claimant. A HorizontalPodAutoscaler writes the same `spec.replicas` and is not an automation, so there is nothing to fold it into: Reactor scales to 0 to shed load, the HPA computes a count from metrics and scales it back, and fifteen seconds later Reactor scales it to 0 again. Neither is wrong; they both believe they own the field.
-
-`safety.detectHPA: true` makes Reactor look before it claims, and decline:
-
-```sh
-kubectl -n media get automation shed-on-battery -o jsonpath='{.status.targets[0]}'
-# {"ref":"Deployment/media/api","desired":0,
-#  "managedBy":"HorizontalPodAutoscaler/media/api-hpa"}
-
-kubectl -n media describe automation shed-on-battery | tail -2
-# Warning  TargetManagedByHPA  not claiming Deployment/media/api is driven by
-#                              HorizontalPodAutoscaler/media/api-hpa: arbitration cannot resolve
-#                              a claimant it cannot see, and writing anyway would oscillate rather than win
-```
-
-Nothing is written to that target — not the replica count, and not the baseline annotation, because a baseline captured from a value the HPA is actively changing would mean nothing when a later reversal restored it. The automation stays `Ready=True`: it is correctly configured, it simply cannot act there. Its other targets are unaffected.
-
-**A workload Reactor is already holding is handed back** when an HPA appears over it, to the baseline, and then let go. That case is the one worth getting right: an HPA will not scale a workload up from zero, so going quiet while holding it at 0 would leave it there with neither controller willing to move it.
-
-**There is deliberately no `force`.** Overriding would mean writing `spec.replicas` harder, which is the oscillation, not a way out of it. The thing that would actually work is suspending the HPA — patching its `minReplicas`/`maxReplicas` — and that needs *write* access to somebody's autoscaling policy, which is a much larger permission and a separate decision. If you genuinely want Reactor to win during an outage, remove or suspend the HPA, or point the automation at something else: `kubernetes.cronjob.suspend` and `kubernetes.cordon` shed real load and nothing autoscales them.
-
-Detection is **off by default**, because turning it on changes what an install already in that fight does and costs a permission — `list` on `autoscaling/horizontalpodautoscalers`, granted only when the value is set. That is a read of an autoscaling *policy*: Reactor gets no write to an HPA and nothing over the workloads one manages. With detection off the behaviour is unchanged, which is to say Reactor writes and is written over.
-
-And an honest limit: the general problem is not solvable by detection. KEDA, a GitOps controller correcting drift, and a cron job running `kubectl scale` own `spec.replicas` just as hard, and none of them is discoverable through a stable API. An HPA is the common case and the one that can be seen. An empty `managedBy` means nothing was found, not that the field is uncontested.
-
-### Removing an automation, or Reactor itself
-
-Deleting an automation while it is holding a workload down hands the workload back rather than stranding it — a finalizer releases the claim first. Removing the policy removes its effect, even mid-outage, so an automation deleted while the UPS is still on battery brings its workload back up.
-
-That release can fail — the target has been deleted, RBAC changed under it, an admission webhook is refusing the write — and the finalizer is bounded so that it can never be the reason a resource does not delete. It tries three times, 5 then 10 seconds apart, counting the failures in `status.releaseAttempts`, and then removes itself anyway:
-
-```text
-Warning  ReleaseFailed  could not hand targets back after 3 attempts, deleting anyway: ...
-```
-
-That Event is the signal to go and look at the target by hand, because it is the one case where the finalizer existed, ran, and still left something behind. The trade is deliberate: a workload left where it was is recoverable from its `baseline-replicas` annotation, and a resource stuck `Terminating` forever is not.
-
-`status.releaseAttempts` only ever exists on an automation that is mid-deletion, and it stops at 2. The third failure is the reconcile that removes the finalizer, so the object is gone before a 3 could be written to it.
-
-`helm uninstall` is the case worth understanding, because Helm does **not** delete the `Automation` CRD or your `Automation` resources. They survive the uninstall and simply stop reconciling. A pre-delete hook therefore releases every claim before the operator goes away, and removes the finalizers, which nothing would be left to service:
-
-```sh
-helm uninstall reactor -n reactor-system    # workloads return to their pre-Reactor values
-helm uninstall reactor -n reactor-system --no-hooks    # skip it; workloads stay where they are
-```
-
-Set `uninstall.releaseClaims: false` to make that skip the default. Either way, every workload keeps its `baseline-replicas` annotation, so what it was before Reactor touched it is always recoverable by hand.
-
-What is **not** covered: deleting the operator's Deployment directly, or losing the cluster. Reactor does not supervise its own absence — the annotations are the answer there. And if you ever delete an automation while the controller is down, its finalizer has nothing to release it:
-
-```sh
-kubectl patch automation <name> -n <namespace> \
-  --type=merge -p '{"metadata":{"finalizers":[]}}'
-```
-
-## Telling you what happened
-
-Everything above is invisible unless someone is reading controller logs — including the cases where Reactor deliberately did *nothing*, like holding state when the console went quiet. Two action types fix that by leaving the cluster: `notification.*` sends a message, `http.request` calls anything with an HTTP API.
-
-Both are **edge actions**, like [`kubernetes.restart`](#restarting-a-workload). They fire on this automation's own transitions and own nothing — unlike the desired-state actions, which declare a level that is arbitrated across every automation sharing a target. An edge action in an `onExit` block still fires on this automation's own edge.
-
-```yaml
-apiVersion: reactor.robbeverhelst.com/v1alpha1
-kind: Automation
-metadata:
-  name: pause-downloads-on-backup-wan
-  namespace: media
-spec:
-  when:
-    provider: unifi
-    state:
-      wan: backup
-
-  actions:
-    - type: kubernetes.scale
-      target: {kind: Deployment, name: qbittorrent}
-      replicas: 0
-    - type: notification.ntfy
-      notification:
-        secretRef: {name: ntfy-credentials}
-        title: "Reactor: {{ .Name }}"
-        message: "{{ .Key }} moved from {{ .From }} to {{ .To }}; qbittorrent paused"
-
-  onExit:
-    - type: kubernetes.scale
-      target: {kind: Deployment, name: qbittorrent}
-      replicas: 1
-    - type: notification.ntfy
-      notification:
-        secretRef: {name: ntfy-credentials}
-        message: "{{ .Key }} back to {{ .To }}; qbittorrent resumed"
-```
-
-Transports shipped: `notification.ntfy`, `notification.discord`, `notification.slack`. Telegram is not shipped — its bot token lives in the URL path alongside a separate chat id, which does not fit the "the URL is the credential" shape the others share.
-
-### Two things you have to set up first
-
-**1. Allow the destination.** Outbound actions are refused by default and the allowlist is an install value, not something an automation can set:
-
-```yaml
-# values.yaml
-actions:
-  allowedDestinations:
-    - https://ntfy.example.com
-    - https://discord.com
-```
-
-This is the security boundary and it is worth understanding rather than pasting: anyone who can create an `Automation` in their own namespace can ask Reactor to make a request, and that request goes out from inside the cluster with the operator's network position rather than theirs. [SECURITY.md](SECURITY.md#outbound-actions) has the reasoning and what is refused whatever you list.
-
-**2. Put the destination in a Secret.** For every transport shipped, the webhook URL *is* the credential — so a notification has no URL field at all:
-
-```sh
-kubectl -n media create secret generic ntfy-credentials \
-  --from-literal=url=https://ntfy.example.com/your-topic \
-  --from-literal=authorization="Bearer tk_example"
-```
-
-| Secret key | Used for |
-| --- | --- |
-| `url` | the destination. Required for `notification.*`; for `http.request`, an alternative to `request.url` |
-| `authorization` | sent as the `Authorization` header |
-| `header-<Name>` | sent as the header `<Name>`, e.g. `header-X-Api-Key` |
-
-The Secret must be in the automation's own namespace, and nothing from it is ever logged, put in status, or attached to an Event.
-
-### Messages
-
-`title`, `message` and `http.request`'s `body` are Go [`text/template`](https://pkg.go.dev/text/template) — the standard library, no Sprig:
-
-| | |
-| --- | --- |
-| `.Automation` `.Namespace` `.Name` | who reacted |
-| `.Provider` `.Matching` | which provider, and which direction the edge went |
-| `.Key` `.From` `.To` | the transition that flipped `matching` |
-| `.State` | every key this automation watches, e.g. `{{ .State.wan }}` |
-| `.Time` | when the transition was observed, RFC 3339 |
-| `json` | quotes a value for embedding in JSON: `{"wan": {{ json .To }}}` |
-
-Only the message and the body are templated. The URL and the headers are literal on purpose — the destination is what the allowlist decided, and letting observed state edit it would hand back exactly the choice the allowlist exists to take away.
-
-A key that does not exist is an error rather than the words `no value`, so a typo fails loudly at the moment the notification would have gone out. That covers `{{ .State.wan }}`; the `index` builtin (which you need for a dotted key, `{{ index .State "ups.battery" }}`) returns an empty string instead.
-
-Values are treated as data, not structure, whatever they contain — which matters most for [`isp`](#state-keys), the one key whose values are an open set rather than an enum. Notification bodies are built with a JSON encoder rather than by string formatting, `json` is there so an `http.request` body can embed a value without hand-quoting it, and anything travelling in a header is reduced to printable ASCII.
-
-### `http.request`
-
-```yaml
-- type: http.request
-  request:
-    method: POST                       # GET, POST, PUT or PATCH; defaults to POST
-    url: https://example.com/hook      # or omit it and put url in the Secret
-    secretRef: {name: hook-credentials}
-    headers:
-      - name: X-Reactor-Source
-        value: homelab
-    body: '{"automation": {{ json .Automation }}, "wan": {{ json .To }}}'
-  timeoutSeconds: 10
-```
-
-### When a notification fails
-
-**A failed notification never fails the automation.** The scale is the thing that had to happen; the notification is the report of it. So a failure is recorded in `status.edgeActions` and raised as a Warning `Event`, and `Ready` stays whatever the target reconciliation made it:
-
-```sh
-kubectl -n media get automation pause-downloads-on-backup-wan -o jsonpath='{.status.edgeActions}'
-# [{"type":"notification.ntfy","status":"Failed","attempts":3,
-#   "destination":"https://ntfy.example.com:443",
-#   "reason":"https://ntfy.example.com:443: responded 502 Bad Gateway",...}]
-
-kubectl -n media describe automation pause-downloads-on-backup-wan
-# Warning  EdgeActionFailed  notification.ntfy was not delivered: ...
-```
-
-Ordering and delivery, stated plainly because they are choices rather than accidents:
-
-- **The scale happens first.** A transition whose target could not be written is not committed, so nothing announces a workload was paused while it is still running. It is announced on the retry that succeeds.
-- **At most once per transition.** The transition is written to status *before* anything is sent, so a failed or conflicting status write cannot send the same message twice. Nothing is re-sent on a later reconcile — that reconcile has no new transition, so a re-send would be a duplicate, not a retry.
-- **Retries happen inside the one reconcile.** A notification is a publish, so it is tried three times against a timeout, a 5xx or a 429. `http.request` is not: `GET` and `PUT` retry ([RFC 9110](https://www.rfc-editor.org/rfc/rfc9110#name-idempotent-methods) calls them idempotent), and `POST` and `PATCH` are attempted exactly once unless you set `request.idempotent: true`. Reactor cannot tell your webhook from your order API, and a duplicate side effect is worse than a missed one when nobody knows what the side effect is.
-- **A suspended automation sends nothing**, the same way a deleted one does not. Suspending is a reversible delete.
-- **Nothing fires on deletion.** Deleting an automation is not a state transition, and a "WAN recovered" message caused by a `kubectl delete` would be a lie.
-
-## Acting on things outside the cluster
-
-`http.request` can already reach anything with an HTTP API, and for a one-off webhook that is the right tool. The action types below exist because two integrations are worth naming: they are used often enough that writing the URL out every time is a papercut, and — more importantly — a named action can constrain the request in ways a generic one cannot.
-
-They are **the same transport**. The same install-level `actions.allowedDestinations` allowlist, the same address floor enforced in the dialer, the same refusal to follow redirects, the same rule that credentials come only from a Secret in the automation's own namespace, and the same origin-only reporting. There is one outbound HTTP client in Reactor and everything here goes through it. [SECURITY.md](SECURITY.md#outbound-actions) has the reasoning.
-
-### Home Assistant
-
-```yaml
-  actions:
-    - type: homeassistant.service
-      homeAssistant:
-        url: https://home-assistant.example.com
-        secretRef: {name: home-assistant-credentials}
-        domain: notify
-        service: persistent_notification
-        data: '{"message": "the cluster is on battery", "title": "Reactor"}'
-```
-
-It calls `POST /api/services/<domain>/<service>` — `light.turn_on`, `script.turn_on`, `notify.mobile_app_phone`, anything Home Assistant exposes as a service. The credential is a [long-lived access token](https://www.home-assistant.io/docs/authentication/#your-account-profile):
-
-```sh
-kubectl -n media create secret generic home-assistant-credentials \
-  --from-literal=authorization="Bearer eyJhbGci..."
-# the base address may live in the secret instead, under url
-```
-
-**The direction is the point.** Home Assistant can already see UniFi — it has an integration for it, and it does presence better than Reactor ever would. What it cannot see is the cluster. So the interesting flow is not Reactor learning that a phone came home; it is Reactor telling Home Assistant that the uplink failed over, the UPS is on battery, or a node was cordoned, and letting Home Assistant do the physical thing. That is why [#10 (`client.<name>`) and #26 (`unifi.client.block`)](https://github.com/robbeverhelst/unifi-reactor/issues/27) were closed rather than built, and this action is the seam that decision rests on.
-
-Three things are narrower than `http.request` on purpose:
-
-- **The path is built, not written.** `domain` and `service` are the only part an automation chooses, and both are restricted to a bare slug — lowercase letters, digits and underscores — at admission *and* again when the URL is built. Without that, "call a service" would quietly be "make any request to an allowed host", which is a real action with a real name and this is not it. A base URL carrying a path is fine (an instance behind a reverse proxy keeps its prefix); a query or fragment on it is refused.
-- **`data` must render to a JSON object.** It is templated like any other body, and checked before it is sent — a template that rendered to a list, a bare string or nothing is reported against the automation rather than collected as a 400 from Home Assistant with nothing naming who produced it. Omit it and Reactor sends `{}`.
-- **It is attempted exactly once.** `light.turn_on` is idempotent; `script.turn_on`, `notify.*` and `button.press` are not, and Reactor cannot tell which one it was handed. You can: set `idempotent: true` and it retries a timeout or a 5xx like a notification does.
-
-A missing `authorization` key is refused before anything is sent, because Home Assistant answers an unauthenticated call with a 401 that says nothing about which automation produced it.
-
-### qBittorrent
-
-Scaling qBittorrent to zero is the [first automation in this README](#your-first-automation), and it is a blunt instrument: it kills the container, drops every in-progress connection, and relies on qBittorrent recovering its session from disk. Pausing is what you actually wanted — traffic stops, state is preserved, resume is instant:
-
-```yaml
-  actions:
-    - type: qbittorrent.pause
-      qbittorrent:
-        url: http://qbittorrent.media.svc.cluster.local:8080
-        secretRef: {name: qbittorrent-credentials}
-
-  onExit:
-    - type: qbittorrent.resume
-      qbittorrent:
-        url: http://qbittorrent.media.svc.cluster.local:8080
-        secretRef: {name: qbittorrent-credentials}
-```
-
-```sh
-kubectl -n media create secret generic qbittorrent-credentials \
-  --from-literal=username=reactor \
-  --from-literal=password='...'
-```
-
-Both credentials are required. An instance configured to bypass authentication for its subnet is already expressible as a single `http.request` — a `POST` to `/api/v2/torrents/pause` with `hashes=all` — and that is the honest thing to write for it. The login round trip is the entire reason this action exists rather than being an example.
-
-#### It is a level in the world and an edge action here
-
-This is the part worth reading before using it, because the limitation is real and stated rather than hidden.
-
-Paused-versus-running is a **level**. Every level Reactor holds is arbitrated: two automations pausing the same thing for unrelated reasons resolve to one claim, and it stays paused until *neither* wants it paused. That is how [`kubernetes.scale` behaves](#when-two-automations-share-a-workload), and it is what you would want here.
-
-What makes arbitration possible is not the fold. It is that the target is a **Kubernetes object**, so the value it held before Reactor first touched it can be written as an annotation *on that object* — `reactor.robbeverhelst.com/baseline-replicas` — where it outlives the automation, outlives Reactor, and can be read by the pre-delete sweep during an uninstall. A qBittorrent instance reached over HTTP has none of that: no Kubernetes identity to arbitrate over, nowhere to put a baseline, and nothing the uninstall hook could reach even if there were, since it runs with no credentials and no destination allowlist.
-
-Three ways out were available:
-
-| | Why not |
-| --- | --- |
-| Keep the baseline in the automation's `status` | It dies with the automation — which is exactly the case where release matters. The annotation lives on the *target* for this reason. |
-| Keep it in qBittorrent, as a tag or a category | It writes Reactor's bookkeeping into your torrent data, where you can edit it, and it does not survive a torrent being removed and re-added. Reading it back would also mean parsing a response body into Reactor, which the outbound client deliberately cannot do. |
-| Synthesize a Kubernetes identity for it | It would arbitrate on string equality of a URL, silently stop arbitrating when two automations spelled the same instance differently, and produce a `status.targets` entry Reactor cannot verify. Arbitration that is sometimes right is worse than none. |
-
-So it ships as an edge action, named as a verb, and **two limitations follow**:
-
-- **It is not arbitrated.** Two automations pausing the same instance do not resolve to one claim. Each fires on its own transition, and whichever resumes first resumes everything. If you need arbitration today, use `kubernetes.scale` on the Deployment — bluntness buys you the fold.
-- **There is no baseline, so `resume` resumes everything.** Including torrents you had paused by hand before Reactor ever ran. Nothing can tell those apart, because nothing recorded which they were. This is the same failure mode the [node cordon baseline](#closing-a-node-to-new-work) exists to prevent, and here it cannot be prevented.
-
-A design for non-Kubernetes desired-state targets — somewhere legitimate to keep a baseline and a claim for a thing with no object to hang them on — **does not exist yet**. When it does, this action becomes a level and the two limitations go away. Until then, an edge action that says what it is beats a desired-state action that pretends to arbitrate.
-
-The two are also complementary rather than exclusive. Pause on the way in *and* let a `kubernetes.scale` claim the Deployment for the harder cases; the scale is still arbitrated normally, because a Deployment is still a Deployment.
-
-#### The session, and the rule it had to fit
-
-Everything else here authenticates with a token you hold. qBittorrent issues one: `POST /api/v2/auth/login` returns a `SID` cookie, and that cookie is a bearer of the same authority as the password. Reactor's rule is that a credential is never held longer than the request that uses it, and a cached session would be exactly the thing that rule forbids for the password itself.
-
-So there is no session cache and no session store. **The login happens inside the one action**, the cookie lives in a local variable for the two requests that need it, and a `POST /api/v2/auth/logout` ends the session on the far end rather than leaving it to expire. The cost is one extra round trip per action. The benefit is that the rule holds as written, on both ends of the connection — and a retry logs in again rather than reusing a cookie from the attempt that just failed.
-
-Three details that follow:
-
-- **A rejected credential is a 200.** qBittorrent answers a wrong username or password with `200 OK` and the body `Fails.`, setting no cookie — so the *absence* of the cookie is the authentication check, and it is reported as a failure rather than a success. It is not retried: a rejected credential does not get better by asking again.
-- **Every leg is checked against the allowlist separately**, and the whole exchange is one attempt for retry purposes.
-- **This is the one edge action that can argue idempotence** rather than assert it, so it retries a timeout or a 5xx like a notification does: pausing a paused torrent is a no-op, and so is resuming a running one.
-
-`pause` and `resume` are the long-standing WebUI API names. qBittorrent 5.0 introduced `stop` and `start` and deprecated these; deprecated is not removed, and an instance that has removed them answers `404`, which lands in `status.edgeActions[].reason` with the status in it.
-
-**Every torrent, or none.** There is no category or tag filter. Narrowing to one would mean listing torrents and reading the response back into Reactor, and the outbound client deliberately drains and discards every response body — a response can echo a request back, credentials included. That capability is not worth adding for a filter.
-
-## Changing things on your UniFi console
-
-Everything above reaches *out* of the cluster to an address you allowlisted. The two actions here reach *back at the console Reactor watches*, and they are a different kind of risk: they are the first things Reactor changes on your network rather than reads from it, and the people they affect are not running the cluster.
-
-> ⚠️ **Nothing here has ever been run against a real console.** The way Reactor authenticates a write was worked out against a live UDM Pro, but every endpoint under it is inferred from how UniFi's own web UI is understood to work. [`docs/unifi-write-api.md`](docs/unifi-write-api.md) says exactly which is which. Everything is exercised against `hack/mock-unifi`, and a mock proves the wiring, not the protocol.
-
-Three properties hold for both, and they are what make them safe enough to ship at all:
-
-- **You decide what may be touched, at install time.** `unifi.actions.allowedWlans` and `unifi.actions.allowedPoePorts` are Helm values, both empty by default, and empty refuses everything with a reason naming the value to add. There is no per-automation override — `spec.actions` is writable by anyone who can create an `Automation` in their own namespace, and turning the WiFi off is not a decision that belongs there.
-- **Every step checks before it writes.** Read the object, confirm it is the one the automation meant, then act. A check that fails abandons the action and says what did not match; it never writes anyway and it never writes something else.
-- **Attempted exactly once.** No retry, in either direction. See [when an action fails](#when-an-action-fails) — the next transition corrects a miss, and nothing corrects a duplicate.
-
-They need a **UniFi OS local account**, because the API key the poller reads with does not write:
-
-```sh
-kubectl -n reactor-system create secret generic unifi-reactor-console \
-  --from-literal=UNIFI_USERNAME=reactor \
-  --from-literal=UNIFI_PASSWORD='...'
-```
-
-That is the same Secret the [Alarm Manager registration](#webhook-fast-path) uses, and it is the same credential — same layer, same session, same CSRF token. Reactor holds no session: it logs in, acts, and logs out, once per action.
-
-### Switching a wireless network off
-
-On a metered 5G uplink, guest WiFi is pure cost:
-
-```yaml
-  when:
-    provider: unifi
-    state: {wan: backup}
-  actions:
-    - type: unifi.wlan.disable
-      wlan: {name: Guest}
-  onExit:
-    - type: unifi.wlan.enable
-      wlan: {name: Guest}
-```
-
-```yaml
-# values.yaml — without this, the action above is refused
-unifi:
-  actions:
-    allowedWlans:
-      - Guest
-```
-
-Only `enabled` is ever changed. The write is a read-modify-write, because `rest/wlanconf` offers nothing narrower: Reactor reads the WLAN, changes that one key, and PUTs back **the record it just read**, so it never invents a value for a field it does not understand. It also writes nothing at all when the WLAN is already where you asked for it. What it cannot avoid is that a change you make in the UniFi UI in the two-request window between the read and the write is lost.
-
-#### It is a level, and an edge action, and this one bites
-
-A WLAN being enabled is a level in exactly the way [pausing torrents is](#it-is-a-level-in-the-world-and-an-edge-action-here), and it is an edge action for exactly the same reason: there is nowhere to record what it was before Reactor touched it. Writing that into the WLAN's own configuration is the torrent-tag mistake — it is your config, you can edit it, and the write carrying it has no concurrency control. And releasing a WLAN would mean a credentialed write to the console, which the pre-delete sweep during an uninstall is *designed* to be incapable of.
-
-So, two limitations, and the second is louder here than anywhere else in this README:
-
-- **It is not arbitrated.** Two automations disabling the same SSID do not resolve to one claim; whichever enables it first enables it.
-- **Nothing hands it back.** If the exit transition never arrives — you delete the automation, you uninstall Reactor, the state key stops being observable — **the network stays off until a human turns it back on.** There is no baseline, no release, and no pre-delete sweep that can reach it.
-
-Point it at a network whose absence is an inconvenience, not at the one carrying your phones, your cameras, or Reactor's own path to the controller. Reactor has no way to know which is which, which is why the allowlist is yours to write and is empty until you do.
-
-### Power-cycling a PoE port
-
-The classic fix for a wedged access point or camera, and the natural partner of a `device.<name>: offline` key:
-
-```yaml
-  actions:
-    - type: unifi.poe.cycle
-      poe:
-        device: aa:bb:cc:00:11:22   # the switch's MAC
-        port: 7
-        portName: hallway-ap        # what that port is called, checked first
-```
-
-```yaml
-# values.yaml
-unifi:
-  actions:
-    allowedPoePorts:
-      - aa:bb:cc:00:11:22/7
-```
-
-**This is the action where a wrong target does visible damage** — the wrong port drops an access point, a camera, or the switch uplink carrying your cluster — and the console will accept the wrong one exactly as readily as the right one. So a port is identified by three things that must all agree with the switch's own port table, checked immediately before the command is sent:
-
-| | Why |
-| --- | --- |
-| `device`, a **MAC** | A device name is a label. Renaming a switch would silently repoint the action; a MAC identifies the hardware. |
-| `port`, an index | What the console addresses. |
-| `portName`, **required** | The one that does the real work. An index alone means "whatever is in slot 7 *now*", and after somebody re-patches a rack that is a different thing. Naming what is supposed to be there turns a re-patch into a refused action with a sentence, instead of a power cut to something else. |
-
-Both halves are required in the allowlist too, for the same reason: `aa:bb:cc:00:11:22/7`, never just `7`.
-
-Three refusals apply **whatever you allowlist**, in the same way the [outbound dialer refuses loopback](SECURITY.md#outbound-actions) whatever the destination allowlist says:
-
-- **The switch's own uplink is never cycled.** That port carries everything behind the switch — quite possibly including Reactor's path to the console.
-- **A port the switch does not report as PoE-capable is never cycled.** There is nothing there to cut, and the identity is probably wrong.
-- **A switch that does not report those fields at all is refused**, rather than assumed safe. A guard that silently stops applying is worse than one that declines out loud.
-
-#### The loop, and why debounce is the answer rather than a cooldown
-
-[#25](https://github.com/robbeverhelst/unifi-reactor/issues/25) warns about the obvious disaster: an AP fails to come back, the automation stays matched, and something keeps bouncing the port. **The shape of this engine is what prevents it.** Reactor acts on *transitions*, and an AP that never comes back leaves the automation **matched** — matched is not a transition, so nothing fires again. There is no retry either, in the reconcile or across reconciles.
-
-What can still drive it repeatedly is a **flapping** key, and there the answer is the same one [`kubernetes.restart` uses](#restart-is-why-debounce-matters) — the engine's debounce, not a cooldown inside the action:
-
-```yaml
-unifi:
-  debounce:
-    keys:
-      device.hallway-ap: 3    # three observations before Reactor believes it is down
-```
-
-A cooldown was considered and not built. It would be a second, weaker debounce living inside one action, invisible to the engine and to every other action beside it, and it would swallow a *legitimate* second cycle as readily as a pathological one. Reactor already has a mechanism for "do not believe this too quickly", and adding a private one next to it would make both harder to reason about. If a key drives a power cut, raise its debounce and accept one `pollInterval` per extra sample.
+> Every action, with its fields, its failure behaviour and what it refuses: [Kubernetes](https://reactor.robbeverhelst.com/actions/kubernetes/) · [Notifications and HTTP](https://reactor.robbeverhelst.com/actions/notifications-and-http/) · [External services](https://reactor.robbeverhelst.com/actions/external-services/) · [UniFi console](https://reactor.robbeverhelst.com/actions/unifi-console/) · [Levels vs occurrences](https://reactor.robbeverhelst.com/concepts/levels-and-occurrences/)
 
 ## State keys
 
@@ -778,585 +182,23 @@ Each key is published only when the matching hardware is adopted by your control
 | `ups.runtime` | `ample`, `short`, `critical` | how long the UPS says it can carry its current load |
 | `ups.load` | `normal`, `high` | draw as a fraction of the UPS's power budget |
 | `devices` | `all-online`, `degraded` | whether every adopted device is reachable, or at least one is not |
-| `device.<name>` | `online`, `offline` | one adopted device, by slugified name. **Opt-in** — see below |
+| `device.<name>` | `online`, `offline` | one adopted device, by slugified name. **Opt-in** |
 | `firmware` | `current`, `updates-available` | whether the console has an update waiting for anything adopted |
 | `temperature` | `normal`, `high` | the hottest adopted device against the configured threshold |
 | `wifi` | `ok`, `warning`, `error` | the WiFi subsystem as a whole, from the console's AP counts |
 | `poe` | `ok`, `insufficient` | PoE headroom on the worst switch, against the configured threshold |
-| `outlet.<n>` | `on`, `off` | one switchable UPS outlet, by index or by name. **Read-only** — see below |
+| `outlet.<n>` | `on`, `off` | one switchable UPS outlet, by index or by name. **Read-only** |
 
-`isp` is the one key whose values are not a closed set: it is the carrier name your console geolocated your public address to, lowercased with everything non-alphanumeric turned into a hyphen. Look it up before matching on it —
+`isp` is the one key whose values are not a closed set: it is the carrier name your console geolocated your public address to, lowercased with everything non-alphanumeric turned into a hyphen. Look it up before matching on it:
 
 ```sh
 kubectl -n reactor-system logs deploy/reactor | grep 'key=isp'
 # INFO state transition provider=unifi key=isp from= to=telenet
 ```
 
-— and use it when *who* is carrying your traffic is what matters rather than which port it leaves by, which is usually the case for anything metered:
+A key that stops being reported is **held**, not treated as a condition that ended — losing sight of the hardware must not scale workloads back up mid-outage.
 
-```yaml
-  when:
-    provider: unifi
-    state:
-      isp: unknown        # or your backup carrier's slug
-```
-
-It exists for a second reason. `wan` and `isp` are independent answers to "did the uplink change", so Reactor compares them: if one moves and the other does not, it says so rather than quietly trusting either. Those lines are worth reading — see [`wan` and `isp` disagree](docs/troubleshooting.md#10-wan-and-isp-disagree-about-a-failover).
-
-### `internet` is the one `wan` cannot express
-
-`wan` says which uplink is *selected*. It stays `primary` when the link is up, the uplink is unchanged, and there is no internet — the failure your gateway's own failover may never act on, because from the gateway's point of view nothing is wrong. `internet` is the key for that case, and it comes from a different place: the console's own `www` health subsystem, which is its judgement about reachability rather than about link state.
-
-```yaml
-  when:
-    provider: unifi
-    state:
-      internet: down      # regardless of which uplink is carrying it
-```
-
-Both keys are [debounced at 3 samples](#settling-a-noisy-signal), so at the default 30s `pollInterval` an outage takes about **90 seconds** to be believed — and a recovery the same. That is a deliberate trade for not shedding load on one bad probe round; if you need it faster, lower `pollInterval` rather than the debounce, because the three samples are what make the signal trustworthy.
-
-`wan.quality` answers a third question, over a different time horizon: not *is the internet there* but *has this uplink been any good*. It buckets the availability and average latency the console measures against its uptime monitors into two levels, using [thresholds you configure](#configuration). Those numbers are averages over the console's uptime window — 24 hours on the hardware they were captured from — so `wan.quality` describes a link that has been bad rather than one that spiked, and a long outage keeps it `degraded` for the rest of that window.
-
-That is deliberate. A number cannot be a state value at all: `spec.when` matches strings, and a key whose values are continuous can never be exported as a metric label without one series per distinct reading. Bucketing is what makes it a state key, and the two levels are the whole vocabulary.
-
-```yaml
-  when:
-    provider: unifi
-    state:
-      wan.quality: degraded   # don't start the big sync on a link that has been flaky
-```
-
-Keep them apart when you write automations. `internet: down` is an outage; `wan.quality: degraded` is a bad day; matching both in one `state` block means *both must hold*.
-
-Together they also give the [unverified `wan` mapping](#compatibility) something it has never had — a third opinion from a different endpoint. `stat/health` accumulates uptime per uplink, and uptime is traffic the console watched pass, where `is_uplink` and `uplink.name` are both statements about configuration. If uptime is accumulating on a port other than the one `wan` names, Reactor says so rather than quietly trusting either ([what to do about it](docs/troubleshooting.md#10-wan-and-isp-disagree-about-a-failover)).
-
-`ups` and `ups.battery` are separate on purpose. An automation matching `ups: on-battery` stays matched for the whole outage as the battery drains — with a single escalating enum, dropping from `on-battery` to `low-battery` would leave the matching state and fire `onExit`, scaling workloads back **up** in the middle of a power failure. Express escalation by matching both keys instead; all keys in a `state` block must match.
-
-```yaml
-  when:
-    provider: unifi
-    state:
-      ups: on-battery
-      ups.battery: critical
-```
-
-### Charge is a poor shutdown trigger; runtime is a better one
-
-`ups.battery` ignores load, and load is most of the answer: 30% at 300W and 30% at 900W are very different situations. `ups.runtime` is the UPS's own estimate of how long it can carry what is plugged into it *right now*, bucketed against [thresholds you configure](#configuration), and it is what a shutdown automation should actually match on.
-
-```yaml
-  when:
-    provider: unifi
-    state:
-      ups: on-battery
-      ups.runtime: critical   # not "the battery is low" — "we are about to run out"
-```
-
-`ups.load` is the other half of the same picture: the draw as a fraction of the UPS's power budget. It is what tells you *why* the runtime is short, and it is worth matching before an outage rather than during one — a UPS already running at 85% has no headroom to give you when the power goes.
-
-It is published on mains as well as on battery, deliberately. "Could we even survive an outage right now" is a question worth being able to ask while the lights are still on.
-
-Both are separate keys for the same reason `ups.battery` is: they are independent axes, and an automation matching one must not stop matching because another moved. All four UPS keys are only published when a UniFi UPS is adopted, and `ups.runtime` and `ups.load` are additionally omitted when the UPS reports no runtime estimate or no usable power figures — a missing measurement is never turned into a value.
-
-> ⚠️ `timeToRemain`'s unit is **inferred** to be seconds, from a single observation on a UPS that was not discharging. Nothing in Reactor depended on it before this key existed. Confirm it against a real outage before letting `ups.runtime: critical` shut anything down — [#7](https://github.com/robbeverhelst/unifi-reactor/issues/7) has the procedure.
-
-### The fleet: `devices`, and why `device.<name>` is opt-in
-
-An access point can sit dead for days with nothing telling you. `devices` is the
-one-value answer to "is anything down": `all-online` while every adopted device
-is in contact with the console, `degraded` the moment one is not.
-
-```yaml
-  when:
-    provider: unifi
-    state:
-      devices: degraded    # something in the rack stopped answering
-```
-
-`device.<name>` is the same observation per device, keyed by the device's name
-lowercased with everything non-alphanumeric turned into a hyphen — `US 48`
-becomes `device.us-48`. **It is off by default**, and that is a deliberate
-asymmetry rather than caution:
-
-```yaml
-unifi:
-  devices:
-    perDeviceKeys: true    # one key, and one metric series, per adopted device
-```
-
-Every other key here is bounded by what is compiled in. `device.<name>` is the
-first whose *name* comes from your network, so turning it on means one state key,
-one `reactor_state_transitions_total` series, and one more thing an Automation
-can hold state for **per adopted device** — forty devices, forty of each. The
-aggregate costs one series whatever the fleet size, so it ships on and the
-per-device keys are something you ask for. Reactor logs at startup when they are
-on, and `unifi.devices.perDeviceKeys` is the only setting on this page that
-changes how *much* Reactor publishes rather than what it means.
-
-Per-device keys are also never labelled by value in Prometheus, for the same
-reason `isp` is not — see [Cardinality](#cardinality-on-purpose). Which device is down
-is in the Automation's `status.observedState`, in an Event, and in a `V(1)` log
-line naming the device and the console's own disconnection reason.
-
-Three things are excluded on purpose. **Unadopted and pending devices**: the
-console can see your neighbour's AP, and it is not your fleet. **A device
-reporting a state this provider does not recognise** — UniFi documents
-provisioning, upgrading and heartbeat-missed states that no capture has ever
-shown — because reading an unfamiliar state as `offline` would report a firmware
-upgrade as a fleet outage. **A device reporting no state at all**, which is
-absence, not zero.
-
-Renaming a device on the console makes its old key *vanish* rather than report
-`offline`, which Reactor treats as lost visibility: the last known state is held
-and `Ready=False` reports `StateKeyUnavailable`, so nothing fires `onExit`
-because you retitled a switch. The same is true of a device you remove. And two
-devices whose names slugify to the same key — `AP 1` and `ap-1` — publish
-*neither*, because picking one would be arbitrary and the arbitrary pick could be
-the one hiding the dead device. `devices` still counts both.
-
-### `firmware` turns "I should check for updates sometime" into something that pages
-
-```yaml
-  when:
-    provider: unifi
-    state:
-      firmware: updates-available
-  then:
-    - type: notification.ntfy      # or http.request, to open a ticket
-```
-
-One key for the whole fleet: `updates-available` while the console has an update
-waiting for **any** adopted device, `current` when it does not. Which devices, and
-what would move from which version to which, is a `V(1)` log line — a version
-string is not something `spec.when` could match, and one metric series per version
-is the cardinality failure [`isp` would have been](#cardinality-on-purpose).
-
-```sh
-kubectl -n reactor-system logs deploy/reactor | grep 'unifi-firmware'   # needs log.level=debug
-# firmware firmware=updates-available devicesReporting=6 devicesUpgradable=ap-attic=6.6.65->7.0.50 modelsPastEOL=1
-```
-
-**Reactor will not upgrade anything.** Observing is in scope and applying is not:
-a firmware upgrade reboots hardware, and an operator choosing when that happens is
-the whole point of being told it is available.
-
-A device that does not report the field is not a device that is up to date, so a
-console where *nothing* answers publishes no `firmware` key at all rather than
-`current` — and the committed captures are exactly that case, which is why this
-parser is [not yet verified](#compatibility). Devices that stay silent while
-others answer are named in the same log line rather than assumed current.
-
-`model_in_eol` is read and deliberately **not** published as a key, though it is
-arguably the more valuable fact. It is an inventory property rather than a state:
-it does not transition, so an Automation matching it would sit permanently
-matched, which is a report rather than a reaction. It is counted in the log line
-above, and a key for it is a decision to argue for separately.
-
-### `temperature` is the hottest device, bucketed
-
-A switch cooking in a warm rack degrades before it fails. `temperature` reports
-`high` when the hottest adopted device is at or above a threshold **you
-configure**, or when the console itself says a device is overheating:
-
-```yaml
-unifi:
-  temperature:
-    highCelsius: 75
-```
-
-```yaml
-  when:
-    provider: unifi
-    state:
-      temperature: high    # stop the transcode job before the rack gets worse
-```
-
-The console's own `overheating` flag outranks the threshold: the firmware knows
-what that model tolerates and a number in this repository does not. Otherwise the
-hottest *sensor* on the hottest *device* decides — a board is as hot as its
-hottest part, and averaging would let one cool sensor hide a cooking one.
-
-Like [`wan.quality`](#internet-is-the-one-wan-cannot-express) and `ups.load`, this
-is a **bucketed measurement**, and for the same two reasons: `spec.when` compares
-strings, so a number cannot be a state value, and one metric series per distinct
-reading is unbounded. The readings themselves are a `V(1)` log line — which is
-where you find out what your rack actually runs at before setting the threshold:
-
-```sh
-kubectl -n reactor-system logs deploy/reactor | grep 'unifi-temperature'   # needs log.level=debug
-# temperature temperature=normal hottestCelsius=58.5 hottestDevice=switch-48 thresholdCelsius=75 devicesFanless=2
-```
-
-The default of 75 °C is set **against the debounce**, not in isolation, the same
-way [`ups.runtime`'s thresholds are](#charge-is-a-poor-shutdown-trigger-runtime-is-a-better-one): UniFi switches and APs
-normally sit at 40–60 °C, so 75 °C plus 3 samples means a reading that genuinely
-held for 90 seconds rather than a fan spinning up late. Lower it towards the
-normal operating range and that hysteresis stops meaning anything, because the
-reading will cross the line and stay there. Move one and you have moved the other.
-
-A device reporting no temperature is **not a device at 0 °C** — it publishes
-nothing, and a fleet where nothing is instrumented publishes no `temperature` key
-at all. Reading a missing sensor as zero would make the rack look coldest exactly
-when a sensor stops answering.
-
-### `wifi` is the subsystem, not any one AP
-
-`devices: degraded` says something in the rack stopped answering. `wifi` says how
-much of your *WiFi* is left, which is a different question and often the one that
-matters to whoever is complaining:
-
-| Value | When |
-| --- | --- |
-| `ok` | every adopted access point is connected |
-| `warning` | at least one is disconnected, but not all of them |
-| `error` | **every** adopted access point is disconnected |
-
-It is derived from the console's own `num_disconnected` and `num_adopted` counts
-rather than from the `wlan` subsystem's `status` string, and #9 asked for that
-choice to be documented rather than left mysterious. The counts are a fact that can
-be explained — "1 of 3 access points is disconnected" is an answer; "UniFi said
-warning" is not — and they make `error` *derivable*, where mapping the vendor
-string through would have been inference: no capture has ever shown any subsystem
-saying `error`. In the one capture there is, the two agree exactly (`warning`, with
-1 of 3 APs disconnected), so this sharpens the console's verdict rather than
-contradicting it.
-
-The status string is still read, and a mismatch is counted as
-`reactor_provider_signal_disagreements_total{signal="wifi-status-disagrees"}` and
-logged. If UniFi's `warning` turns out to mean something else — airtime, channel
-interference — that counter rises instead of the derivation quietly being wrong.
-
-A site with **no** adopted access points publishes no `wifi` key: there is no WiFi
-there to be healthy, which is not the same as WiFi that is fine.
-
-The three values are alternatives, not steps of a ladder — the same shape
-[`internet`](#internet-is-the-one-wan-cannot-express) has. An automation matching
-`wifi: warning` **stops** matching when the value moves to `error`, and reverses,
-because those are two different values of one key. Match the value you mean, or
-write one automation per value:
-
-```yaml
-  when:
-    provider: unifi
-    state:
-      wifi: error         # every access point is gone, not just one
-```
-
-This is not the `ups`/`ups.battery` trap it resembles. There, one *fact* (on
-battery) escalated into a second fact (the charge), and splitting them was the
-fix. Here all three values answer a single question — how much WiFi is left — so
-one key with three values is the right shape, and choosing between them is the
-automation author's job.
-
-### `poe` is headroom, before it becomes an outage
-
-An overloaded PoE budget silently drops APs and cameras. `poe` reports
-`insufficient` when the worst switch is delivering at or above a share of its
-budget **you configure**:
-
-```yaml
-unifi:
-  poe:
-    maxUtilizationPercent: 90
-```
-
-`insufficient` means *the headroom is gone*, not that a port has already been
-denied power — by the time the console refuses a port, the camera is off. The
-worst switch decides, because one switch out of headroom drops the cameras on
-that switch whatever the rest of the rack has spare.
-
-Another [bucketed measurement](#temperature-is-the-hottest-device-bucketed), with
-the watts in a `V(1)` log line:
-
-```sh
-kubectl -n reactor-system logs deploy/reactor | grep 'unifi-poe'   # needs log.level=debug
-# poe poe=ok worstUtilizationPercent=32.5 worstSwitch=switch-48 draws=switch-48=63.5/195W
-```
-
-The interesting rule here is what happens to a port that is **powering something
-and will not say how much**: it makes that whole switch unreadable, and the switch
-is left out rather than counted as drawing nothing. Counting it as 0 W would report
-headroom that is not there — under-counting the draw is the one direction that
-hides the exact failure this key exists to catch. Other switches are still
-measured, so one unreadable switch does not take the key with it.
-
-A switch reporting no budget is likewise not a switch with no budget, and never a
-denominator. A fleet with no readable PoE switch publishes no `poe` key at all.
-
-### `outlet.<n>` is read-only, and the relay grouping is why
-
-A UniFi UPS reports one entry per switchable outlet, and Reactor publishes one
-key each — `on` while the relay is closed and delivering mains, `off` when it is
-not:
-
-```yaml
-  when:
-    provider: unifi
-    state:
-      outlet.nas: off      # something cut power to the NAS
-```
-
-**Reactor will not switch an outlet.** Not behind a flag, not with an allowlist,
-not at all — and that is not caution about writes in general, since Reactor
-already power-cycles a PoE port. It is one specific unanswered question, visible
-in the capture:
-
-```json
-{"index": 1, "name": "Outlet 1", "relay_state": true, "relay_group": 1}
-```
-
-Outlets 1–4 report `relay_group: 1` and outlets 5–8 report `relay_group: 2`. If
-the relay **group** is what the hardware switches, then "turn off outlet 3" means
-"cut outlets 1 to 4", and one of those may be carrying your gateway, your switch
-or your storage. Nobody has confirmed which it is. The documented write path
-([`outlet_overrides`](https://github.com/Art-of-WiFi/UniFi-API-client/blob/main/examples/modify_smartpower_pdu_outlet.php))
-comes from the USP-PDU-Pro and USP-Strip, which expose per-outlet power and
-current and have **no relay groups at all**, so it is documented for a different
-device class and settles nothing here. Switching is tracked in
-[#23](https://github.com/robbeverhelst/unifi-reactor/issues/23) and stays there
-until it is answered.
-
-Observing is what answers it, safely. Reactor prints the grouping when it first
-sees it, and says what moved together whenever a relay does:
-
-```sh
-kubectl -n reactor-system logs deploy/reactor | grep unifi-outlets
-# A UPS is reporting switchable outlets. Reactor only READS them ...
-#   device=ups-2u relayGroups="1=[outlet.1 outlet.2 outlet.3 outlet.4] 2=[outlet.5 outlet.6 outlet.7 outlet.8]"
-# Outlet state changed. If you are running the relay-group experiment on issue #60, this line is its readout
-#   moved=outlet.5=on->off relayGroup=2 movedInGroup=1 outletsInGroup=4
-#   verdict="outlets in this group moved independently of each other"
-```
-
-Toggle **one** outlet by hand in the UniFi UI — pick one in the bank carrying
-nothing you care about — and that second line is the whole experiment:
-`movedInGroup=1` of `4` means outlets switch individually, and `4` of `4` means
-the relay group is the switching unit. Both are rehearsable without hardware; see
-[the mock](docs/development.md#running-without-a-udm).
-
-#### Name your outlets
-
-Out of the box every outlet is called `Outlet 1` … `Outlet 8`, which is the index
-spelled out rather than a name, so the key falls back to the index: `outlet.3`.
-Name them in the UniFi UI and the key becomes the name — `NAS` publishes
-`outlet.nas`.
-
-Do it before writing anything against them. `outlet.3` means something different
-the day somebody re-plugs the rack, and this is the same argument that made
-`portName` **required** rather than optional for
-[`unifi.poe.cycle`](#power-cycling-a-poe-port): hardware that carries mains power
-should be addressed by what it is, not by where it happens to be plugged.
-
-Renaming an outlet makes its old key *vanish* rather than report `off`, which
-Reactor treats as lost visibility — the last known state is held and `Ready=False`
-reports `StateKeyUnavailable`, so nothing sheds load because you labelled a socket.
-Two outlets addressed the same way publish **neither**, for the same reason two
-devices sharing a slug do.
-
-These keys appear only when an adopted device actually lists outlets. The captured
-gateway reports `"outlet_table": []`, so having the field is not the same as having
-outlets, and an outlet that reports no `relay_state` publishes nothing at all rather
-than being read as off.
-
-They are also **not** in `reactor_state_info`, and the reasoning is worth
-separating from [`device.<name>`'s](#cardinality-on-purpose), because only half of
-it carries over — see [Cardinality](#cardinality-on-purpose).
-
-If a provider stops reporting a key at all — the hardware dropped off the controller — Reactor holds the last known state and reports `Ready=False` with `StateKeyUnavailable` rather than treating lost visibility as a condition that ended ([what to do about it](docs/troubleshooting.md#2-statekeyunavailable-and-held-state)).
-
-### Settling a noisy signal
-
-A changed value can be required to hold for several consecutive observations before Reactor acts on it, which stops one flapping signal driving repeated actions:
-
-```yaml
-unifi:
-  debounce:
-    default: 1          # react on the first observation
-    keys:
-      ups.battery: 2    # ...but let a threshold crossing settle
-      ups.runtime: 2
-      ups.load: 3       # ...a live wattage moves second to second
-      isp: 2            # ...and let a re-geolocated carrier settle
-      internet: 3       # ...and don't believe one bad probe round
-      wan.quality: 3
-      devices: 2        # ...and don't believe one missed heartbeat
-      device.*: 2       # a trailing * covers keys named after your hardware
-      firmware: 3       # ...and nothing about an update is urgent
-      temperature: 3    # ...and a measurement hovers on its threshold
-      wifi: 2           # ...and an AP heartbeat can miss a beat
-      poe: 3            # ...and a PoE draw moves when a radio comes up
-      outlet.*: 1       # a relay is a switch position; there is nothing to settle
-```
-
-Each extra sample costs one `pollInterval` of reaction time, so the default is `1`: a WAN failover and a power cut both deserve an immediate reaction, and neither flaps. `ups.battery` ships at `2` because it is a threshold crossing — a charge hovering at 30% would otherwise report `low`, `normal`, `low` — and because a battery drains over minutes, so spending one more poll to be sure costs nothing. At the default 30s poll that makes a battery-level escalation react in 60s worst case instead of 30s.
-
-`isp` ships at `2` for a different reason: it is not a link state but the result of a geolocation lookup on whatever public address the gateway currently holds, so it can report `unknown` for a poll or two while a new address is being resolved — precisely during the failover you would be reacting to. One extra sample skips that window. `wan` and `ups` need none of this: they are switch positions, and they do not flap.
-
-`ups.runtime` matches `ups.battery` at `2`: it is the same kind of escalation, and its default thresholds are set against that delay rather than in isolation — 2 samples is 60s at the default poll, and a `critical` threshold of 180s leaves two minutes between Reactor believing the reading and the UPS running out. Move one and you have moved the other.
-
-`ups.load` is the exception at `3`, because it is the only key derived from an *instantaneous* measurement: a server spinning up shifts the draw by a few hundred watts in one poll, where a battery drains monotonically over minutes. A momentary burst past 80% must not be a reason to shed load.
-
-`internet` and `wan.quality` ship at `3`, the highest in the chart, because they are the two keys derived from probes to the outside world rather than from anything on your desk. A single poll in which a probe target rate-limits or a resolver blips must not shed a cluster's load. At the default 30s poll that is 90 seconds before either an outage or a recovery is believed — deliberately symmetric, because a link flapping in and out is exactly when repeatedly scaling workloads up and down does the most damage.
-
-Debounce is also the whole of the flap control for `wan.quality`, and that is worth being explicit about, because bucketing a measurement is where a threshold usually needs hysteresis. It does not need it here: debounce promotes a value only after N *consecutive* identical observations, so a measurement hovering on a threshold produces `good`, `degraded`, `good` and is never promoted at all — the key simply holds what it had. A second, differently-shaped flap control in the provider would be a second thing to reason about for a problem the engine already solves for every key.
-
-`devices` and `device.*` ship at `2`. A device's state is a switch position like `wan`, but it is the *console's* judgement about a heartbeat rather than a wire it can see, and a busy console that misses one beat must not be a reason to page anyone. One extra sample is 60 seconds at the default poll, which is nothing against the failure this key exists for — an AP that has been dead for days.
-
-`firmware` ships at `3`, and here the reason is that nothing is lost by it. The key is not derived from your hardware at all but from the console's lookup against Ubiquiti's release catalogue, which can refresh, blip or briefly disagree with itself — and *no* firmware update needs reacting to within 30 seconds. Extra samples are free when reaction time does not matter, so it takes the most of any key.
-
-`temperature` ships at `3` because it is a measurement that hovers: thermals move with the room, the fan and the load, and a reading sitting near the threshold would otherwise report `high`, `normal`, `high`. Debounce is the whole of the flap control here, exactly as it is for `wan.quality` — three consecutive identical readings, or the key holds what it had.
-
-`wifi` ships at `2` for the same reason `devices` does, and from the same underlying fact: an AP count is the console's judgement about heartbeats, and one missed beat on a busy console must not fire an automation.
-
-`poe` ships at `3`, the same argument as `ups.load`: it is an instantaneous measurement, and an AP's radios or a camera's heater coming up move the draw by tens of watts within one poll. Its 90% default assumes those three samples — raise the threshold towards 100 and there is no headroom left to react in during them.
-
-`device.*` is the one entry here that is a pattern rather than a key. Per-device key names come from your hardware, so no list written here could name them; a trailing `*` matches every key with that prefix. An exact key always wins over a pattern, and the longest matching prefix wins between patterns, so `device.ap-attic: 5` pulls one device out of the group it belongs to.
-
-Debouncing happens in the shared state store, so every automation sees the same settled value. Two automations can never disagree about the current state and fight over a workload they share.
-
-This is the setting to revisit the moment you write a [`kubernetes.restart`](#restart-is-why-debounce-matters): scaling is idempotent and a flap costs nothing, while a restart under a flapping key is a rollout per poll.
-
-### How long Reactor may act on state that has already changed
-
-Debounce is half of an answer to a question worth asking outright, because a policy engine acting on something that stopped being true is the failure everything else here is arranged to avoid. **There are two windows, and only one of them is bounded by anything.**
-
-**A value that changed** reaches every Automation within **`pollInterval` × the key's debounce samples**. Worst case is the change landing just after a poll, then needing its samples on the poll cadence: `wan` at the defaults is 30 seconds, `internet` is 90. Both terms are yours, and that product *is* the bound — there is deliberately nothing else in the path. The reconciler re-evaluates every 15 seconds regardless and is woken immediately on a transition, so it contributes latency, not staleness.
-
-The webhook fast path narrows the **first** term only. A delivery brings the next observation forward, and while a value is still proving itself against its debounce threshold a delivery is [ignored outright](#webhook-fast-path). That is not an oversight: a delivery only ever says *look now*, and if it could also supply the samples that promote a value, anyone who can reach the endpoint could fast-forward a key straight through the settling time you asked for.
-
-**A console that stops answering** has no such window. A failed observation is logged and dropped — the next poll is the recovery mechanism — so the store keeps reporting the last state it has, and every reconcile re-decides against it for as long as the console is away. That is **correct and stays correct**: withdrawing state Reactor can no longer confirm would release claims during exactly the incident that took the console offline, which is the same reason a key that vanishes gets [`StateKeyUnavailable`](docs/troubleshooting.md#2-statekeyunavailable-and-held-state) and held state rather than an `onExit`.
-
-What was missing is that the second case said nothing. `StateKeyUnavailable` announces itself on the Automation; a console that has gone quiet announced itself only in `time() - reactor_last_observation_timestamp_seconds`, which needs metrics enabled and somebody watching. So:
-
-```yaml
-unifi:
-  pollInterval: 30s
-  maxObservationAge: 5m    # empty by default: unbounded, and silent
-```
-
-Past that age, every Automation driven by the provider reports it, and **goes on acting**:
-
-```text
-Ready  False  ObservationStale
-provider "unifi" has not been observed since 2026-08-14T09:12:41Z, past the 5m0s this
-install allows; still acting on the state it last reported
-```
-
-```yaml
-status:
-  observedAt: "2026-08-14T09:12:41Z"   # always reported; this is what every field below is only as current as
-```
-
-plus a Warning `Event` and `reactor_stale_decisions_total`, which is the attributable half of the observation gauge: the gauge says Reactor went blind, this says automations were still deciding while it was.
-
-It is off by default and it changes no behaviour when on — no claim is released, no `onExit` runs, no target moves. Set it against `pollInterval` and the samples above rather than in isolation: a changed value already takes up to 90 seconds to be believed at the defaults, so anything under about four poll intervals reports a slow console rather than a blind operator.
-
-## Knowing it is working
-
-Reactor's worst failure is **silent and fails open**. If it stops observing — an expired API key, a rebooted console, a network partition — every automation quietly stops reacting. Nothing in the cluster notices, and the next real outage simply does not get handled. There is no error to find, because nothing errored.
-
-One metric answers that, and it is the reason the rest exist:
-
-```promql
-time() - reactor_last_observation_timestamp_seconds
-```
-
-Metrics are **off by default** and register on the endpoint controller-runtime already serves — there is no second server and no second auth posture:
-
-```sh
-helm upgrade reactor ... \
-  --set metrics.enabled=true \
-  --set metrics.serviceMonitor.enabled=true \
-  --set metrics.rules.enabled=true \
-  --set metrics.dashboard.enabled=true
-```
-
-| Metric | Type | Answers |
-| --- | --- | --- |
-| `reactor_last_observation_timestamp_seconds` | gauge | is Reactor still seeing anything |
-| `reactor_stale_decisions_total` | counter | how much deciding it did while it was not ([above](#how-long-reactor-may-act-on-state-that-has-already-changed)) |
-| `reactor_observations_total` | counter | how often polling succeeds and fails |
-| `reactor_state_info` | gauge 0/1 | what each state key holds right now |
-| `reactor_state_transitions_total` | counter | how often failover actually happens |
-| `reactor_automation_matching` / `_ready` | gauge 0/1 | which policies are in force, and which are broken |
-| `reactor_arbitrations_total` | counter | claimed, deferred to a peer, or released |
-| `reactor_actions_total` | counter | action outcomes, by type and **kind** |
-| `reactor_action_duration_seconds` | histogram | slow or hanging actions |
-| `reactor_reaction_latency_seconds` | histogram | observation → action, end to end |
-| `reactor_webhook_deliveries_total` | counter | fast-path deliveries accepted, coalesced, refused |
-| `reactor_provider_signal_disagreements_total` | counter | two independent signals for one fact disagreeing |
-| `reactor_reversal_disagreements_total` | counter | two automations disagreeing about a workload's normal size ([above](#when-they-disagree-about-coming-back)) |
-
-Reconcile counts, queue depth and reconcile latency are controller-runtime's own `controller_runtime_*` series on the same endpoint. Reactor does not reimplement them. It also deliberately **does not re-export UniFi telemetry** — a UniFi exporter covers that better, and Reactor's unique vantage point is the decision layer.
-
-`kind` on `reactor_actions_total` is `desired_state` or `edge`, and no alert should be written without it. A failed `kubernetes.scale` means the cluster is not in the state you asked for. A failed notification means nobody was told — [the workload was still scaled](#when-a-notification-fails), and the automation is still `Ready`. The shipped rules alert on those separately for exactly that reason.
-
-### Cardinality, on purpose
-
-`isp` is the first state key whose values are an **open set** — a carrier slug derived from whatever public address your gateway currently holds. So `reactor_state_info` is published only for keys whose provider declares a closed value set, and `isp` is deliberately not one of them. The transition counter is not labelled by `from`/`to` for the same reason. What a key currently holds is always in `status.observedState` and in an `Event`; what Prometheus keeps is bounded at compile time.
-
-Declaring the vocabulary is also what lets the gauge report `0` for the values a key does *not* hold. Without that, the series for a value it used to hold goes stale at `1` rather than dropping, and every graph built on it lies. All values `0` means the key is not currently observable — the metric side of [`StateKeyUnavailable`](docs/troubleshooting.md#2-statekeyunavailable-and-held-state).
-
-`device.<name>` is the other side of the same coin, and the reason [it is opt-in](#the-fleet-devices-and-why-devicename-is-opt-in). Its *values* are closed — two of them — but its **key name** comes from your network, so the set of keys is open. It is therefore never in `reactor_state_info` at all, and turning the keys on adds one `reactor_state_transitions_total` series per adopted device: a bounded number, chosen by you, rather than one this repository can promise. `devices` is one series regardless of fleet size, which is why it is the one that ships on.
-
-`outlet.<n>` is out of `reactor_state_info` too, and it is worth saying why it is **not** opt-in as well, because the two halves of `device.<name>`'s argument come apart here.
-
-The cardinality half does not carry over. Eight outlets are bounded by a chassis, not by a rack: nobody adds outlets to a UPS, and most installs have no outlet-bearing device at all. So these keys ship on, beside the other UPS keys, rather than being the one UPS key you have to ask for.
-
-The enumerability half does, and it is what keeps them out of the gauge. `StateVocabulary` is handed over once at startup, before any console has been polled, so it cannot contain a key whose name is an outlet somebody has not named yet — and hardcoding `outlet.1` … `outlet.8` would write one UPS's chassis into this repository and silently leave a larger PDU's ninth outlet outside the metric. Declaring `outlet.*` was considered and rejected for a sharper reason: the gauge reports `0` for the values a key does **not** hold, which requires enumerating the values of a key that is missing from the observation, and a prefix can only match keys that are present. An outlet key that vanished with its UPS would sit at `1` forever — the exact staleness declaring a vocabulary exists to prevent.
-
-They are still counted in `reactor_state_transitions_total` (one series each), they are in `status.observedState` and in Events, and the provider logs every change with its relay group in words. That last one is what the [relay-group experiment](#outletn-is-read-only-and-the-relay-grouping-is-why) actually reads.
-
-### Alerts and the dashboard
-
-`metrics.rules.enabled` ships a `PrometheusRule` — `ReactorObservationStale` first, then failing observations, failing actions, edge actions failing separately, automations stuck not-ready, and reactions getting slow. `ReactorUPSOnBattery` and `ReactorWANOnBackup` are informational: they let your existing alerting learn what your network already knows.
-
-`metrics.dashboard.enabled` ships a grafana-operator `GrafanaDashboard`. It pins no datasource — you pick one from a variable when you open it — so the same JSON works in any Grafana, and it is a plain file at [`charts/reactor/dashboards/reactor.json`](charts/reactor/dashboards/reactor.json) if you would rather import it by hand.
-
-Both need their operator's CRDs, and both refuse to render without `metrics.enabled` rather than quietly querying series nothing is publishing.
-
-### The other direction: `kubectl describe`
-
-Metrics answer *how often*, across everything. Events answer *what happened*, to this one resource — and they need no Prometheus, no port, and no cluster-admin log access:
-
-```sh
-kubectl -n media describe automation pause-downloads-on-backup-wan
-```
-```text
-Type     Reason                     Age    From        Message
-----     ------                     ----   ----        -------
-Normal   StateEntered               3m12s  automation  wan moved from "primary" to "backup", so the condition started holding
-Normal   TargetHeld                 3m12s  automation  Deployment/media/qbittorrent held at 0 replicas
-Normal   EdgeActionSent             3m11s  automation  notification.ntfy delivered to https://ntfy.example.com:443 after 1 attempt(s)
-Normal   DeferredToOtherAutomation  2m40s  automation  a more restrictive claim is in effect: Deployment/media/qbittorrent held by power/shed-on-battery
-Warning  StateKeyUnavailable        1m02s  automation  provider "unifi" stopped reporting ups; holding the last known state rather than treating lost sight of it as the condition ending
-Normal   StateExited                18s    automation  wan moved from "backup" to "primary", so the condition stopped holding
-Normal   TargetReleased             18s    automation  Deployment/media/qbittorrent released; no automation claims it any more
-```
-
-That is the whole failover, in order, including the part where it deliberately did nothing.
-
-`Normal` and `Warning` are used deliberately rather than as a severity dial. Entering a state, scaling a target, releasing one, and **being outvoted by a more restrictive claim** are all `Normal` — the last one especially, because it is how two automations sharing a workload are meant to behave, and reporting it as a fault would train you to ignore Warnings here. `Warning` is reserved for something you have to act on: a held state, a failed action, a retry budget spent, a notification that did not go out.
-
-Volume is bounded by the same rule everywhere: **Events fire on edges, not on states.** A reconcile happens at least every 15s, so anything raised from a steady condition would be an API write every 15 seconds per automation, forever. A target already at the right value produces nothing. A condition that keeps reporting the same reason produces nothing after the first. `ActionFailed` stops at the retry budget, and `RetryBudgetExhausted` replaces it exactly once.
-
-| Reason | Type | Raised when |
-| --- | --- | --- |
-| `StateEntered` / `StateExited` | Normal | the condition started or stopped holding, naming the key that moved |
-| `TargetHeld` / `TargetReleased` | Normal | a write to a target actually happened; the message names the level in words |
-| `DeferredToOtherAutomation` | Normal | a peer's more restrictive claim is the one in effect |
-| `EdgeActionSent` | Normal | a notification or HTTP request was delivered |
-| `StateKeyUnavailable` | Warning | a provider stopped reporting a key, so state is being held |
-| `ActionFailed` | Warning | a desired-state action could not be applied |
-| `RetryBudgetExhausted` | Warning | Reactor stopped retrying and is waiting for the next state change |
-| `EdgeActionFailed` / `EdgeActionSkipped` | Warning | a notification or HTTP request did not go out |
-| `ReleaseFailed` | Warning | deletion could not hand a target back and let the object go anyway |
-| `EventTriggerRemoved` | Warning | a leftover `spec.trigger` automation that does nothing; delete it |
-
-Events are where a state key with an **open value set** is reported: `isp` is not a metric label, so `isp moved from "carrier-a" to "carrier-b"` lives here and in `status.observedState`. The two halves are complementary on purpose — Prometheus keeps what is bounded, Kubernetes keeps what is specific.
-
-> Events are written to the `events.k8s.io/v1` API and expire on your cluster's retention (an hour by default). They are for the incident you are in, not the audit trail — `status` is the durable record.
+> What each key is derived from, what it does at the edges, and how to match on it: [The vocabulary](https://reactor.robbeverhelst.com/state-keys/) · [WAN and internet](https://reactor.robbeverhelst.com/state-keys/wan-and-internet/) · [Power and UPS](https://reactor.robbeverhelst.com/state-keys/power-and-ups/) · [Fleet and devices](https://reactor.robbeverhelst.com/state-keys/fleet-and-devices/) · [Outlets](https://reactor.robbeverhelst.com/state-keys/outlets/)
 
 ## Compatibility
 
@@ -1382,119 +224,45 @@ Outside the range above it warns and **carries on**. Refusing to start against a
 
 State keys degrade one at a time, so a console with no UniFi UPS still reports `wan` and `isp`, and a gateway whose fields have moved still reports `ups`. That holds across endpoints too: an observation reads `stat/device` and `stat/health`, and a console that answers one but not the other publishes the keys it can. Only observing nothing at all is an error.
 
-### Three keys are parsed against a documented shape, not a capture
-
-Every parser here is written against a real captured response — except three, and this is where that is said plainly rather than in a commit message:
-
-| Key | Fields it needs | Status |
-| --- | --- | --- |
-| `firmware` | `upgradable`, `upgrade_to_firmware`, `model_in_eol` | **no capture contains them.** The committed records carry `version` and nothing else about upgrades |
-| `temperature` | `has_temperature`, `overheating`, `temperatures[]`, `general_temperature` | **no capture contains them.** The UniFi UPS 2U reports no thermals at all |
-| `poe` | `total_max_power`, `port_table[].poe_power` | **no capture contains them.** No switch record exists in this repository |
-
-They are written to the shape UniFi's own API documents, every field is in the [capture allowlist](testdata/unifi/README.md) so the next real capture settles them, and each fails by **publishing nothing** rather than by publishing a reassuring value: no `upgradable` anywhere means no `firmware` key, not `current`; no thermals means no `temperature` key, not `normal`; an unreadable switch is left out rather than counted as having headroom.
-
-If you run a UniFi switch or an access point, `./hack/capture-unifi.sh` now writes `stat-device-switch.json` and `stat-device-ap.json`, and one of each would settle all three at once.
-
-`outlet.<n>` is the opposite case and is listed here so the contrast is not lost: every field it reads — `index`, `name`, `relay_state`, `relay_group` — **is** in the committed capture, and the parser is written against real bytes. What is unverified about outlets is not the reading but the *writing*, which is why there is none.
-
-## Configuration
-
-Chart values ([full reference](charts/reactor/README.md)):
-
-| Value | Default | Description |
-| --- | --- | --- |
-| `crds.install` | `true` | install and upgrade the `Automation` CRD with the release |
-| `crds.adopt` | `true` | on the first upgrade from chart 0.3.0 or earlier, take the CRD that packaging left owned by no release into this one |
-| `unifi.url` | — | UniFi console base URL; the provider stays disabled until this is set |
-| `unifi.site` | `default` | UniFi Network site |
-| `unifi.pollInterval` | `30s` | how often WAN, internet and UPS state are observed |
-| `unifi.maxObservationAge` | `""` | how old the observed state may get before every automation reports `ObservationStale` and says so. Empty is unbounded — and silent ([above](#how-long-reactor-may-act-on-state-that-has-already-changed)) |
-| `unifi.insecureSkipVerify` | `true` | accept the console's self-signed certificate |
-| `unifi.existingSecret` | `unifi-reactor-credentials` | Secret holding `UNIFI_API_KEY`; re-read on every poll, so rotating the key needs no restart |
-| `log.level` | `info` | `debug` adds the per-observation lines used to work out why an automation did not fire |
-| `unifi.ups.lowBatteryPercent` | `30` | charge at or below this reports `ups.battery: low` |
-| `unifi.ups.criticalBatteryPercent` | `10` | charge at or below this reports `ups.battery: critical` |
-| `unifi.ups.shortRuntimeSeconds` | `600` | remaining runtime at or below this reports `ups.runtime: short` |
-| `unifi.ups.criticalRuntimeSeconds` | `180` | remaining runtime at or below this reports `ups.runtime: critical` |
-| `unifi.ups.highLoadPercent` | `80` | draw at or above this share of the power budget reports `ups.load: high` |
-| `unifi.wan.quality.minAvailabilityPercent` | `99` | availability below this reports `wan.quality: degraded` |
-| `unifi.wan.quality.maxLatencyMs` | `150` | average latency above this reports `wan.quality: degraded` |
-| `unifi.temperature.highCelsius` | `75` | hottest adopted device at or above this reports `temperature: high` |
-| `unifi.poe.maxUtilizationPercent` | `90` | a switch delivering at or above this share of its PoE budget reports `poe: insufficient` |
-| `unifi.devices.perDeviceKeys` | `false` | also publish a `device.<name>` key per adopted device — [one more series per device](#the-fleet-devices-and-why-devicename-is-opt-in) |
-| `unifi.webhook.enabled` | `false` | webhook fast path (below) |
-| `actions.allowedDestinations` | `[]` | where outbound actions may go. Empty refuses all of them, and withholds the operator's read access to Secrets ([why](#telling-you-what-happened)) |
-| `metrics.enabled` | `false` | serve `/metrics` on `:8443` over HTTPS behind the API server's authn/authz filter ([above](#knowing-it-is-working)) |
-| `metrics.serviceMonitor.enabled` | `false` | scrape it with the Prometheus Operator |
-| `metrics.rules.enabled` | `false` | ship the alert rules, `ReactorObservationStale` first |
-| `metrics.dashboard.enabled` | `false` | ship the overview dashboard as a grafana-operator `GrafanaDashboard` |
-| `rbac.clusterWide` | `true` | when `false`, restricts the operator to its own namespace |
-| `safety.dryRun` | `false` | evaluate and report everything, write nothing, and withhold the permissions that could ([above](#asking-what-an-automation-would-do)) |
-| `safety.detectHPA` | `false` | notice a HorizontalPodAutoscaler driving a target and decline it rather than fight ([above](#when-something-else-already-owns-the-workload)) |
-
-`Automation` resources are namespaced. An action targets its own namespace by default; naming a different one in `target.namespace` requires `rbac.clusterWide: true`.
-
-### Webhook fast path
-
-Reactions are normally no faster than `unifi.pollInterval`. UniFi's Alarm Manager can post to Reactor instead, cutting that to about a second — and Reactor can create that Alarm Manager rule itself, rather than asking you to click through the UniFi UI.
-
-It is off by default and stays an optimization. A delivery **triggers a poll**; it never sets state. Its payload is not parsed at all, so a delivery that is dropped, duplicated, replayed or forged costs at most one extra request to your console. Every delivery must present a shared secret, the receiver is not exposed outside the cluster unless you expose it, and self-registration fails soft — if the console does not behave as expected, Reactor logs why and carries on polling.
-
-See the [chart reference](charts/reactor/README.md#webhook-fast-path-optional-off-by-default) for the values, how to make the receiver reachable from your console, and what is worth knowing before turning self-registration on.
-
-## Documentation
-
-- [Troubleshooting](docs/troubleshooting.md) — nothing is happening, `StateKeyUnavailable`, credentials, CRD upgrades, RBAC, stranded workloads
-- [Adding a provider](docs/adding-a-provider.md) — the `Observe` contract, the state vocabulary, and the capture policy, walked through the UniFi provider
-- [Design spec](docs/spec.md) — the architecture, the state-first rationale, and the roadmap in full
-- [Chart reference](charts/reactor/README.md) — every value, both RBAC modes
-- [Captured UniFi payloads](testdata/unifi/README.md) — the real API responses every parser is written and tested against
-- [UniFi Alarm Manager API](docs/unifi-alarm-manager-api.md) — reverse-engineered notes on configuring UniFi's outbound webhooks programmatically
-- [Writing to a UniFi console](docs/unifi-write-api.md) — what the `unifi.*` actions send, split into what was observed on real hardware and what is inferred
-- [Development](docs/development.md) — building, testing, and running against a local cluster
-- [Distribution](docs/distribution.md) — the Artifact Hub listing, why the chart carries no `signKey`, and which lists this project does and does not qualify for
-- [Contributing](CONTRIBUTING.md) — the dev loop, conventional commits, and the fixture capture policy
-- [Security policy](SECURITY.md) — the outbound-action threat model, how to report a vulnerability, and how to verify a signed release
-
-## Stability
+## Stability and known limits
 
 Early days: the API group is `v1alpha1` and the project is pre-1.0, so expect breaking changes between minor versions.
 
-### What a v1.1 user has to change
+Parsers are written against real captured API responses committed to [`testdata/`](testdata/unifi/), never against assumed formats. Five things are worth knowing before you rely on this, and they are here rather than in a commit message:
 
-Nothing is required, and no workload changes what it does. One procedure gets shorter, and three things become visible that were not:
+- **A genuine WAN failover has still never been observed** ([#34](https://github.com/robbeverhelst/unifi-reactor/issues/34)). `wan` is derived from which port reports `is_uplink`, inferred from one capture in which only one uplink was live. The guess is no longer silent or alone — `isp` and the gateway's own uplink interface are compared against it, and disagreements are logged rather than resolved — but that is not the same as knowing. Treat `wan` as less battle-tested than `ups`. If you have a gateway with two working uplinks, the [capture runbook](testdata/unifi/README.md#capturing-a-real-failover) is fifteen minutes that would close this.
+- **`firmware`, `temperature` and `poe` are parsed against a documented shape, not a capture** — no committed capture contains the fields they need. Each fails by publishing *nothing* rather than a reassuring value, so a missing key is the symptom rather than a wrong one ([which fields, and why](https://reactor.robbeverhelst.com/concepts/when-reactor-cannot-see/#three-keys-are-parsed-against-a-documented-shape-not-a-capture)).
+- **Nothing under `unifi.*` has ever been run against a real console.** The way Reactor authenticates a write was worked out against a live UDM Pro; every endpoint under it is inferred from how UniFi's own web UI is understood to work ([which is which](https://reactor.robbeverhelst.com/contributing/unifi-write-api/)). Both actions are allowlist-gated and empty by default.
+- **The webhook fast path has been exercised against the mock console, not a real one** — a large part of why it defaults off, and why nothing depends on it being right. A delivery only triggers a poll; it never sets state.
+- **`spec.trigger` — the event-shaped trigger kind — has been removed from `v1alpha1`.** No version of the engine ever processed it. It returns in `v1alpha2` once a real Alarm Manager delivery payload has been captured to match against.
 
-- **The first upgrade from chart 0.3.0 or earlier no longer needs the two `kubectl` commands.** The chart adopts the CRD into the release itself, through a pre-upgrade hook Job rendered only when there is something to adopt and cleaned up when it succeeds ([what it does, in full](docs/troubleshooting.md#upgrading-from-chart-030-or-earlier)). If that `label`/`annotate` pair is written down in a runbook, it is now the fallback rather than the procedure; `crds.adopt: false` keeps the manual route.
-- **`unifi.maxObservationAge` is new and empty, which is exactly what you have today** — unbounded, and silent, if the console stops answering. Setting it makes every automation report `Ready=False` with reason `ObservationStale` past that age, raise a Warning `Event`, and publish `reactor_stale_decisions_total`. It changes nothing about what is written: no claim is released and no `onExit` runs, because going blind must not scale workloads back up mid-outage ([why](#how-long-reactor-may-act-on-state-that-has-already-changed)). Start at four or five poll intervals.
-- **`status.observedAt` is new on every Automation**, additive and always populated once anything has been observed. If you have alerting or scripts that treat an unexpected status field as drift, this is the one to expect.
-- **Two automations that declare different `onExit` levels for one target now say so** — a Warning `Event` with reason `ReversalDisagreement`, `status.targets[].reversalDisagreement`, and `reactor_reversal_disagreements_total`. **Nothing about the resolved value changes**: `min` still wins, and the workload comes back at exactly the number it came back at before ([why it is reported and not resolved](#when-they-disagree-about-coming-back)). This is not gated behind a value, because a contradiction between two of your own specs is not something to opt into being told about — but if you have such a pair today, expect one Warning per automation involved on the first reconcile after the upgrade. Fixing it is a one-line spec edit.
-
-**`spec.trigger` — the event-shaped trigger kind — has been removed from `v1alpha1`.** Up to v0.3.0 the CRD accepted it, CEL-validated it, and then ignored it: no version of the engine has ever processed an event trigger. A v1 whose API accepts configuration it silently drops is worse than one that does not offer the field at all, so it is gone until it is real. Two things had to exist before it could come back, and one of them now does:
-
-- **an action that expresses an occurrence** — *met.* `http.request` and `notification.*` are edge actions: they fire on a transition rather than declaring a level, so an event trigger now has something to run.
-- **a captured delivery to match against** — *still missing, and the blocker.* `trigger.match` matched on payload fields, and no UniFi Alarm Manager payload has ever been captured — [`testdata/unifi/webhooks/`](testdata/unifi/README.md) is empty, and the webhook fast path deliberately never reads a delivery body. Parsers here are written against real captures, never against an assumed shape, and an event matcher is a parser.
-
-The two-kind split itself is unchanged and still the design. `when` is what that promise protects: nothing with an observable current value will be re-modelled as an event, and no state automation has to migrate when `trigger` returns in `v1alpha2` with the shape it always had.
-
-> **Upgrading from v0.3.0:** an Automation using `spec.trigger` can no longer be created or updated, and `spec.when` is now required. Existing ones survive in etcd — Helm never deletes your resources — and keep doing what they always did, which is nothing. Reactor names them in its log and in an Event on the resource; `kubectl delete` them.
-
-**The name stays `unifi-reactor` through v1**, and adding providers does not change that. The user-facing surface is already provider-neutral — the API group is `reactor.robbeverhelst.com`, the kind is `Automation` with a `provider` field, the chart is `reactor`, the namespace is `reactor-system` — so a NUT, Proxmox, or Prometheus provider lands with no breaking change and nothing to migrate. Only the repository, the Go module path, and the image carry the `unifi-` prefix, and those are the surfaces you touch least. Discovery favours the specific name besides: people search for a UniFi Kubernetes operator, and `reactor` alone has a lot of prior art. If a second provider ever gains real users, renaming is a repository rename (GitHub redirects), a transition period publishing the image under both paths, and a major-version bump of the module path — a decision for when it has users, not for a version boundary on its own.
-
-Parsers are written against real captured API responses committed to [`testdata/`](testdata/unifi/), never against assumed formats. Two caveats worth stating plainly.
-
-**A genuine WAN failover has still never been observed** ([#34](https://github.com/robbeverhelst/unifi-reactor/issues/34)). `wan` is derived from which port reports `is_uplink`, inferred from one capture in which only one uplink was live — so whether `is_uplink` follows the traffic or just marks the port configured as primary is unconfirmed. What has changed is that the guess is no longer silent or alone: the gateway's own uplink interface is used as a second opinion where `is_uplink` names no single live port, `isp` (from #6) is compared against `wan` across observations, and any disagreement between them is logged rather than resolved. The provider is exercised against five different hypotheses about what a failover looks like, in tests and in `make dev-mock`, and it reports something defensible under all of them. That is not the same as knowing. Treat `wan` as less battle-tested than `ups`, watch for the [disagreement warnings](docs/troubleshooting.md#10-wan-and-isp-disagree-about-a-failover), and if you have a gateway with two working uplinks, the [capture runbook](testdata/unifi/README.md#capturing-a-real-failover) is fifteen minutes that would close this.
-
-And the webhook fast path has been exercised against the mock console, not a real one — which is a large part of why it defaults off and why nothing depends on it being right.
+> The upgrade notes, what a v1.1 user has to change, and the naming and versioning promises: [Stability and roadmap](https://reactor.robbeverhelst.com/design/stability/).
 
 ## Roadmap
 
-- Event triggers for genuinely point-in-time things, like a client connecting — returning as `spec.trigger` in `v1alpha2`, once a real delivery payload has been captured and there is an edge action to run ([why it is not in `v1alpha1`](#stability))
+- Event triggers for genuinely point-in-time things, like a client connecting — returning as `spec.trigger` in `v1alpha2`, once a real delivery payload has been captured and there is an edge action to run ([why it is not in `v1alpha1`](#stability-and-known-limits))
 - More actions: `restart`, CronJob suspend, and the UniFi write actions
 - Richer status conditions, and debounce made visible in status rather than only in the log
 - More providers, driven by demand: NUT, Proxmox, Prometheus alerts, Home Assistant
 
 Non-goals: replacing UniFi Network or UniFi OS, becoming a general-purpose workflow engine like n8n or Argo Workflows, replacing Home Assistant, or executing arbitrary shell commands.
+
+## Documentation
+
+Everything above answers *should I use this?* — [**reactor.robbeverhelst.com**](https://reactor.robbeverhelst.com) answers *how do I use it?*
+
+| | |
+| --- | --- |
+| [Start here](https://reactor.robbeverhelst.com/start/what-reactor-is/) | what Reactor is, installing it, and your first Automation walked through |
+| [Concepts](https://reactor.robbeverhelst.com/concepts/state-not-events/) | state not events, arbitration, reversal and baselines, debounce, and what Reactor cannot see |
+| [State keys](https://reactor.robbeverhelst.com/state-keys/) | every key, what it is derived from, and how it behaves at the edges |
+| [Actions](https://reactor.robbeverhelst.com/actions/kubernetes/) | every action type, its fields, and what it refuses to do |
+| [Operations](https://reactor.robbeverhelst.com/operations/configuration/) | configuration, dry run, metrics and alerts, Events, the webhook fast path, RBAC, upgrading, uninstalling |
+| [Troubleshooting](https://reactor.robbeverhelst.com/troubleshooting/) | nothing is happening, `StateKeyUnavailable`, credentials, CRD upgrades, RBAC, stranded workloads |
+| [Design](https://reactor.robbeverhelst.com/design/spec/) | the architecture, the state-first rationale, and the roadmap in full |
+| [Contributing](https://reactor.robbeverhelst.com/contributing/) | the dev loop, adding a provider, and the reverse-engineered UniFi API notes |
+
+In this repository: [chart reference](charts/reactor/README.md) · [captured UniFi payloads](testdata/unifi/README.md) · [contributing](CONTRIBUTING.md) · [security policy](SECURITY.md)
 
 ## Contributing
 
