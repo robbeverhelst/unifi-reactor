@@ -35,7 +35,7 @@ export default defineConfig({
           tag: 'script',
           attrs: {
             src: 'https://analytics.robbeverhelst.be/script.js',
-            'data-website-id': 'REPLACE-ME-UMAMI-WEBSITE-ID',
+            'data-website-id': '9da009e0-9ebf-4a7d-8648-07235ea45669',
             defer: true,
           },
         },
