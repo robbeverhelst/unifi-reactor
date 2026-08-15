@@ -44,3 +44,4 @@ Shedding load during a power cut is the same shape, matching `ups: on-battery` i
 - [Kubernetes actions](/actions/kubernetes/) — suspending a CronJob, cordoning a node, restarting a workload.
 - [State keys](/state-keys/) — everything else Reactor can match on.
 - [Suspend and dry run](/operations/suspend-and-dry-run/) — how to ask an Automation what it would do before letting it do it.
+- [Automation API reference](/reference/automation/) — every field of `spec` and `status`, its type, and what it accepts.

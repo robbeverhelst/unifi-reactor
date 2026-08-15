@@ -42,6 +42,8 @@ access, and it is already in chronological order:
 kubectl -n media describe automation pause-downloads-on-backup-wan | tail -20
 ```
 
+Each reason below links to the part of this guide that deals with it. The [Events and condition reasons reference](/reference/events/) is the same list generated from the controller, with the full note on each one and no troubleshooting.
+
 | Reason | Type | Means |
 | --- | --- | --- |
 | `StateEntered` / `StateExited` | Normal | the condition started or stopped holding; the message names the key that moved |

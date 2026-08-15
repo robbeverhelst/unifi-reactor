@@ -26,7 +26,6 @@ helm upgrade reactor ... \
 | Metric | Type | Answers |
 | --- | --- | --- |
 | `reactor_last_observation_timestamp_seconds` | gauge | is Reactor still seeing anything |
-
 | `reactor_stale_decisions_total` | counter | how much deciding it did while it was not ([above](/concepts/settling-a-noisy-signal/#how-long-reactor-may-act-on-state-that-has-already-changed)) |
 | `reactor_observations_total` | counter | how often polling succeeds and fails |
 | `reactor_state_info` | gauge 0/1 | what each state key holds right now |
@@ -38,8 +37,9 @@ helm upgrade reactor ... \
 | `reactor_reaction_latency_seconds` | histogram | observation → action, end to end |
 | `reactor_webhook_deliveries_total` | counter | fast-path deliveries accepted, coalesced, refused |
 | `reactor_provider_signal_disagreements_total` | counter | two independent signals for one fact disagreeing |
-
 | `reactor_reversal_disagreements_total` | counter | two automations disagreeing about a workload's normal size ([above](/concepts/reversal-and-baselines/#when-they-disagree-about-coming-back)) |
+
+That is what each series is *for*. The [Metrics reference](/reference/metrics/) has the rest — labels, histogram buckets, and the help text each one is published with — generated from `internal/metrics`.
 
 Reconcile counts, queue depth and reconcile latency are controller-runtime's own `controller_runtime_*` series on the same endpoint. Reactor does not reimplement them. It also deliberately **does not re-export UniFi telemetry** — a UniFi exporter covers that better, and Reactor's unique vantage point is the decision layer.
 
