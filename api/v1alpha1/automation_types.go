@@ -157,6 +157,11 @@ type HTTPRequest struct {
 	// The body is the only part of the request state can reach, and it only
 	// ever carries values this Automation already observes, to a destination
 	// the operator allowed.
+	//
+	// State carries the keys in spec.when.state and nothing else. A reference
+	// to any other key — or to a field the context does not have — is reported
+	// on the object as Ready=False with reason TemplateWillNotRender when it is
+	// reconciled, rather than failing when the action fires.
 	// +kubebuilder:validation:MaxLength=4096
 	// +optional
 	Body string `json:"body,omitempty"`
@@ -220,6 +225,11 @@ type HomeAssistantService struct {
 	// object; omitting it sends an empty one. Available fields are Automation,
 	// Namespace, Name, Provider, Matching, Key, From, To, State and Time, and a
 	// json function quotes a value safely for embedding. See the README.
+	//
+	// State carries the keys in spec.when.state and nothing else. A reference
+	// to any other key — or to a field the context does not have — is reported
+	// on the object as Ready=False with reason TemplateWillNotRender when it is
+	// reconciled, rather than failing when the action fires.
 	// +kubebuilder:validation:MaxLength=4096
 	// +optional
 	Data string `json:"data,omitempty"`
@@ -417,6 +427,11 @@ type Notification struct {
 	// Message body, rendered as a Go text/template against the transition.
 	// Available fields are Automation, Namespace, Name, Provider, Matching,
 	// Key, From, To, State and Time. See the README for the syntax.
+	//
+	// State carries the keys in spec.when.state and nothing else. A reference
+	// to any other key — or to a field the context does not have — is reported
+	// on the object as Ready=False with reason TemplateWillNotRender when it is
+	// reconciled, rather than failing when the action fires.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=2048
 	Message string `json:"message"`

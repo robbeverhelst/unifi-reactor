@@ -35,6 +35,7 @@ Warning is reserved for something an operator has to act on. A held state, a def
 | [`TargetHeld`](#targetheld) | Normal | `Execute` |
 | [`TargetManagedByHPA`](#targetmanagedbyhpa) | Warning | `Execute` / `Release` |
 | [`TargetReleased`](#targetreleased) | Normal | `Release` |
+| [`TemplateWillNotRender`](#templatewillnotrender) | Warning | `Evaluate` |
 
 ### `ActionFailed`
 
@@ -253,6 +254,30 @@ Message:
 
 - %s released; no automation claims it any more
 
+### `TemplateWillNotRender`
+
+**Type:** Warning &nbsp;·&nbsp; **Action:** `Evaluate`
+
+A Warning, and it is raised at write time
+for something that would otherwise only be discovered at send time.
+
+A notification's message and an http.request's body are templates whose
+.State carries the keys in spec.when.state and nothing else. A template
+reading a key this Automation did not match on is accepted by the API
+server, reports Ready and matches — and then fails to render on the
+transition it was written for, which for a WAN failover might be weeks
+later and is exactly the moment somebody wanted the message. Both halves
+of that question are in the spec, so it is answered when the object is
+written instead.
+
+It never stops the Automation acting. The message is the report of a
+reaction rather than the reaction, so the desired-state actions beside it
+still run — the same rule a delivery that fails already follows.
+
+Message:
+
+- a template on this automation can never render, so the action holding it would fail at send time rather than here: %s
+
 ## Condition reasons
 
 What an Automation reports in `status.conditions[].reason`. `Ready` is whether it is valid and reconciling; `Applied` is whether what it wants is what its targets have. The two are separate because an Automation can be perfectly healthy and still not be the one deciding a target's value.
@@ -272,6 +297,7 @@ What an Automation reports in `status.conditions[].reason`. `Ready` is whether i
 | [`StateKeyUnavailable`](#statekeyunavailable-1) | `Ready=False` |
 | [`Suspended`](#suspended) | `Ready=True` / `Applied=False` |
 | [`TargetManagedByHPA`](#targetmanagedbyhpa-1) | `Applied=False` |
+| [`TemplateWillNotRender`](#templatewillnotrender-1) | `Ready=False` |
 
 ### `ActionFailed`
 
@@ -401,3 +427,23 @@ carries real weight. Being outvoted by a peer is the arbitration working
 and is reported Normal; being unable to arbitrate at all is an automation
 that cannot do its job, and no amount of waiting fixes it. Somebody has to
 decide which controller owns the workload.
+
+### `TemplateWillNotRender`
+
+**Reported on:** `Ready=False`
+
+A Warning, and it is raised at write time
+for something that would otherwise only be discovered at send time.
+
+A notification's message and an http.request's body are templates whose
+.State carries the keys in spec.when.state and nothing else. A template
+reading a key this Automation did not match on is accepted by the API
+server, reports Ready and matches — and then fails to render on the
+transition it was written for, which for a WAN failover might be weeks
+later and is exactly the moment somebody wanted the message. Both halves
+of that question are in the spec, so it is answered when the object is
+written instead.
+
+It never stops the Automation acting. The message is the report of a
+reaction rather than the reaction, so the desired-state actions beside it
+still run — the same rule a delivery that fails already follows.

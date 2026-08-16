@@ -148,15 +148,33 @@ recovery message above works.
 
 **`.State` carries the keys this Automation matches on, and nothing else.** It is
 the observed value of every key in `spec.when.state`, so an Automation triggered
-on `wan` alone cannot put `{{ .State.isp }}` in its message — a key that is not
-there is an **error** rather than the words `no value`, and the message does not
-go out. That is deliberate: a typo fails loudly at the moment it would have been
-sent rather than delivering a sentence with a hole in it. If you want the carrier
-in the message, match on it as well.
+on `wan` alone cannot put `{{ .State.isp }}` in its message, however plainly
+`isp` shows up in `status.observedState`. That is deliberate: the template
+context is incapable of carrying anything the Automation's author did not
+already ask for. If you want the carrier in the message, match on it as well.
 
-The rule has one hole worth knowing: `{{ .State.wan }}` is checked, but a dotted
-key needs the `index` builtin — `{{ index .State "ups.battery" }}` — and that
-one returns an empty string for a missing key instead of failing.
+You do not have to remember this, because Reactor checks it when you apply the
+Automation rather than when the message would have gone out:
+
+```sh
+kubectl -n media get automation notify-on-wan-failover \
+  -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}'
+# spec.actions[0].notification.message references state key "isp", which this automation
+# does not match on (it matches on wan); add isp to spec.when.state or remove the reference
+```
+
+`Ready=False` with reason `TemplateWillNotRender`, and a Warning Event saying
+the same thing. It is a report and not a refusal: the Automation is still
+accepted, still evaluated, and still claims and releases its targets — a typo in
+a notification does not cost you the failover it was reporting. What it buys is
+finding out now instead of at 03:00 in six weeks' time. A typo in a key name
+(`{{ .State.wam }}`) and a field that does not exist (`{{ .Uplink }}`) are the
+same condition, with the same shape of message.
+
+The check has one hole worth knowing, and it is the same hole the rendering has:
+a dotted key needs the `index` builtin — `{{ index .State "ups.battery" }}` —
+which returns an empty string for a key that is not there instead of failing, so
+neither the check nor the send can tell it went wrong.
 
 Only the message is templated. The URL and the headers are literal on purpose:
 the destination is what the allowlist decided, and letting observed state edit
@@ -259,7 +277,8 @@ live uplink — comes from a different endpoint, and any disagreement between th
 two is
 [logged rather than resolved](/troubleshooting/state-keys/#10-wan-and-isp-disagree-about-a-failover).
 To get that carrier into the message you have to match on it, since `.State`
-only carries the keys in `spec.when.state`:
+only carries the keys in `spec.when.state` — and if you forget, the Automation
+says so with `TemplateWillNotRender` rather than waiting for the failover:
 
 ```yaml
   when:

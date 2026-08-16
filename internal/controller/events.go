@@ -97,6 +97,22 @@ const (
 	// status cannot tell them: status is a poll, and nobody polls a resource at
 	// the second it becomes interesting.
 	reasonDryRun = "DryRun"
+	// reasonTemplateWillNotRender is a Warning, and it is raised at write time
+	// for something that would otherwise only be discovered at send time.
+	//
+	// A notification's message and an http.request's body are templates whose
+	// .State carries the keys in spec.when.state and nothing else. A template
+	// reading a key this Automation did not match on is accepted by the API
+	// server, reports Ready and matches — and then fails to render on the
+	// transition it was written for, which for a WAN failover might be weeks
+	// later and is exactly the moment somebody wanted the message. Both halves
+	// of that question are in the spec, so it is answered when the object is
+	// written instead.
+	//
+	// It never stops the Automation acting. The message is the report of a
+	// reaction rather than the reaction, so the desired-state actions beside it
+	// still run — the same rule a delivery that fails already follows.
+	reasonTemplateWillNotRender = "TemplateWillNotRender"
 	// reasonTargetManagedByHPA is a Warning, and the one place that distinction
 	// carries real weight. Being outvoted by a peer is the arbitration working
 	// and is reported Normal; being unable to arbitrate at all is an automation

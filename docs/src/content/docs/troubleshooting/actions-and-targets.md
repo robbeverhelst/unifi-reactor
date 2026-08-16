@@ -41,7 +41,7 @@ kubectl -n media describe automation notify-on-failover | grep EdgeAction
 | `reading secret ... not found` | No credential Secret of that name in the **Automation's** namespace | Create it there; there is no cross-namespace read |
 | `has no "url" key` | The Secret exists but carries no destination | Add `url` to it |
 | `responded 4xx` | The endpoint rejected it. A 401 or 403 is a credential problem | Check the Secret's `url` and `authorization` |
-| `rendering template` | A message referenced a field or state key that does not exist | `{{ .State.wan }}` errors on a typo, by design |
+| `rendering template` | A message referenced a field or state key that does not exist | `{{ .State.wan }}` errors on a typo, by design. Nearly always caught before this, as `TemplateWillNotRender` — see [§12a](#12a-templatewillnotrender) |
 | `has no "authorization" key` | `homeassistant.service` found no token, and refuses to collect a 401 to find out | Add `authorization=Bearer <long-lived-token>` to the Secret |
 | `did not render to a JSON object` | `homeAssistant.data` rendered to a list, a bare string or nothing | Service data is an object: `{"entity_id": "light.hall"}` |
 | `set no "SID" cookie` | qBittorrent rejected the username or password. It answers a wrong one with `200 OK` and no cookie, not a 401 | Check the `username` and `password` keys in the Secret |
@@ -80,5 +80,33 @@ helm upgrade reactor oci://ghcr.io/robbeverhelst/charts/reactor \
 Each extra sample costs one `pollInterval` of reaction time. The shipped default of `1` is chosen for `kubernetes.scale`, where a flap is harmless; a key that drives a restart should be raised above it. `spec.suspend: true` stops the restarts immediately while you decide.
 
 Two things that are *not* the cause: a reconcile without a transition (edge actions do not fire), and a retry (a restart is attempted exactly once per transition and never retried).
+
+---
+
+## 12a. `TemplateWillNotRender`
+
+`Ready=False` with this reason means a template on the Automation reads something the template context can never carry, so the action holding it would fail at the moment it fired. It is reported when the object is reconciled — which is when you applied it — rather than on the transition weeks later that the message was written for:
+
+```sh
+kubectl -n media get automation notify-on-wan-failover \
+  -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}'
+# spec.actions[0].notification.message references state key "isp", which this automation
+# does not match on (it matches on wan); add isp to spec.when.state or remove the reference
+```
+
+The message names the field, the reference and both ways out. The common case is the one above: **`.State` carries the keys in `spec.when.state` and nothing else**, so an Automation triggered on `wan` cannot read `{{ .State.isp }}` however plainly `isp` shows up in `status.observedState`. The narrowing is deliberate — a template can only ever repeat back something its author already asked for — so the fix is to match on the key as well, which narrows the condition, or to drop the reference.
+
+The other things it reports, all of them the same failure at the same moment:
+
+| Message says | Means |
+| --- | --- |
+| `references state key "…"` | a key not in `spec.when.state`, including a misspelling of one that is |
+| `reads .X, which is not part of the template context` | a field the context does not have. It lists the ones it does |
+| `reads .Key.X, but .Key is a string` | a field read off a value that has none |
+| `does not parse` | a syntax error, or a function that does not exist. The only functions are the standard ones plus `json` |
+
+Three things it deliberately stays quiet about, because it cannot decide them and a false accusation is worse than the trap: the body of a `range` or `with` block, where dot is something else (`$.State.wan` inside one is still checked), a reference through a variable you assigned, and `{{ index .State "isp" }}` — which renders an empty string rather than failing, and so is not this problem.
+
+**It does not stop the Automation.** Targets are still claimed and released, `onExit` still applies, and everything that is not the broken template still runs. A typo in a notification is not a reason to skip the failover it was reporting. If the Automation only has edge actions, nothing else happens anyway — but the object is still reconciling, and `Ready` goes back to `Reconciled` the moment the template or the trigger is corrected.
 
 ---
