@@ -408,6 +408,99 @@ type PoEPort struct {
 	PortName string `json:"portName"`
 }
 
+// Outlet is the UPS outlet a unifi.outlet.cut or unifi.outlet.restore switches.
+//
+// This is the action with the largest blast radius in this repository. It opens
+// or closes a mains relay, and what is on the other side of it is invisible to
+// Reactor: a UPS outlet reports its index, its name and its switch position,
+// and nothing whatsoever about what is plugged into it. That is the difference
+// between this and unifi.poe.cycle, where the switch at least reports which
+// port is its own uplink and Reactor can refuse that one absolutely. There is no
+// equivalent here. Nothing stops an operator allowlisting the outlet carrying
+// the gateway except knowing which one that is.
+//
+// So an outlet is identified by three things that must all agree with the UPS's
+// own outlet table, checked immediately before the relay is written:
+//
+//   - device, the UPS's MAC. Not its name, which is a label somebody can change
+//     without changing which hardware it is.
+//   - index, the outlet's position on the chassis.
+//   - name, what that outlet is called on the console.
+//
+// The third is required, and here it does more work than portName does for
+// unifi.poe.cycle. These outlets ship called "Outlet 1" … "Outlet 8", which is
+// the index spelled out rather than a name — the same reading the outlet.<n>
+// state key takes. An outlet still carrying that placeholder is REFUSED, at
+// admission and again against the hardware: naming an outlet is how somebody
+// says out loud what is plugged into it, and Reactor will not cut mains to a
+// socket nobody has named. Once named, the name is checked against the console
+// before the write, so re-plugging the rack becomes a refused action with a
+// sentence rather than a power cut to something else.
+//
+// Two floors apply whatever the install allowlists, in the way the outbound
+// dialer refuses loopback whatever the destination allowlist says. An outlet
+// whose bank Reactor cannot determine is never switched — outlet_caps is what
+// says whether an outlet is battery-backed, and a UPS that does not report it is
+// refused rather than assumed safe. And a battery-backed outlet is never
+// switched unless the install has said so in a second, separate value, because
+// cutting one during a power cut is the most dangerous thing here and the least
+// likely to be intended. See ActionsConfig in internal/providers/unifi.
+//
+// It is an edge action named as a verb, and the reason is the rule the WLAN type
+// states: what makes a desired-state action possible is not the fold but that
+// the target is a Kubernetes object, so the value it held before Reactor claimed
+// it can be recorded as an annotation ON that object, outliving the Automation
+// and readable by the pre-delete sweep. A UPS outlet has no such place, and
+// releasing one would need a credentialed console write that the pre-delete
+// sweep is designed to be incapable of. So the same two limitations follow, and
+// on mains power they are louder than anywhere else:
+//
+//   - It is not arbitrated. Two Automations cutting the same outlet do not
+//     resolve to one claim; whichever restores it first restores it.
+//   - Nothing hands it back. If the exit transition never arrives — the
+//     Automation is deleted, Reactor is uninstalled, the state key stops being
+//     observable — the outlet stays open until a human closes it.
+//
+// One thing nobody has established: that writing the relay actually opens it.
+// The write was accepted on real hardware and the console reported the new
+// position back, but the outlet under test was empty. Until somebody plugs a
+// lamp in and watches it go dark, this is a capability the operator believes
+// they have.
+//
+// +kubebuilder:validation:XValidation:rule="!self.name.matches('^ *[Oo]utlet[ _-]+[0-9]+ *$')",message="spec.actions: outlet.name is the console's placeholder, not a name. Name the outlet in UniFi after what is plugged into it; Reactor will not cut mains to a socket nobody has named"
+type Outlet struct {
+	// Device is the MAC address of the UPS, lowercase and colon-separated, e.g.
+	// "aa:bb:cc:00:11:22". A MAC rather than a device name because a name is a
+	// label: renaming the UPS would silently repoint this action.
+	// +kubebuilder:validation:Pattern="^[0-9a-f]{2}(:[0-9a-f]{2}){5}$"
+	Device string `json:"device"`
+
+	// Index is the outlet's position on the chassis, as the console numbers it,
+	// starting at 1.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=64
+	Index int32 `json:"index"`
+
+	// Name is what the outlet is called on the console, and it is checked before
+	// anything is written. It is required, and "Outlet 3" is rejected rather than
+	// accepted: that is the placeholder every outlet ships with, and it names a
+	// position rather than a thing.
+	//
+	// Name the outlet in UniFi after what is plugged into it. That name is what
+	// makes an automation readable, it is what the outlet.<n> state key is
+	// addressed by once it exists, and it is the only defence this action has
+	// against being pointed at the wrong socket — because the UPS does not report
+	// what any outlet feeds.
+	// The 32-character bound is not a guess about how long a name might be. A
+	// CEL rule's cost is estimated from the longest string it can be handed, and
+	// this one is charged against a budget the whole schema shares — at 128 it
+	// took a fifth of it on its own. 32 is more than enough for a name that has
+	// to be typed identically into a console, an allowlist and an automation.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=32
+	Name string `json:"name"`
+}
+
 // Notification is the message a notification.* action sends.
 //
 // The destination is not expressible here at all: it comes from the referenced
@@ -444,8 +537,8 @@ type Notification struct {
 // kubernetes.cronjob.suspend) declares a level and is arbitrated continuously
 // across every Automation sharing its target. An edge action (kubernetes.restart,
 // http.request, notification.*, homeassistant.service, qbittorrent.*,
-// unifi.wlan.*, unifi.poe.cycle) expresses an occurrence: it fires on this Automation's own
-// transitions, owns no target and arbitrates with nothing.
+// unifi.wlan.*, unifi.poe.cycle, unifi.outlet.*) expresses an occurrence: it fires on this
+// Automation's own transitions, owns no target and arbitrates with nothing.
 //
 // The dividing line is not "does this express a level" — pausing a torrent
 // client plainly does. It is whether there is somewhere to record the value the
@@ -463,6 +556,7 @@ type Notification struct {
 // +kubebuilder:validation:XValidation:rule="self.type.startsWith('qbittorrent.') == has(self.qbittorrent)",message="spec.actions: qbittorrent is required by the qbittorrent.* types and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type.startsWith('unifi.wlan.') == has(self.wlan)",message="spec.actions: wlan is required by the unifi.wlan.* types and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="(self.type == 'unifi.poe.cycle') == has(self.poe)",message="spec.actions: poe is required by unifi.poe.cycle and rejected on every other type"
+// +kubebuilder:validation:XValidation:rule="self.type.startsWith('unifi.outlet.') == has(self.outlet)",message="spec.actions: outlet is required by the unifi.outlet.* types and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type.startsWith('notification.') == has(self.notification)",message="spec.actions: notification is required by the notification.* types and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type.startsWith('kubernetes.') == has(self.target)",message="spec.actions: target is required by the kubernetes.* actions and rejected on every other type"
 // +kubebuilder:validation:XValidation:rule="self.type == 'kubernetes.scale' || !has(self.replicas)",message="spec.actions: replicas belongs to kubernetes.scale"
@@ -474,7 +568,7 @@ type Notification struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.target) || self.type != 'kubernetes.restart' || self.target.kind in ['Deployment', 'StatefulSet']",message="spec.actions: kubernetes.restart targets a kind with a pod template: Deployment or StatefulSet"
 type Action struct {
 	// Type of the action, e.g. "kubernetes.scale".
-	// +kubebuilder:validation:Enum=kubernetes.scale;kubernetes.cronjob.suspend;kubernetes.cordon;kubernetes.restart;http.request;notification.ntfy;notification.discord;notification.slack;homeassistant.service;qbittorrent.pause;qbittorrent.resume;unifi.wlan.enable;unifi.wlan.disable;unifi.poe.cycle
+	// +kubebuilder:validation:Enum=kubernetes.scale;kubernetes.cronjob.suspend;kubernetes.cordon;kubernetes.restart;http.request;notification.ntfy;notification.discord;notification.slack;homeassistant.service;qbittorrent.pause;qbittorrent.resume;unifi.wlan.enable;unifi.wlan.disable;unifi.poe.cycle;unifi.outlet.cut;unifi.outlet.restore
 	Type string `json:"type"`
 
 	// Target of a kubernetes.* action.
@@ -537,6 +631,10 @@ type Action struct {
 	// PoE is the switch port a unifi.poe.cycle power-cycles.
 	// +optional
 	PoE *PoEPort `json:"poe,omitempty"`
+
+	// Outlet is the UPS outlet a unifi.outlet.* action switches.
+	// +optional
+	Outlet *Outlet `json:"outlet,omitempty"`
 
 	// TimeoutSeconds bounds a single attempt at this action, so an
 	// unreachable target or endpoint cannot occupy a reconcile indefinitely.

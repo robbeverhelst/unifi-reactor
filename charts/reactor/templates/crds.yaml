@@ -90,8 +90,8 @@ spec:
                     kubernetes.cronjob.suspend) declares a level and is arbitrated continuously
                     across every Automation sharing its target. An edge action (kubernetes.restart,
                     http.request, notification.*, homeassistant.service, qbittorrent.*,
-                    unifi.wlan.*, unifi.poe.cycle) expresses an occurrence: it fires on this Automation's own
-                    transitions, owns no target and arbitrates with nothing.
+                    unifi.wlan.*, unifi.poe.cycle, unifi.outlet.*) expresses an occurrence: it fires on this
+                    Automation's own transitions, owns no target and arbitrates with nothing.
 
                     The dividing line is not "does this express a level" — pausing a torrent
                     client plainly does. It is whether there is somewhere to record the value the
@@ -236,6 +236,56 @@ spec:
                       - message
                       - secretRef
                       type: object
+                    outlet:
+                      description: Outlet is the UPS outlet a unifi.outlet.* action
+                        switches.
+                      properties:
+                        device:
+                          description: |-
+                            Device is the MAC address of the UPS, lowercase and colon-separated, e.g.
+                            "aa:bb:cc:00:11:22". A MAC rather than a device name because a name is a
+                            label: renaming the UPS would silently repoint this action.
+                          pattern: ^[0-9a-f]{2}(:[0-9a-f]{2}){5}$
+                          type: string
+                        index:
+                          description: |-
+                            Index is the outlet's position on the chassis, as the console numbers it,
+                            starting at 1.
+                          format: int32
+                          maximum: 64
+                          minimum: 1
+                          type: integer
+                        name:
+                          description: |-
+                            Name is what the outlet is called on the console, and it is checked before
+                            anything is written. It is required, and "Outlet 3" is rejected rather than
+                            accepted: that is the placeholder every outlet ships with, and it names a
+                            position rather than a thing.
+
+                            Name the outlet in UniFi after what is plugged into it. That name is what
+                            makes an automation readable, it is what the outlet.<n> state key is
+                            addressed by once it exists, and it is the only defence this action has
+                            against being pointed at the wrong socket — because the UPS does not report
+                            what any outlet feeds.
+                            The 32-character bound is not a guess about how long a name might be. A
+                            CEL rule's cost is estimated from the longest string it can be handed, and
+                            this one is charged against a budget the whole schema shares — at 128 it
+                            took a fifth of it on its own. 32 is more than enough for a name that has
+                            to be typed identically into a console, an allowlist and an automation.
+                          maxLength: 32
+                          minLength: 1
+                          type: string
+                      required:
+                      - device
+                      - index
+                      - name
+                      type: object
+                      x-kubernetes-validations:
+                      - message: 'spec.actions: outlet.name is the console''s placeholder,
+                          not a name. Name the outlet in UniFi after what is plugged
+                          into it; Reactor will not cut mains to a socket nobody has
+                          named'
+                        rule: '!self.name.matches(''^ *[Oo]utlet[ _-]+[0-9]+ *$'')'
                     poe:
                       description: PoE is the switch port a unifi.poe.cycle power-cycles.
                       properties:
@@ -496,6 +546,8 @@ spec:
                       - unifi.wlan.enable
                       - unifi.wlan.disable
                       - unifi.poe.cycle
+                      - unifi.outlet.cut
+                      - unifi.outlet.restore
                       type: string
                     wlan:
                       description: WLAN is the wireless network a unifi.wlan.* action
@@ -535,6 +587,9 @@ spec:
                   - message: 'spec.actions: poe is required by unifi.poe.cycle and
                       rejected on every other type'
                     rule: (self.type == 'unifi.poe.cycle') == has(self.poe)
+                  - message: 'spec.actions: outlet is required by the unifi.outlet.*
+                      types and rejected on every other type'
+                    rule: self.type.startsWith('unifi.outlet.') == has(self.outlet)
                   - message: 'spec.actions: notification is required by the notification.*
                       types and rejected on every other type'
                     rule: self.type.startsWith('notification.') == has(self.notification)
@@ -601,8 +656,8 @@ spec:
                     kubernetes.cronjob.suspend) declares a level and is arbitrated continuously
                     across every Automation sharing its target. An edge action (kubernetes.restart,
                     http.request, notification.*, homeassistant.service, qbittorrent.*,
-                    unifi.wlan.*, unifi.poe.cycle) expresses an occurrence: it fires on this Automation's own
-                    transitions, owns no target and arbitrates with nothing.
+                    unifi.wlan.*, unifi.poe.cycle, unifi.outlet.*) expresses an occurrence: it fires on this
+                    Automation's own transitions, owns no target and arbitrates with nothing.
 
                     The dividing line is not "does this express a level" — pausing a torrent
                     client plainly does. It is whether there is somewhere to record the value the
@@ -747,6 +802,56 @@ spec:
                       - message
                       - secretRef
                       type: object
+                    outlet:
+                      description: Outlet is the UPS outlet a unifi.outlet.* action
+                        switches.
+                      properties:
+                        device:
+                          description: |-
+                            Device is the MAC address of the UPS, lowercase and colon-separated, e.g.
+                            "aa:bb:cc:00:11:22". A MAC rather than a device name because a name is a
+                            label: renaming the UPS would silently repoint this action.
+                          pattern: ^[0-9a-f]{2}(:[0-9a-f]{2}){5}$
+                          type: string
+                        index:
+                          description: |-
+                            Index is the outlet's position on the chassis, as the console numbers it,
+                            starting at 1.
+                          format: int32
+                          maximum: 64
+                          minimum: 1
+                          type: integer
+                        name:
+                          description: |-
+                            Name is what the outlet is called on the console, and it is checked before
+                            anything is written. It is required, and "Outlet 3" is rejected rather than
+                            accepted: that is the placeholder every outlet ships with, and it names a
+                            position rather than a thing.
+
+                            Name the outlet in UniFi after what is plugged into it. That name is what
+                            makes an automation readable, it is what the outlet.<n> state key is
+                            addressed by once it exists, and it is the only defence this action has
+                            against being pointed at the wrong socket — because the UPS does not report
+                            what any outlet feeds.
+                            The 32-character bound is not a guess about how long a name might be. A
+                            CEL rule's cost is estimated from the longest string it can be handed, and
+                            this one is charged against a budget the whole schema shares — at 128 it
+                            took a fifth of it on its own. 32 is more than enough for a name that has
+                            to be typed identically into a console, an allowlist and an automation.
+                          maxLength: 32
+                          minLength: 1
+                          type: string
+                      required:
+                      - device
+                      - index
+                      - name
+                      type: object
+                      x-kubernetes-validations:
+                      - message: 'spec.actions: outlet.name is the console''s placeholder,
+                          not a name. Name the outlet in UniFi after what is plugged
+                          into it; Reactor will not cut mains to a socket nobody has
+                          named'
+                        rule: '!self.name.matches(''^ *[Oo]utlet[ _-]+[0-9]+ *$'')'
                     poe:
                       description: PoE is the switch port a unifi.poe.cycle power-cycles.
                       properties:
@@ -1007,6 +1112,8 @@ spec:
                       - unifi.wlan.enable
                       - unifi.wlan.disable
                       - unifi.poe.cycle
+                      - unifi.outlet.cut
+                      - unifi.outlet.restore
                       type: string
                     wlan:
                       description: WLAN is the wireless network a unifi.wlan.* action
@@ -1046,6 +1153,9 @@ spec:
                   - message: 'spec.actions: poe is required by unifi.poe.cycle and
                       rejected on every other type'
                     rule: (self.type == 'unifi.poe.cycle') == has(self.poe)
+                  - message: 'spec.actions: outlet is required by the unifi.outlet.*
+                      types and rejected on every other type'
+                    rule: self.type.startsWith('unifi.outlet.') == has(self.outlet)
                   - message: 'spec.actions: notification is required by the notification.*
                       types and rejected on every other type'
                     rule: self.type.startsWith('notification.') == has(self.notification)

@@ -153,15 +153,16 @@ The workload comes back only once **no** automation wants it down, at what `onEx
 | `qbittorrent.pause`<br>`qbittorrent.resume` | pause or resume every torrent on an instance |
 | `unifi.wlan.enable`<br>`unifi.wlan.disable` | switch a wireless network on your console on or off |
 | `unifi.poe.cycle` | power-cycle one allowlisted PoE port |
+| `unifi.outlet.cut`<br>`unifi.outlet.restore` | open or close one allowlisted UPS outlet. **Mains power to whatever is plugged into it** |
 
-Everything that leaves the cluster is refused until you say where it may go: `actions.allowedDestinations`, `unifi.actions.allowedWlans` and `unifi.actions.allowedPoePorts` are all empty by default, and empty refuses everything with a reason naming the value to add. There is deliberately no `kubernetes.drain` — [an eviction cannot be un-evicted](https://reactor.robbeverhelst.com/actions/kubernetes/#why-there-is-no-kubernetesdrain).
+Everything that leaves the cluster is refused until you say where it may go: `actions.allowedDestinations`, `unifi.actions.allowedWlans`, `unifi.actions.allowedPoePorts` and `unifi.actions.allowedOutlets` are all empty by default, and empty refuses everything with a reason naming the value to add. There is deliberately no `kubernetes.drain` — [an eviction cannot be un-evicted](https://reactor.robbeverhelst.com/actions/kubernetes/#why-there-is-no-kubernetesdrain).
 
 ### The two shapes an action has
 
 | | Declares | Arbitrated? | Types |
 | --- | --- | --- | --- |
 | **Desired-state** | a *level* — what a target should be | yes, continuously across every automation sharing the target | `kubernetes.scale`, `kubernetes.cronjob.suspend`, `kubernetes.cordon` |
-| **Edge** | an *occurrence* | no — fires on this automation's own transition and owns nothing | `kubernetes.restart`, `http.request`, `notification.*`, `homeassistant.service`, `qbittorrent.*`, `unifi.wlan.*`, `unifi.poe.cycle` |
+| **Edge** | an *occurrence* | no — fires on this automation's own transition and owns nothing | `kubernetes.restart`, `http.request`, `notification.*`, `homeassistant.service`, `qbittorrent.*`, `unifi.wlan.*`, `unifi.poe.cycle`, `unifi.outlet.*` |
 
 A level is ordered and nothing else: **lower is more restrictive, and a shared target resolves to the lowest anyone asked for.** What decides which column an action lands in is not whether it expresses a level — pausing torrents plainly does, and it is an edge action anyway — but whether there is somewhere to record the value the target held *before* Reactor claimed it, because without that, release cannot put it back.
 
@@ -187,7 +188,7 @@ Each key is published only when the matching hardware is adopted by your control
 | `temperature` | `normal`, `high` | the hottest adopted device against the configured threshold |
 | `wifi` | `ok`, `warning`, `error` | the WiFi subsystem as a whole, from the console's AP counts |
 | `poe` | `ok`, `insufficient` | PoE headroom on the worst switch, against the configured threshold |
-| `outlet.<n>` | `on`, `off` | one switchable UPS outlet, by index or by name. **Read-only** |
+| `outlet.<n>` | `on`, `off` | one switchable UPS outlet, by index or by name. Switching one is [`unifi.outlet.cut`](https://reactor.robbeverhelst.com/actions/unifi-console/#switching-a-ups-outlet) |
 
 `isp` is the one key whose values are not a closed set: it is the carrier name your console geolocated your public address to, lowercased with everything non-alphanumeric turned into a hyphen. Look it up before matching on it:
 

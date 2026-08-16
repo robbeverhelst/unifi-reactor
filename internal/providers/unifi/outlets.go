@@ -19,6 +19,7 @@ package unifi
 import (
 	"context"
 	"maps"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -28,26 +29,23 @@ import (
 	"github.com/robbeverhelst/unifi-reactor/internal/metrics"
 )
 
-// This file READS outlet state and nothing else. There is deliberately no way
-// to change an outlet from here — not behind a flag, not through a helper, not
-// reachable at all — because nobody yet knows what a UniFi UPS does with a
-// per-index write.
+// This file READS outlet state. Switching one is write.go's, and the split is
+// worth keeping: everything here runs on every poll for every install, and
+// nothing in it can move a relay.
 //
-// The whole reason to observe them first is in the captured table: outlets 1-4
-// report relay_group 1 and outlets 5-8 report relay_group 2. If the relay GROUP
-// is what the hardware switches, then asking for outlet 3 to go off takes
-// outlets 1-4 with it, and one of those may be carrying the gateway, the switch
-// or the storage. The documented write path — outlet_overrides via PUT
-// rest/device — comes from the USP-PDU-Pro and USP-Strip, which expose
-// per-outlet power, current and cycle_enabled and have no relay_group at all,
-// so it is documented for a different device class and settles nothing here.
+// It shipped first, and deliberately, because of what the captured table shows:
+// outlets 1-4 report relay_group 1 and outlets 5-8 report relay_group 2. If the
+// relay GROUP had been what the hardware switches, then asking for outlet 3 to
+// go off would have taken outlets 1-4 with it, and one of those may be carrying
+// the gateway, the switch or the storage. Observing was the instrument that
+// settled it safely — publish the keys, toggle ONE outlet by hand, and read off
+// whether one relay_state moved or four.
 //
-// Observation is the instrument that settles it safely: with these keys
-// published, a human toggles ONE outlet by hand in the UniFi UI and reads off
-// whether one relay_state moved or four. That is hypothesis H1 on issue #60,
-// and reportOutlets below prints its answer in words rather than leaving it to
-// be reconstructed from a graph. Switching itself stays deferred in #23 until
-// that experiment has been run.
+// It was settled on 2026-08-15: one outlet moved, its three group siblings did
+// not. relay_group turned out to partition outlets by capability rather than by
+// what switches together, which outlet_caps says in its own right. reportOutlets
+// below still prints the reading, because a second UPS model is not obliged to
+// behave like the first one and the line costs nothing on a device that does.
 
 // outletFields is the outlet block a UniFi UPS reports, embedded in
 // deviceRecord so it decodes from the same flat object.
@@ -80,9 +78,13 @@ type outletRecord struct {
 	RelayState *bool `json:"relay_state"`
 	// RelayGroup is the bank the outlet belongs to. NOTHING is derived from it
 	// — it is not part of any key, any value, or any decision — and it is read
-	// only so that it can be reported. It is the fact somebody has to know
-	// before writing an automation against an outlet, and #23 cannot be
-	// designed without it.
+	// only so that it can be reported.
+	//
+	// That stayed true after the experiment settled what it means. It groups
+	// outlets by capability, and the capability itself is in outlet_caps, which
+	// is what the write path reads to tell a battery-backed outlet from a
+	// surge-only one. Deriving the bank from a group NUMBER would be assuming
+	// that group 1 is the battery-backed one on every model there will ever be.
 	RelayGroup *int `json:"relay_group"`
 }
 
@@ -103,7 +105,7 @@ type outletRecord struct {
 // by where it happens to be plugged.
 func outletSuffix(index *int, name string) (string, bool) {
 	slug := slugify(name)
-	if slug != "" && !isConsoleOutletName(slug) {
+	if slug != "" && !isPlaceholderOutletName(name) {
 		return slug, true
 	}
 	if index == nil {
@@ -112,20 +114,26 @@ func outletSuffix(index *int, name string) (string, bool) {
 	return strconv.Itoa(*index), true
 }
 
-// isConsoleOutletName reports whether a slug is the console's own "Outlet N"
-// placeholder rather than a name anyone chose.
-func isConsoleOutletName(slug string) bool {
-	digits, isOutlet := strings.CutPrefix(slug, "outlet-")
-	if !isOutlet || digits == "" {
-		return false
-	}
-	for _, r := range digits {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
-}
+// consoleOutletName matches the placeholder every outlet on this hardware ships
+// with: "Outlet 1" … "Outlet 8", which is the index spelled out rather than a
+// name.
+//
+// It is applied to the raw name rather than to the slug, and it is the ONLY
+// copy of this rule. Two things consult it and they must never disagree: the
+// state key, where a placeholder means the key falls back to the index, and the
+// outlet write, where it means refusal — because an outlet nobody has named is
+// an outlet nobody has said what is plugged into, and this action cuts mains.
+// The CRD's admission rule on Outlet.name is written to the same pattern.
+//
+// A separator is required, so "Outlet3" reads as a placeholder and "Outlet
+// cupboard" does not. If some firmware ships a default without one, the guard
+// will not fire on it — the allowlist and the name check still stand, and the
+// right fix would be to widen this pattern rather than to lean on them.
+var consoleOutletName = regexp.MustCompile(`^ *[Oo]utlet[ _-]+[0-9]+ *$`)
+
+// isPlaceholderOutletName reports whether a name is the console's own rather
+// than one a person chose.
+func isPlaceholderOutletName(name string) bool { return consoleOutletName.MatchString(name) }
 
 // outletTally accumulates one device's outlet table into per-outlet keys.
 //
@@ -227,11 +235,13 @@ func (t *outletTally) publish(ctx context.Context, state map[string]string) outl
 	if len(t.ignored) > 0 {
 		// Merging two chassis' outlet tables would put one device's outlet 1
 		// under the other's key. Naming the ignored device is the honest
-		// version of a limitation; #23 has to decide how a second one is
-		// addressed before either can be switched.
+		// version of a limitation. The write path does not have it — an outlet
+		// action names its UPS by MAC — so a second UPS can be switched even
+		// while only the first one's outlets are observable.
 		log.Info("More than one adopted device reports an outlet table; only the first is published, "+
 			"because outlet indexes restart on every chassis and merging them would put one device's "+
-			"outlet under another's key. Please report it on issue #23",
+			"outlet under another's key. Switching an outlet on the ignored device still works, since "+
+			"an outlet action names its ups by MAC. Please report it on issue #23",
 			"published", t.device, "ignored", strings.Join(t.ignored, ","))
 	}
 
@@ -286,7 +296,8 @@ func (t *outletTally) ungroupedPublished(published map[string]string) []string {
 
 // outletSnapshot is one poll's outlet picture, kept so the next poll can report
 // not just that an outlet moved but whether its whole relay group moved with
-// it. That comparison is the entire readout of hypothesis H1 on #60.
+// it. That comparison was the readout of hypothesis H1 on #60, and it stays
+// because a second UPS model is not obliged to answer it the same way.
 type outletSnapshot struct {
 	device string
 	// state is each published key's value.
@@ -305,17 +316,18 @@ type outletSnapshot struct {
 func (s outletSnapshot) observed() bool { return len(s.state) > 0 }
 
 // reportOutlets says out loud what an outlet change means, and it is the reason
-// this key ships before any way to write one.
+// this key shipped before any way to write one.
 //
-// Two lines, both at INFO because the person running the experiment on #60 is
-// reading the default log stream rather than a debug one:
+// Two lines, both at INFO because somebody deciding whether to allowlist an
+// outlet is reading the default log stream rather than a debug one:
 //
 //   - the grouping itself, whenever it is first seen or changes. This is what
 //     has to be understood before an automation is written against an outlet.
 //   - what moved, whenever a relay_state changes, together with how much of its
 //     relay group moved with it. One outlet of four is the individually
-//     switchable answer; four of four is the relay-group answer, and #23's API
-//     has to be per-group and say so.
+//     switchable answer, and it is what this hardware gave on 2026-08-15; four
+//     of four would mean this model switches banks, and that the outlet actions
+//     must not be pointed at it.
 //
 // The reading is taken from the raw observation rather than from reported
 // state, which is the same thing here: outlet keys are debounced at 1 sample,
@@ -332,10 +344,10 @@ func (c *Client) reportOutlets(ctx context.Context, current outletSnapshot) {
 		return
 	}
 	if !previous.observed() || previous.grouping != current.grouping {
-		log.Info("A UPS is reporting switchable outlets. Reactor only READS them — switching is deferred "+
-			"in issue #23 until the relay grouping below is understood: if the relay group is what the "+
-			"hardware switches, changing one outlet changes every outlet in its group. To settle it, "+
-			"toggle ONE outlet by hand in the UniFi UI and read the next line",
+		log.Info("A UPS is reporting switchable outlets. On the hardware this was tested against they "+
+			"switch INDIVIDUALLY and the relay group below is a capability split, not a switching "+
+			"bank — but confirm it on yours before allowlisting anything for unifi.outlet.cut: toggle "+
+			"ONE outlet by hand in the UniFi UI and read the next line",
 			"device", current.device, "relayGroups", current.grouping,
 			"outlets", describeOutlets(current.state))
 		return
@@ -360,8 +372,8 @@ func (c *Client) reportOutlets(ctx context.Context, current outletSnapshot) {
 		changes := moved[group]
 		slices.Sort(changes)
 		size := len(current.groups[group])
-		log.Info("Outlet state changed. If you are running the relay-group experiment on issue #60, "+
-			"this line is its readout", "moved", strings.Join(changes, ","),
+		log.Info("Outlet state changed. If you are checking whether this ups switches an outlet or a "+
+			"whole bank, this line is the readout", "moved", strings.Join(changes, ","),
 			"relayGroup", group, "movedInGroup", len(changes), "outletsInGroup", size,
 			"verdict", groupVerdict(len(changes), size))
 	}
@@ -372,10 +384,10 @@ func (c *Client) reportOutlets(ctx context.Context, current outletSnapshot) {
 	}
 }
 
-// groupVerdict is what one poll's movement says about the question #23 is
-// blocked on. It is stated as a reading rather than a conclusion: one poll is
-// evidence, and the operator toggling the outlet is the one who knows whether
-// they touched one outlet or a bank.
+// groupVerdict is what one poll's movement says about whether this ups switches
+// an outlet or a bank. It is stated as a reading rather than a conclusion: one
+// poll is evidence, and the operator toggling the outlet is the one who knows
+// whether they touched one outlet or a bank.
 func groupVerdict(moved, size int) string {
 	switch {
 	case size <= 1:
@@ -383,8 +395,8 @@ func groupVerdict(moved, size int) string {
 	case moved < size:
 		return "outlets in this group moved independently of each other"
 	default:
-		return "every outlet in this group moved at once — if you toggled only one, " +
-			"the relay group is the switching unit and #23 must be per-group"
+		return "every outlet in this group moved at once — if you toggled only one, this ups " +
+			"switches a whole bank, and unifi.outlet.cut must not be pointed at it. Please report it"
 	}
 }
 

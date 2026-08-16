@@ -49,7 +49,14 @@ const (
 	// in the rendered release, and its absence is how "unbounded" appears.
 	envMaxObservationAge = "UNIFI_MAX_OBSERVATION_AGE"
 	envAllowedPoEPorts   = "UNIFI_ACTIONS_ALLOWED_POE_PORTS"
-	secretsRule          = `resources: ["secrets"]`
+	envAllowedOutlets    = "UNIFI_ACTIONS_ALLOWED_OUTLETS"
+	// envBatteryBacked is the second consent the battery-backed bank needs. It
+	// is separate from the allowlist because it is a separate decision.
+	envBatteryBacked = "UNIFI_ACTIONS_ALLOW_BATTERY_BACKED_OUTLETS"
+	secretsRule      = `resources: ["secrets"]`
+	// envConsoleUsername is the UniFi OS local account the console write path
+	// needs, and whose absence is how "this install writes nothing" appears.
+	envConsoleUsername = "UNIFI_USERNAME"
 	// tokenReviews is how the metrics endpoint's authn/authz filter appears in
 	// the rendered RBAC.
 	tokenReviews = "tokenreviews"
@@ -491,7 +498,9 @@ func TestAllowedDestinationsGrantSecretReads(t *testing.T) {
 // empty by default, and empty means the variable is not rendered at all.
 func TestConsoleActionsAreOffByDefault(t *testing.T) {
 	manifests := render(t, unifiURL)
-	for _, absent := range []string{envAllowedWLANs, envAllowedPoEPorts, "UNIFI_USERNAME"} {
+	for _, absent := range []string{
+		envAllowedWLANs, envAllowedPoEPorts, envAllowedOutlets, envBatteryBacked, envConsoleUsername,
+	} {
 		if strings.Contains(manifests, absent) {
 			t.Fatalf("%s was rendered on an install that allowed no console write", absent)
 		}
@@ -506,7 +515,7 @@ func TestAllowedWLANsCarryTheConsoleCredential(t *testing.T) {
 	if !strings.Contains(manifests, `value: "Guest,Lab"`) {
 		t.Fatal("the WLAN allowlist was not passed to the operator")
 	}
-	for _, expected := range []string{"UNIFI_USERNAME", "UNIFI_PASSWORD", `name: "unifi-reactor-console"`} {
+	for _, expected := range []string{envConsoleUsername, "UNIFI_PASSWORD", `name: "unifi-reactor-console"`} {
 		if !strings.Contains(manifests, expected) {
 			t.Fatalf("%s is missing; console writes cannot authenticate without it", expected)
 		}
@@ -524,13 +533,55 @@ func TestAllowedPoEPortsCarryTheConsoleCredential(t *testing.T) {
 	if !strings.Contains(manifests, `value: "aa:bb:cc:00:11:22/7"`) {
 		t.Fatal("the PoE port allowlist was not passed to the operator")
 	}
-	if !strings.Contains(manifests, "UNIFI_USERNAME") {
+	if !strings.Contains(manifests, envConsoleUsername) {
 		t.Fatal("console writes cannot authenticate without a UniFi OS local account")
 	}
 	// Listing a port must not quietly allow an SSID as well: the two lists are
 	// separate decisions.
 	if strings.Contains(manifests, envAllowedWLANs) {
 		t.Fatal("allowing a PoE port also rendered the WLAN allowlist")
+	}
+}
+
+// TestAllowedOutletsCarryTheConsoleCredential is the same pairing for the
+// action with the largest blast radius of any in this chart.
+func TestAllowedOutletsCarryTheConsoleCredential(t *testing.T) {
+	manifests := render(t, unifiURL, `unifi.actions.allowedOutlets={aa:bb:cc:00:11:44/5/nas}`)
+	if !strings.Contains(manifests, `value: "aa:bb:cc:00:11:44/5/nas"`) {
+		t.Fatal("the outlet allowlist was not passed to the operator")
+	}
+	if !strings.Contains(manifests, envConsoleUsername) {
+		t.Fatal("console writes cannot authenticate without a UniFi OS local account")
+	}
+	// Allowing an outlet must not quietly allow the battery-backed bank, or an
+	// SSID, or a port. Every one of these is its own decision.
+	for _, absent := range []string{envBatteryBacked, envAllowedWLANs, envAllowedPoEPorts} {
+		if strings.Contains(manifests, absent) {
+			t.Fatalf("allowing an outlet also rendered %s", absent)
+		}
+	}
+}
+
+// TestBatteryBackedConsentIsSeparateFromTheAllowlist. Cutting a battery-backed
+// outlet during a power cut is the most damaging thing this chart can be
+// configured to do, so it takes two values rather than one — and the consent on
+// its own must allow nothing, which is what the absent credential proves.
+func TestBatteryBackedConsentIsSeparateFromTheAllowlist(t *testing.T) {
+	alone := render(t, unifiURL, "unifi.actions.allowBatteryBackedOutlets=true")
+	if strings.Contains(alone, envConsoleUsername) {
+		t.Fatal("the battery consent on its own turned on the console write path")
+	}
+	if !strings.Contains(alone, envBatteryBacked) {
+		t.Fatal("the consent was not passed to the operator")
+	}
+
+	both := render(t, unifiURL,
+		`unifi.actions.allowedOutlets={aa:bb:cc:00:11:44/1/nas}`,
+		"unifi.actions.allowBatteryBackedOutlets=true")
+	for _, expected := range []string{envAllowedOutlets, envBatteryBacked, envConsoleUsername} {
+		if !strings.Contains(both, expected) {
+			t.Fatalf("%s is missing from an install that allowed a battery-backed outlet", expected)
+		}
 	}
 }
 
@@ -541,6 +592,7 @@ func TestConsoleCredentialsAreInjectedOnce(t *testing.T) {
 	manifests := render(t, unifiURL,
 		"unifi.actions.allowedWlans={Guest}",
 		`unifi.actions.allowedPoePorts={aa:bb:cc:00:11:22/7}`,
+		`unifi.actions.allowedOutlets={aa:bb:cc:00:11:44/5/nas}`,
 		"unifi.webhook.enabled=true",
 		"unifi.webhook.registration.enabled=true",
 		"unifi.webhook.registration.publicURL=http://192.0.2.5:9090/webhooks/unifi")

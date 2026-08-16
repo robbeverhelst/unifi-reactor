@@ -58,6 +58,13 @@ const (
 	// command a PoE cycle sends to it.
 	devMgrEndpoint = "cmd/devmgr"
 	cmdPowerCycle  = "power-cycle"
+	// restDeviceEndpoint is where a device's own configuration is written, and
+	// it is the one path here with hardware behind it: on 2026-08-15 a PUT to
+	// rest/device/<_id> carrying a modified outlet_overrides was accepted by a
+	// real UPS and moved exactly the outlet it addressed. What that write
+	// authenticated with was an API key rather than this session; see the outlet
+	// section of the write-API document for why Reactor uses the session anyway.
+	restDeviceEndpoint = "rest/device"
 
 	// fieldWLANID, fieldWLANName and fieldWLANEnabled are the three fields of a
 	// WLAN record this package reads. Everything else in the record is carried
@@ -81,7 +88,50 @@ const (
 	fieldIsUplink  = "is_uplink"
 	fieldPortPoE   = "port_poe"
 	fieldPoEEnable = "poe_enable"
+
+	// The device and outlet fields the outlet write reads. outlet_table is the
+	// same table outlets.go publishes the outlet.<n> keys from — it is the
+	// outlet's identity and its observed position — and outlet_overrides is the
+	// separate array the write goes through. Reading one and writing the other
+	// is not a mistake: the table is what the console reports, the overrides are
+	// what it accepts, and both were populated for all eight outlets on the real
+	// UPS.
+	//
+	// fieldOutletName and fieldPortName hold the same string on purpose. They are
+	// named apart because they are two different tables' idea of a name, and one
+	// of them changing is not the other changing.
+	fieldDeviceID        = "_id"
+	fieldOutletTable     = "outlet_table"
+	fieldOutletOverrides = "outlet_overrides"
+	fieldOutletIndex     = "index"
+	fieldOutletName      = "name"
+	fieldRelayState      = "relay_state"
+	fieldOutletCaps      = "outlet_caps"
 )
+
+// outletCapBatteryBacked is the outlet_caps bit that says an outlet keeps
+// running on battery.
+//
+// It is INFERRED, and this is where the inference is recorded. On the UPS this
+// was worked out against, outlet_caps decodes as bits [0, 2, 3, 16] for outlets
+// 1-4 and [0, 2, 16] for outlets 5-8 — one extra capability on the first bank,
+// exactly where the hardware documents four battery-backed and four surge-only
+// outlets. relay_group partitions the outlets along the same line, which
+// corroborates it without being the signal: a group number says which outlets
+// are alike, not what they are.
+//
+// If this bit means something else on other firmware, the consequence is a
+// refusal rather than a wrong cut in either direction: an outlet read as
+// battery-backed is refused until the install says otherwise, and one read as
+// surge-only is still allowlisted by hand, by MAC, index and name. Reporting it
+// is worth more than working around it.
+const outletCapBatteryBacked = 1 << 3
+
+// The placeholder rule lives in outlets.go, with the rest of what an outlet's
+// name means. There is deliberately one of it: the state key falls back to the
+// index for an outlet nobody has named, and the write path refuses one, and if
+// those two ever disagreed an outlet could publish under a name it cannot be
+// switched by — or, worse, be switchable while reading as unnamed.
 
 // defaultSite is the site every UniFi console has and the one Reactor reads
 // and writes when the operator names none.
@@ -107,7 +157,7 @@ var macPattern = regexp.MustCompile(`^[0-9a-f]{2}(:[0-9a-f]{2}){5}$`)
 // namespace, and a namespace tenant must not be able to turn the WiFi off or
 // cut power to a switch port by writing one.
 //
-// Both lists are empty by default, and empty refuses everything.
+// Every list is empty by default, and empty refuses everything.
 type ActionsConfig struct {
 	// AllowedWLANs are the SSIDs unifi.wlan.enable and unifi.wlan.disable may
 	// touch, matched exactly.
@@ -115,6 +165,33 @@ type ActionsConfig struct {
 	// AllowedPoEPorts are the switch ports unifi.poe.cycle may power-cycle, as
 	// "<mac>/<port index>".
 	AllowedPoEPorts []string
+	// AllowedOutlets are the UPS outlets unifi.outlet.cut and
+	// unifi.outlet.restore may switch, as "<mac>/<index>/<name>".
+	//
+	// All three parts are required, which is one more than the PoE list asks
+	// for, and the extra one is the point. A PoE port is allowlisted by switch
+	// and slot because the Automation must also name the port and Reactor checks
+	// that name against the switch — so the operator's list and the author's
+	// automation each carry half of the identity. That split is too generous for
+	// mains power: it means the operator has agreed to "whatever is in outlet 5",
+	// and after somebody re-plugs the rack a perfectly correct automation naming
+	// the new occupant would still be allowed. Putting the name in the list too
+	// means the operator agreed to a THING, and the thing has to still be there.
+	AllowedOutlets []string
+	// AllowBatteryBackedOutlets opens the battery-backed bank to the outlets
+	// already named in AllowedOutlets. It is off by default, and while it is off
+	// a battery-backed outlet is refused whatever else is allowed.
+	//
+	// It is a second switch rather than a second list because it is a different
+	// decision. AllowedOutlets says which sockets are on the table; this says
+	// whether the ones that keep running during a power cut are among them.
+	// Cutting a battery-backed outlet mid-outage is the most damaging thing in
+	// this repository and the least likely to be what somebody meant — and it is
+	// also, unavoidably, the only kind of outlet worth cutting to extend runtime,
+	// because a surge-only outlet is already dark when the mains are. That
+	// tension is why this is an explicit consent and not a floor: a floor would
+	// have made load-shedding, the thing #23 was opened for, impossible.
+	AllowBatteryBackedOutlets bool
 }
 
 // splitList reads a comma-separated environment value into entries, dropping
@@ -137,18 +214,39 @@ type portRef struct {
 
 func (p portRef) String() string { return fmt.Sprintf("%s/%d", p.mac, p.port) }
 
+// outletRef identifies one UPS outlet: which UPS, which socket on it, and what
+// that socket is called. All three, because two of them are a position and only
+// the third is a thing.
+type outletRef struct {
+	mac   string
+	index int32
+	name  string
+}
+
+func (o outletRef) String() string { return fmt.Sprintf("%s/%d/%s", o.mac, o.index, o.name) }
+
 // WritePolicy is the parsed allowlist. Nothing outside it can be written, and
 // there is no per-Automation override.
 type WritePolicy struct {
-	wlans map[string]bool
-	ports map[portRef]bool
+	wlans   map[string]bool
+	ports   map[portRef]bool
+	outlets map[outletRef]bool
+	// batteryBacked is whether the battery-backed bank is on the table at all.
+	// It qualifies outlets rather than adding to them: it can only ever take
+	// away from what outlets already allows.
+	batteryBacked bool
 }
 
 // NewWritePolicy parses the allowlists. It returns an error rather than
 // dropping an entry it cannot read: silently ignoring one would leave an
 // install that believes it allowed something refusing it at 3am instead.
 func NewWritePolicy(cfg ActionsConfig) (WritePolicy, error) {
-	policy := WritePolicy{wlans: map[string]bool{}, ports: map[portRef]bool{}}
+	policy := WritePolicy{
+		wlans:         map[string]bool{},
+		ports:         map[portRef]bool{},
+		outlets:       map[outletRef]bool{},
+		batteryBacked: cfg.AllowBatteryBackedOutlets,
+	}
 	for _, name := range cfg.AllowedWLANs {
 		policy.wlans[name] = true
 	}
@@ -158,6 +256,13 @@ func NewWritePolicy(cfg ActionsConfig) (WritePolicy, error) {
 			return WritePolicy{}, err
 		}
 		policy.ports[ref] = true
+	}
+	for _, entry := range cfg.AllowedOutlets {
+		ref, err := parseOutletRef(entry)
+		if err != nil {
+			return WritePolicy{}, err
+		}
+		policy.outlets[ref] = true
 	}
 	return policy, nil
 }
@@ -185,6 +290,43 @@ func parsePortRef(entry string) (portRef, error) {
 	return portRef{mac: mac, port: int32(port)}, nil
 }
 
+// parseOutletRef reads one "<mac>/<index>/<name>" allowlist entry.
+//
+// The name is everything after the second slash, so an outlet called "rack/nas"
+// can be allowlisted; it is compared with the console's spelling exactly, minus
+// surrounding space, the way an SSID is.
+//
+// A placeholder name is refused here rather than accepted and refused later,
+// because this is the operator's list and the message can be addressed to them:
+// the fix is to name the outlet on the console, not to write a different entry.
+func parseOutletRef(entry string) (outletRef, error) {
+	parts := strings.SplitN(strings.TrimSpace(entry), "/", 3)
+	if len(parts) != 3 {
+		return outletRef{}, fmt.Errorf(
+			"allowed outlet %q must be a UPS MAC, an outlet index and the outlet's name, "+
+				"e.g. aa:bb:cc:00:11:22/5/nas", entry)
+	}
+	mac := NormalizeMAC(parts[0])
+	if !macPattern.MatchString(mac) {
+		return outletRef{}, fmt.Errorf("allowed outlet %q does not start with a MAC address", entry)
+	}
+	index, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 32)
+	if err != nil || index < 1 {
+		return outletRef{}, fmt.Errorf("allowed outlet %q has no positive outlet index after the MAC", entry)
+	}
+	name := strings.TrimSpace(parts[2])
+	if name == "" {
+		return outletRef{}, fmt.Errorf("allowed outlet %q names no outlet after the index", entry)
+	}
+	if isPlaceholderOutletName(name) {
+		return outletRef{}, fmt.Errorf(
+			"allowed outlet %q is named with the console's own placeholder, which is the index spelled "+
+				"out rather than a name. Name the outlet in UniFi after what is plugged into it, then "+
+				"allowlist that name: Reactor will not cut mains to a socket nobody has named", entry)
+	}
+	return outletRef{mac: mac, index: int32(index), name: name}, nil
+}
+
 // NormalizeMAC puts an address in the form everything here compares on:
 // lowercase and colon-separated. Consoles and humans write MACs several ways,
 // and an allowlist that failed to match because of a capital letter would be a
@@ -196,11 +338,22 @@ func NormalizeMAC(mac string) string {
 
 // Empty reports whether the policy allows nothing at all, which is the default
 // and means every console write action is refused.
-func (p WritePolicy) Empty() bool { return len(p.wlans) == 0 && len(p.ports) == 0 }
+//
+// allowBatteryBackedOutlets is deliberately not consulted: on its own it permits
+// nothing, and an install that set only it has still allowed nothing.
+func (p WritePolicy) Empty() bool {
+	return len(p.wlans) == 0 && len(p.ports) == 0 && len(p.outlets) == 0
+}
 
 func (p WritePolicy) allowsWLAN(name string) bool { return p.wlans[name] }
 
 func (p WritePolicy) allowsPort(ref portRef) bool { return p.ports[ref] }
+
+func (p WritePolicy) allowsOutlet(ref outletRef) bool { return p.outlets[ref] }
+
+// allowsBatteryBackedOutlets reports whether the battery-backed bank is on the
+// table for the outlets already allowed.
+func (p WritePolicy) allowsBatteryBackedOutlets() bool { return p.batteryBacked }
 
 // Writer performs the edge actions that write to the console.
 //
@@ -269,10 +422,10 @@ func (w *Writer) Credentialed() bool { return w.username != "" && w.password != 
 // It is at-most-once and unconditionally so, which is recorded alongside the
 // other per-type policies on maxActionAttempts. A PoE cycle is a power cut, and
 // repeating one after an ambiguous failure is a second power cut rather than a
-// correction. A WLAN write is a read-modify-write against an endpoint with no
-// concurrency control, so a retry re-reads a document the failed attempt may
-// already have half-changed. In both cases the conservative reading of an
-// ambiguous console write is that it happened.
+// correction. A WLAN write and an outlet write are both read-modify-writes
+// against endpoints with no concurrency control, so a retry re-reads a document
+// the failed attempt may already have half-changed. In every case the
+// conservative reading of an ambiguous console write is that it happened.
 func (w *Writer) Apply(
 	ctx context.Context,
 	action reactorv1alpha1.Action,
@@ -287,8 +440,8 @@ func (w *Writer) Apply(
 	if w.policy.Empty() {
 		return result, errors.New(
 			"console actions are disabled on this install: nothing is allowed, so this action was refused. " +
-				"Set unifi.actions.allowedWlans or unifi.actions.allowedPoePorts " +
-				"to the objects Reactor may change")
+				"Set unifi.actions.allowedWlans, unifi.actions.allowedPoePorts or " +
+				"unifi.actions.allowedOutlets to the objects Reactor may change")
 	}
 	if !w.Credentialed() {
 		return result, errors.New(
@@ -344,6 +497,32 @@ func (w *Writer) check(action reactorv1alpha1.Action) error {
 				ref)
 		}
 		return nil
+	case actions.TypeUniFiOutletCut, actions.TypeUniFiOutletRestore:
+		// The placeholder check is here rather than against the hardware
+		// because it is a property of the request: it needs no console to
+		// decide, so it costs no session. The API server enforces it too, and
+		// this is the copy that holds when the Writer is driven by something
+		// other than an admitted Automation.
+		if isPlaceholderOutletName(action.Outlet.Name) {
+			return fmt.Errorf(
+				"outlet name %q is the console's own placeholder, which is the index spelled out rather "+
+					"than a name; name the outlet in UniFi after what is plugged into it. Reactor will "+
+					"not cut mains to a socket nobody has named",
+				action.Outlet.Name)
+		}
+		ref := outletRef{
+			mac:   NormalizeMAC(action.Outlet.Device),
+			index: action.Outlet.Index,
+			name:  action.Outlet.Name,
+		}
+		if !w.policy.allowsOutlet(ref) {
+			return fmt.Errorf(
+				"outlet %s is not allowed by this install; add it to unifi.actions.allowedOutlets, "+
+					"which is empty by default and refuses every outlet. The entry is the UPS MAC, the "+
+					"outlet index AND the outlet's name, all three",
+				ref)
+		}
+		return nil
 	}
 	return fmt.Errorf("no console executor for action %q", action.Type)
 }
@@ -356,6 +535,10 @@ func (w *Writer) dispatch(ctx context.Context, client *AlarmClient, action react
 		return w.setWLANEnabled(ctx, client, action.WLAN.Name, false)
 	case actions.TypeUniFiPoECycle:
 		return w.cyclePoEPort(ctx, client, *action.PoE)
+	case actions.TypeUniFiOutletCut:
+		return w.setOutletRelay(ctx, client, *action.Outlet, false)
+	case actions.TypeUniFiOutletRestore:
+		return w.setOutletRelay(ctx, client, *action.Outlet, true)
 	}
 	return fmt.Errorf("no console executor for action %q", action.Type)
 }
@@ -376,6 +559,16 @@ func describeConsoleTarget(action reactorv1alpha1.Action) (string, error) {
 			return "", fmt.Errorf("%s needs a poe block", action.Type)
 		}
 		return fmt.Sprintf("unifi/port/%s/%d", NormalizeMAC(action.PoE.Device), action.PoE.Port), nil
+	case actions.TypeUniFiOutletCut, actions.TypeUniFiOutletRestore:
+		if action.Outlet == nil {
+			return "", fmt.Errorf("%s needs an outlet block", action.Type)
+		}
+		// The name is not in here, unlike the MAC and the index. This string
+		// reaches status and Events, which anyone in the Automation's namespace
+		// can read, and an outlet's name is what somebody called the thing
+		// plugged into it. The address is enough to say which socket moved.
+		return fmt.Sprintf("unifi/outlet/%s/%d",
+			NormalizeMAC(action.Outlet.Device), action.Outlet.Index), nil
 	}
 	return "", fmt.Errorf("no console executor for action %q", action.Type)
 }
@@ -551,26 +744,237 @@ func checkPort(mac string, spec reactorv1alpha1.PoEPort, port map[string]any) er
 	return nil
 }
 
-// portByIndex finds the port table entry the console numbers with want.
+// setOutletRelay opens or closes one switchable outlet on a UPS.
 //
-// A JSON number decodes as float64, so the comparison goes through one: the
-// index is small and exact in a float, and reading it as anything else would
-// mean assuming a decoder this package does not control.
+// This is the largest blast radius in this repository, and the shape of the
+// function follows from one fact: a UPS reports nothing about what is plugged
+// into an outlet. unifi.poe.cycle can refuse the switch's own uplink absolutely,
+// because the switch says which port that is. There is no equivalent here, so
+// the checks below are not "is this the right socket" — nothing can answer that
+// — they are "is this the socket everyone involved agreed on, and is it still
+// the same one".
+//
+// Three parties have to agree before the relay moves: the operator, through an
+// allowlist entry carrying the MAC, the index AND the name; the automation
+// author, through the same three; and the UPS, through its own outlet table.
+// The name is what makes that more than a position, and it is why an outlet
+// still called "Outlet 5" is refused before any of this runs.
+//
+// The write goes through outlet_overrides rather than outlet_table, and it is
+// narrower than the WLAN write: the body is one field, and inside it, the array
+// the console just reported with exactly one entry's relay_state changed. Every
+// other outlet's entry, and every other key on the addressed one, is carried
+// back untouched, so Reactor never states a position for an outlet it was not
+// asked about.
+//
+// On 2026-08-15 exactly this write, against a real UPS, moved outlet 8 and left
+// outlets 5, 6 and 7 — its relay-group siblings — on. What it did not establish
+// is that the relay physically opened: the outlet was empty, so the evidence is
+// the console reporting back what was written to it.
+func (w *Writer) setOutletRelay(
+	ctx context.Context,
+	client *AlarmClient,
+	spec reactorv1alpha1.Outlet,
+	want bool,
+) error {
+	log := logf.FromContext(ctx).WithName("unifi-write")
+	mac := NormalizeMAC(spec.Device)
+
+	devices, err := client.do(ctx, http.MethodGet, w.networkPath(deviceStatEndpoint), nil)
+	if err != nil {
+		return err
+	}
+	device, found := findObjectWith(devices, fieldMAC, mac, fieldOutletTable, fieldOutletOverrides)
+	if !found {
+		return fmt.Errorf("no device with mac %s reporting both %s and %s on site %q; "+
+			"a ups that reports outlets but no overrides has nothing this action can write",
+			mac, fieldOutletTable, fieldOutletOverrides, w.site)
+	}
+	outlet, found := objectByIndex(device[fieldOutletTable], fieldOutletIndex, spec.Index)
+	if !found {
+		return fmt.Errorf("device %s has no outlet %d", mac, spec.Index)
+	}
+	if err := checkOutlet(mac, spec, outlet, w.policy.allowsBatteryBackedOutlets()); err != nil {
+		return err
+	}
+
+	id, ok := device[fieldDeviceID].(string)
+	if !ok || id == "" {
+		return fmt.Errorf("the ups %s carries no usable %s; refusing to guess at its address",
+			mac, fieldDeviceID)
+	}
+	// The position of record is the outlet TABLE's, not the override's: that is
+	// what the console reports, what the outlet.<n> state key publishes, and what
+	// the operator can see. An override saying something else is the console
+	// mid-apply, and the only thing it can cost is a write that was not needed.
+	position, ok := outlet[fieldRelayState].(bool)
+	if !ok {
+		return fmt.Errorf("outlet %d on %s does not report %s as a boolean, so Reactor cannot tell "+
+			"which way it is set; refusing to write a position over one it cannot read",
+			spec.Index, mac, fieldRelayState)
+	}
+	if position == want {
+		log.Info("The outlet is already in the wanted state; nothing written",
+			"mac", mac, "outlet", spec.Index, "on", want)
+		return nil
+	}
+
+	overrides, err := rewriteOutletOverrides(device[fieldOutletOverrides], spec, want)
+	if err != nil {
+		return err
+	}
+	updated, err := client.do(ctx, http.MethodPut,
+		w.networkPath(restDeviceEndpoint)+"/"+url.PathEscape(id),
+		map[string]any{fieldOutletOverrides: overrides})
+	if err != nil {
+		return err
+	}
+
+	// The console answers a write with the record it stored, so a 200 that did
+	// not take is caught rather than reported as success. This is emphatically
+	// NOT evidence that the relay moved — it is the console agreeing with itself
+	// about what it was told. Only something plugged in can settle that.
+	if stored, ok := findObjectWith(updated, fieldDeviceID, id, fieldOutletOverrides); ok {
+		if entry, ok := objectByIndex(stored[fieldOutletOverrides], fieldOutletIndex, spec.Index); ok {
+			if got, ok := entry[fieldRelayState].(bool); ok && got != want {
+				return fmt.Errorf("the console accepted the write but still reports outlet %d on %s "+
+					"as %s=%v", spec.Index, mac, fieldRelayState, got)
+			}
+		}
+	}
+	log.Info("Wrote the outlet relay. The console reports the new position; whether the relay opened "+
+		"is between the relay and whatever is plugged into it",
+		"mac", mac, "outlet", spec.Index, "outletName", spec.Name, "on", want)
+	return nil
+}
+
+// checkOutlet is every reason not to move this relay that needs the hardware to
+// decide. The reasons that do not — an outlet nobody has named, an outlet this
+// install never allowed — are settled in check() before a session is opened.
+//
+// Two of these are floors and apply whatever the allowlist says, in the way the
+// outbound dialer refuses loopback whatever the destination allowlist says: an
+// outlet whose bank cannot be read, and a battery-backed outlet on an install
+// that has not separately consented to the battery-backed bank.
+func checkOutlet(mac string, spec reactorv1alpha1.Outlet, outlet map[string]any, allowBattery bool) error {
+	name, ok := outlet[fieldOutletName].(string)
+	if !ok {
+		return fmt.Errorf("outlet %d on %s reports no name to check against %q; refusing to switch an "+
+			"outlet whose identity cannot be confirmed", spec.Index, mac, spec.Name)
+	}
+	if name != spec.Name {
+		// The re-plugged rack, caught. The socket still exists; what it is
+		// called has changed, so it is probably feeding something else.
+		return fmt.Errorf("outlet %d on %s is called %q, not %q; refusing to switch it. "+
+			"If what is plugged in changed, change the automation and the allowlist to match rather "+
+			"than the other way round", spec.Index, mac, name, spec.Name)
+	}
+
+	caps, ok := decodeIndex(outlet[fieldOutletCaps])
+	if !ok {
+		return fmt.Errorf("outlet %d on %s does not report %s, so Reactor cannot tell whether it is "+
+			"battery-backed; refusing to switch it. A guard that silently stops applying is worse "+
+			"than one that declines", spec.Index, mac, fieldOutletCaps)
+	}
+	if caps&outletCapBatteryBacked != 0 && !allowBattery {
+		return fmt.Errorf("outlet %d on %s is battery-backed, and this install has not allowed the "+
+			"battery-backed bank; it is refused whatever is in the allowlist. Cutting one of these "+
+			"during a power cut is the most damaging thing Reactor can do. If shedding it is exactly "+
+			"what you mean — and to extend runtime it has to be, since a surge-only outlet is already "+
+			"dark when the mains are — set unifi.actions.allowBatteryBackedOutlets",
+			spec.Index, mac)
+	}
+	return nil
+}
+
+// rewriteOutletOverrides builds the body of the write: the overrides array the
+// console just reported, with exactly one entry's relay_state changed.
+//
+// It refuses rather than invents. An absent array, an entry that is not an
+// object, an entry with no readable index, or no entry for the outlet addressed
+// all abandon the action — because the alternative in every case is Reactor
+// composing a document that states a position for outlets nobody asked about.
+func rewriteOutletOverrides(raw any, spec reactorv1alpha1.Outlet, want bool) ([]any, error) {
+	entries, ok := raw.([]any)
+	if !ok || len(entries) == 0 {
+		return nil, fmt.Errorf("the ups reports no %s to change, and Reactor will not compose one: "+
+			"a document it invented would state a position for every outlet rather than for the one "+
+			"addressed", fieldOutletOverrides)
+	}
+	rewritten := make([]any, 0, len(entries))
+	addressed := false
+	for _, entry := range entries {
+		override, ok := entry.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("the %s array carries an entry that is not an outlet; refusing to "+
+				"send back a document this action does not understand", fieldOutletOverrides)
+		}
+		index, ok := decodeIndex(override[fieldOutletIndex])
+		if !ok {
+			return nil, fmt.Errorf("an entry in %s reports no %s, so Reactor cannot tell which outlet "+
+				"it is; refusing to write", fieldOutletOverrides, fieldOutletIndex)
+		}
+		next := maps.Clone(override)
+		if index == spec.Index {
+			// The overrides array is a second table with its own idea of which
+			// outlet is which. If it disagrees with the outlet table about the
+			// name, one of them is addressing a different socket and there is no
+			// way to tell which.
+			if name, named := override[fieldOutletName].(string); named && name != spec.Name {
+				return nil, fmt.Errorf("outlet %d is called %q in %s and %q in %s; the two disagree "+
+					"about which outlet this is, so nothing is written",
+					spec.Index, name, fieldOutletOverrides, spec.Name, fieldOutletTable)
+			}
+			next[fieldRelayState] = want
+			addressed = true
+		}
+		rewritten = append(rewritten, next)
+	}
+	if !addressed {
+		return nil, fmt.Errorf("the ups reports %s but no entry in it for outlet %d; refusing to add "+
+			"one, because an outlet the console does not already override is not one this action can "+
+			"reason about", fieldOutletOverrides, spec.Index)
+	}
+	return rewritten, nil
+}
+
+// portByIndex finds the port table entry the console numbers with want.
 func portByIndex(table any, want int32) (map[string]any, bool) {
+	return objectByIndex(table, fieldPortIndex, want)
+}
+
+// objectByIndex finds the entry in a console table whose index field holds
+// want. Ports call theirs port_idx and outlets call theirs index; the lookup is
+// the same and the field name is the only difference, so there is one of these
+// rather than two that could drift.
+//
+// Neither table is guaranteed to be ordered or complete, which is why this is a
+// search rather than an offset.
+func objectByIndex(table any, field string, want int32) (map[string]any, bool) {
 	entries, ok := table.([]any)
 	if !ok {
 		return nil, false
 	}
 	for _, entry := range entries {
-		port, ok := entry.(map[string]any)
+		object, ok := entry.(map[string]any)
 		if !ok {
 			continue
 		}
-		if index, ok := port[fieldPortIndex].(float64); ok && int32(index) == want {
-			return port, true
+		if index, ok := decodeIndex(object[field]); ok && index == want {
+			return object, true
 		}
 	}
 	return nil, false
+}
+
+// decodeIndex reads a console index.
+//
+// A JSON number decodes as float64, so the comparison goes through one: the
+// index is small and exact in a float, and reading it as anything else would
+// mean assuming a decoder this package does not control.
+func decodeIndex(value any) (int32, bool) {
+	index, ok := value.(float64)
+	return int32(index), ok
 }
 
 // networkPath builds a site-scoped Network application path.

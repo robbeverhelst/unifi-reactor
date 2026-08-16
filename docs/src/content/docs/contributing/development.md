@@ -123,10 +123,12 @@ curl -X POST 'http://localhost:9443/poe?watts=55&budget=60'    # the PoE budget 
 curl -X POST 'http://localhost:9443/poe?silent=true'           # a powered port reports no wattage
 curl -X POST 'http://localhost:9443/poe?port=7&name=re-patched' # ...and the write path's identity check
 
-curl http://localhost:9443/outlets                             # every outlet, and which relay group it is in
+curl http://localhost:9443/outlets                             # outlets, banks, and every write Reactor made
 curl -X POST 'http://localhost:9443/outlets?outlet=5&state=off'          # one outlet opens
 curl -X POST 'http://localhost:9443/outlets?switching=group&outlet=5&state=off'   # ...and takes 5-8 with it
 curl -X POST 'http://localhost:9443/outlets?outlet=5&label=nas'          # key becomes outlet.nas
+curl -X POST 'http://localhost:9443/outlets?caps=false'        # ...and the write path's battery-bank floor
+curl -X POST 'http://localhost:9443/outlets?overrides=false'   # nothing for the write to modify
 curl -X POST 'http://localhost:9443/outlets?reset=true'        # back to the capture
 ```
 
@@ -136,9 +138,11 @@ curl -X POST 'http://localhost:9443/outlets?reset=true'        # back to the cap
 
 Per-device keys are opt-in in Reactor (`unifi.devices.perDeviceKeys`), so `device.<name>` will not appear until you ask for it — `devices` is published either way. A device is addressed by the slug of the name it was *captured* under even after `rename=`, which is what makes the rename rehearsal reversible: renaming makes the old key **vanish**, and the reconciler holds the last known state rather than treating it as a recovery.
 
-`/outlets` is the one endpoint here that rehearses a question nobody has asked the hardware. Everything it serves **is** captured — `index`, `name`, `relay_state` and `relay_group` are all in `stat-device-ups.json` — but whether a UniFi UPS switches *an outlet* or *a relay group* is unknown, and `switching=` is the mock imitating each answer in turn. With `switching=individual`, asking for outlet 5 moves outlet 5; with `switching=group` the same request takes outlets 5–8, because they share `relay_group: 2`. Rehearse both, because a parser that only ever saw one of them is a parser tested against a guess.
+`/outlets` drives both halves of the outlet story the way `/poe` does. Most of what it serves **is** captured — `index`, `name`, `relay_state` and `relay_group` are all in `stat-device-ups.json` — while `_id`, `outlet_caps` and `outlet_overrides` are the shape read off the real UPS on 2026-08-15, when the write that unblocked [#23](https://github.com/robbeverhelst/unifi-reactor/issues/23) was made. `switching=` still imitates both answers to "does this UPS move an outlet or a bank": the real one moved one outlet and left its three group siblings on, but a parser that had only ever seen the answer it expected is a parser tested against one device.
 
-Reactor never writes an outlet — `/outlets` is the mock's own dev surface, not a UniFi endpoint Reactor calls. Switching is [#23](https://github.com/robbeverhelst/unifi-reactor/issues/23), and the experiment that decides it is H1 on [#60](https://github.com/robbeverhelst/unifi-reactor/issues/60): with the operator watching, toggle **one** outlet by hand in the UniFi UI and read whether one `relay_state` flips or four. `outlet=5&label=nas` rehearses the other half of that visit — naming the outlets, which moves the key off the index.
+`caps=false` and `overrides=false` break the two floors the `unifi.outlet.*` **actions** stand on — an outlet whose bank Reactor cannot read is refused whatever the allowlist says, and a UPS with no `outlet_overrides` gives the write nothing to modify and Reactor will not compose one. `outlet=5&label=nas` is the other thing worth rehearsing: it names an outlet, which both moves the state key off the index *and* is what makes the outlet switchable at all, since one still called `Outlet 5` is refused.
+
+`PUT rest/device/<id>` is the endpoint Reactor actually calls, and the mock enforces the one thing a real console cannot: that the body is the `outlet_overrides` array just read with **exactly one** `relay_state` changed. `curl http://localhost:9443/outlets` lists every write it accepted, so "did Reactor cut the right socket" is one request rather than a log search.
 
 `/wifi` drives the `wlan` subsystem's AP counts, because that is what `wifi` is derived from. `?status=` moves the console's own wording *without* moving the counts, which is how you rehearse the disagreement Reactor reports rather than silently resolving.
 

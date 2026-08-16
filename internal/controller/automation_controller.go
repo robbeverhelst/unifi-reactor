@@ -155,6 +155,17 @@ const (
 	//                       transition, so nothing re-fires. What can still
 	//                       drive it repeatedly is a flapping key, and debounce
 	//                       is the answer to that, exactly as for restart.
+	//   - unifi.outlet.*   AT-MOST-ONCE, unconditionally, and this is the one
+	//                       where the reasoning matters most, because both of the
+	//                       arguments above apply at once. The write is a
+	//                       read-modify-write against an endpoint with no version
+	//                       to compare against, AND every execution moves a mains
+	//                       relay. A retry after an ambiguous failure would re-read
+	//                       an overrides array the failed attempt may already have
+	//                       changed, and then act on it. The action reads before it
+	//                       writes and does nothing when the outlet is already
+	//                       where it should be, so a miss is corrected by the next
+	//                       transition rather than inside this one.
 	maxActionAttempts = 5
 	// retryBackoffBase and retryBackoffCap bound the exponential delay between
 	// those attempts.

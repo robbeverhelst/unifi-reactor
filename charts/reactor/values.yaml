@@ -339,6 +339,64 @@ unifi:
     # above and the README. A flapping key is a stream of transitions, and each
     # one is a real power cut.
     allowedPoePorts: []
+    # UPS outlets that unifi.outlet.cut and unifi.outlet.restore may switch, as
+    # "<UPS MAC>/<outlet index>/<outlet name>". Anything not listed is refused.
+    #
+    #   allowedOutlets:
+    #     - aa:bb:cc:00:11:22/5/nas
+    #
+    # This is the largest blast radius in Reactor and the place it can help you
+    # least. A switch tells Reactor which of its ports is the uplink, so a PoE
+    # cycle can refuse that one absolutely. A UPS tells Reactor nothing at all
+    # about what is plugged into an outlet — not the device, not whether it is
+    # your gateway. The only thing standing between an automation and the wrong
+    # socket is this list, and the name in it.
+    #
+    # All three parts are required, which is one more than allowedPoePorts asks
+    # for, and the extra one is deliberate. Two of them are a position; only the
+    # name is a thing. "aa:bb:cc:00:11:22/5" would mean you agreed to whatever
+    # is in outlet 5, and after somebody re-plugs the rack that is something
+    # else. Reactor checks all three against the UPS immediately before writing,
+    # so a re-plug becomes a refused action with a sentence.
+    #
+    # Out of the box these outlets are called "Outlet 1" … "Outlet 8", which is
+    # the index spelled out rather than a name. An outlet still carrying that
+    # placeholder is REFUSED — here, in the automation, and against the console.
+    # Name the outlet in UniFi after what is plugged into it first. That is not
+    # bureaucracy: it is the only moment anybody writes down what this socket
+    # feeds, and everything downstream depends on it. (An outlet name containing
+    # a comma cannot be listed, the same limitation an SSID has.)
+    #
+    # Two limitations, and on mains power they are louder than anywhere else.
+    # These actions are NOT arbitrated: two Automations cutting the same outlet
+    # do not resolve to one claim, and whichever restores it first restores it.
+    # And nothing hands an outlet back — if the exit transition never arrives
+    # because the Automation was deleted or Reactor was uninstalled, the outlet
+    # stays open until a human closes it. There is no baseline and no pre-delete
+    # sweep that can reach a relay.
+    #
+    # One thing nobody has proved: that writing the relay actually opens it. The
+    # write was accepted on real hardware and the console reported the new
+    # position back, but the outlet under test was empty. Plug a lamp into an
+    # outlet, drive a transition, and watch it go dark before you trust this
+    # with anything that matters.
+    allowedOutlets: []
+    # Whether the outlets above may include battery-backed ones. Off by default,
+    # and while it is off a battery-backed outlet is refused whatever you list.
+    #
+    # This UPS splits its outlets into a battery-backed bank and a surge-only
+    # bank, and Reactor reads which is which from the UPS itself. Cutting a
+    # battery-backed outlet during a power cut is the most damaging thing here
+    # and the least likely to be what somebody meant.
+    #
+    # It is also, unavoidably, the only kind of cut that extends runtime: a
+    # surge-only outlet is already dark when the mains are, so shedding it saves
+    # nothing. So this is a consent rather than a prohibition — if load-shedding
+    # on battery is why you are here, you need it, and turning it on is you
+    # saying you know which outlets are on that bank.
+    #
+    # On its own it allows nothing. It only qualifies allowedOutlets.
+    allowBatteryBackedOutlets: false
     # Secret holding UNIFI_USERNAME and UNIFI_PASSWORD. Writing to the console
     # needs a UniFi OS local account: the API key the poller reads state with
     # does not write. This defaults to the same Secret the Alarm Manager
