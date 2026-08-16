@@ -18,11 +18,6 @@ package unifi
 
 import (
 	"context"
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -429,48 +424,26 @@ func TestOutletChangeIsReportedWithItsRelayGroup(t *testing.T) {
 	}
 }
 
-// Nothing here may change an outlet: not behind a flag, not through a helper,
-// not reachable. #61's acceptance criteria say so in as many words, and this is
-// the test that keeps it true after the issue is closed.
+// TestNoOutletWritePathExists stood here, and it is gone on purpose.
 //
-// Two guards, because "no write path" can be broken two ways. Writer is the
-// only thing in this package that sends anything to a console, so no method on
-// it may mention an outlet or a relay; and outlet_overrides is the field the
-// documented PDU write path uses, so it may not appear in this package's source
-// at all. Both must be deleted deliberately to implement #23, which is the
-// point.
-func TestNoOutletWritePathExists(t *testing.T) {
-	for method := range reflect.TypeFor[*Writer]().Methods() {
-		name := strings.ToLower(method.Name)
-		if strings.Contains(name, "outlet") || strings.Contains(name, "relay") {
-			t.Errorf("Writer.%s can change an outlet; #23 is deferred and outlet state is read-only",
-				method.Name)
-		}
-	}
-
-	sources, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatalf("listing package sources: %v", err)
-	}
-	for _, source := range sources {
-		if strings.HasSuffix(source, "_test.go") {
-			continue
-		}
-		// String literals only, never comments: outlet_overrides is discussed
-		// at length in this package and implemented nowhere, and a guard that
-		// could not tell those apart would only teach people to stop explaining
-		// themselves.
-		parsed, err := parser.ParseFile(token.NewFileSet(), source, nil, 0)
-		if err != nil {
-			t.Fatalf("parsing %s: %v", source, err)
-		}
-		ast.Inspect(parsed, func(node ast.Node) bool {
-			literal, ok := node.(*ast.BasicLit)
-			if ok && literal.Kind == token.STRING && strings.Contains(literal.Value, "outlet_overrides") {
-				t.Errorf("%s builds outlet_overrides, the field the documented write path uses; "+
-					"outlet state is observed and never written until #23 is decided", source)
-			}
-			return true
-		})
-	}
-}
+// It was two guards. One walked Writer's methods and failed if any of them
+// mentioned an outlet or a relay; the other parsed every non-test source in
+// this package and failed if the string outlet_overrides appeared in a literal.
+// Together they made "outlet state is read-only" a property the compiler
+// checked rather than a promise in a comment, and they were written so that
+// implementing #23 would have to delete them rather than drift past them.
+//
+// #23 has now been answered on hardware. On 2026-08-15 outlet 8 was set to
+// relay_state:false through outlet_overrides and outlets 5, 6 and 7 — which
+// share its relay group — stayed on. The relay group turned out to partition
+// outlets by capability, not by what switches together, so the specific danger
+// these guards were standing in front of is not there. They are deleted in the
+// commit that says so, and what replaces them is narrower and lives with the
+// write path: TestOutletWriteChangesOnlyTheAddressedRelay in write_test.go,
+// which pins that the body Reactor PUTs is the overrides array it just read
+// with exactly one entry's relay_state changed.
+//
+// What has NOT been established is that the relay physically opens. The outlet
+// under test was empty, so the evidence is the console reporting back what was
+// written to it. That is stated wherever this feature is documented, and it is
+// not something a test in this repository can settle.
