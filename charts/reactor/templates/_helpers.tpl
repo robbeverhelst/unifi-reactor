@@ -66,6 +66,11 @@ A CRD owned by a different release is never adopted. That is somebody else's
 object, and taking it would leave the release that owns it unable to update its
 own; the upgrade stops here instead, naming what it found.
 
+crds.adopt=false on a CRD nobody owns stops here too. Helm would refuse that
+upgrade anyway — an unowned object is one it will not update — but it refuses
+it with a generic ownership error that says nothing about which value turned
+adoption off or what to run instead. Failing here says both.
+
 `helm template` and a client-side `--dry-run` have no cluster to look in, so
 both render the CRD — the state every install is in once this has happened once.
 */}}
@@ -77,7 +82,19 @@ both render the CRD — the state every install is in once this has happened onc
 {{- $owner := default "" (index $annotations "meta.helm.sh/release-name") -}}
 {{- $ownerNamespace := default "" (index $annotations "meta.helm.sh/release-namespace") -}}
 {{- if eq $owner "" -}}
-{{- if .Values.crds.adopt -}}adopt{{- end -}}
+{{- if .Values.crds.adopt -}}adopt
+{{- else -}}
+{{- fail (printf (join "" (list
+  "the CustomResourceDefinition %s belongs to no Helm release — the state chart 0.3.0 and earlier left "
+  "behind by shipping it under crds/ — and crds.adopt=false turned off the hook that would have handed "
+  "it over. Helm will not update an object it does not own, so this upgrade cannot proceed. Adopt it by "
+  "hand and upgrade again:\n\n"
+  "  kubectl label crd %s app.kubernetes.io/managed-by=Helm --overwrite\n"
+  "  kubectl annotate crd %s meta.helm.sh/release-name=%s meta.helm.sh/release-namespace=%s --overwrite\n\n"
+  "Or upgrade with --set crds.install=false to leave the CRD out of this release entirely."))
+  (include "reactor.crdName" .) (include "reactor.crdName" .) (include "reactor.crdName" .)
+  .Release.Name .Release.Namespace) -}}
+{{- end -}}
 {{- else if or (ne $owner .Release.Name) (ne $ownerNamespace .Release.Namespace) -}}
 {{- fail (printf (join "" (list
   "the CustomResourceDefinition %s belongs to the Helm release %q in namespace %q, not to %q in namespace %q. "

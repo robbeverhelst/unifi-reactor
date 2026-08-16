@@ -43,10 +43,20 @@ ClusterRole granting get and patch on that single CRD name — is rendered
 only in that case, and cleans itself up when it succeeds. A CRD owned by
 another release is never adopted; that upgrade stops and says whose it is.
 
+On that one upgrade the chart deliberately leaves the CRD out of the
+release, because Helm checks ownership before it runs any hook, and the hook
+puts the schema live in the same patch that takes ownership. So `helm get
+manifest` for that revision carries no CustomResourceDefinition while `helm
+template` renders one; the next upgrade puts it back for good. The chart
+README explains it under "helm get manifest shows no CRD after that
+upgrade".
+
 Set to false to do it by hand instead
 (https://reactor.robbeverhelst.com/troubleshooting/ has the two kubectl
-commands). Ignored when install is false, which already says the CRD is
-somebody else's to manage.
+commands). That is a promise to run them: until somebody does, the CRD
+belongs to no release and Helm will not update it, so the upgrade stops and
+repeats the commands back to you. Ignored when install is false, which
+already says the CRD is somebody else's to manage.
 
 ## `image`
 

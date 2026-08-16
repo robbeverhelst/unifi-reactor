@@ -57,6 +57,16 @@ Each target creates its Kind cluster, runs the suite, and deletes the cluster wh
 
 The suites reach the mock over a fixed node port mapped to the host by `test/e2e/kind-config.yaml`, which is why they create their own clusters rather than reusing one you already have.
 
+### When cluster creation fails on the node port
+
+```text
+ERROR: failed to create cluster: ... Bind for 127.0.0.1:30943 failed: port is already allocated
+```
+
+That node port is fixed, so only one of these suites can exist at a time — and a suite whose cleanup never ran leaves a cluster holding it. `kind get clusters` finds the orphan; deleting it frees the port. The same message also appears for a few seconds after a cluster is deleted, while Docker still holds the reservation, so a rerun that fails immediately after a teardown is worth trying once more before hunting for a cause.
+
+A suite takes a few minutes and is worth capturing to a file. If your shell sets `noclobber` — zsh does under many dotfile setups — `> run.log` **refuses to overwrite an existing file** and the run never starts, while the previous run's log sits there looking like a fresh failure. Use `>|`, or delete the file first.
+
 `make manifests` also regenerates `charts/reactor/templates/crds.yaml` via `hack/sync-chart-crds.sh`. The CRD is a chart *template* deliberately: Helm installs a chart's `crds/` directory on first install only and never upgrades it, so every later schema change would ship silently broken. Don't hand-edit the chart's copy — the tests in `test/chart/` fail when it drifts from `config/crd/bases`, and they need `helm` on your PATH to run at all.
 
 ## Running against a cluster

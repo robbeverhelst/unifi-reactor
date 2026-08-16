@@ -35,6 +35,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -80,7 +81,8 @@ type Options struct {
 	Namespace string
 
 	// ManifestPath is the chart's own copy of the CRD, mounted alongside this
-	// hook, and its spec is applied in the same patch that takes ownership.
+	// hook. Its spec and its annotations — helm.sh/resource-policy: keep among
+	// them — are applied in the same patch that takes ownership.
 	//
 	// It has to be, and that is the part worth explaining. Helm checks
 	// ownership while it prepares the upgrade — before it runs a single hook —
@@ -158,41 +160,61 @@ func CRD(ctx context.Context, c client.Client, opts Options) error {
 }
 
 // adoptionPatch builds the single merge patch that takes ownership and, when
-// the chart's copy of the CRD was mounted, puts its schema live.
+// the chart's copy of the CRD was mounted, puts its schema and its annotations
+// live.
 //
 // One patch rather than two: either the CRD ends up owned by the release and
 // serving the schema that release ships, or nothing about it changed.
 func adoptionPatch(opts Options) ([]byte, error) {
-	metadata := map[string]any{
-		"labels": map[string]any{managedByLabel: managedByHelm},
-		"annotations": map[string]any{
-			releaseNameAnnotation:      opts.Release,
-			releaseNamespaceAnnotation: opts.Namespace,
-		},
-	}
-	patch := map[string]any{"metadata": metadata}
+	annotations := map[string]any{}
+	patch := map[string]any{"metadata": map[string]any{
+		"labels":      map[string]any{managedByLabel: managedByHelm},
+		"annotations": annotations,
+	}}
 
 	if opts.ManifestPath != "" {
-		spec, err := chartSpec(opts.ManifestPath, opts.Name)
+		document, err := chartDocument(opts.ManifestPath, opts.Name)
 		if err != nil {
 			return nil, err
 		}
 		// A merge patch replaces spec.versions wholesale — it is a list, and
 		// JSON merge semantics do not merge those — which is what makes this
 		// the same schema change a normal `helm upgrade` applies.
-		patch["spec"] = spec
+		patch["spec"] = document["spec"]
+		// The chart's annotations along with it, so an adopted CRD carries
+		// helm.sh/resource-policy: keep from the moment it is adopted rather
+		// than from the next upgrade, which is the first time Helm applies the
+		// template itself. Annotations merge, so anything else on the live
+		// object survives.
+		maps.Copy(annotations, chartAnnotations(document))
 	}
+
+	// Last, so ownership is never something the chart's own manifest could
+	// overwrite: it is the half of this patch that has to be exact.
+	annotations[releaseNameAnnotation] = opts.Release
+	annotations[releaseNamespaceAnnotation] = opts.Namespace
 	return json.Marshal(patch)
 }
 
-// chartSpec reads the CRD the chart would have applied and returns its spec.
+// chartAnnotations reads metadata.annotations off a decoded document, without
+// assuming either is present.
+func chartAnnotations(document map[string]any) map[string]any {
+	metadata, ok := document["metadata"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	annotations, _ := metadata["annotations"].(map[string]any)
+	return annotations
+}
+
+// chartDocument reads the CRD the chart would have applied and returns it.
 //
 // The file is the chart's own rendered template, so this is strict about what
 // it accepts: exactly one CustomResourceDefinition, carrying the name being
 // adopted. Anything else means the hook was handed a manifest for a different
 // object, and patching a CRD's schema from one of those is not a mistake worth
 // recovering from.
-func chartSpec(path, name string) (map[string]any, error) {
+func chartDocument(path, name string) (map[string]any, error) {
 	raw, err := os.ReadFile(path) // #nosec G304 -- the path is the chart's own mounted manifest
 	if err != nil {
 		return nil, fmt.Errorf("reading the chart's CRD at %s: %w", path, err)
@@ -220,11 +242,10 @@ func chartSpec(path, name string) (map[string]any, error) {
 		if found != nil {
 			return nil, fmt.Errorf("the chart's CRD at %s holds more than one document", path)
 		}
-		spec, ok := document["spec"].(map[string]any)
-		if !ok {
+		if _, ok := document["spec"].(map[string]any); !ok {
 			return nil, fmt.Errorf("the chart's CRD at %s has no spec", path)
 		}
-		found = spec
+		found = document
 	}
 	if found == nil {
 		return nil, fmt.Errorf("the chart's CRD at %s holds no CustomResourceDefinition", path)
