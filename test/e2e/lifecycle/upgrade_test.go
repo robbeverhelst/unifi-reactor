@@ -220,6 +220,25 @@ var _ = Describe("Upgrading from a chart that shipped the CRD under crds/", Orde
 		Expect(err).NotTo(HaveOccurred())
 		Expect(annotations).To(ContainSubstring(`"meta.helm.sh/release-name":"` + release + `"`))
 		Expect(annotations).To(ContainSubstring(`"meta.helm.sh/release-namespace":"` + namespace + `"`))
+
+		// #84: someone reading `helm get manifest` after this upgrade finds no
+		// CRD in it and reasonably concludes their deployment tool dropped one.
+		// It did not — the chart left it out, because Helm checks ownership
+		// before it runs the hook that establishes ownership. This is the one
+		// revision where the release does not carry the CRD, and it is pinned
+		// here so it stays deliberate rather than becoming a thing to rediscover.
+		By("with the CRD deliberately outside the release on this one revision")
+		manifest, err := cluster.Helm("get", "manifest", release, "--namespace", namespace)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(manifest).NotTo(ContainSubstring("kind: CustomResourceDefinition"),
+			"the adopting upgrade rendered the CRD, which Helm would have refused before the hook could run")
+
+		// And the keep policy live anyway, applied by the hook rather than by
+		// the template that is not part of this revision. Without it there is a
+		// window — this revision — where a Helm-owned CRD holding every
+		// Automation in the cluster carries nothing saying to leave it alone.
+		By("and the keep policy live regardless, because the hook carries it too")
+		Expect(annotations).To(ContainSubstring(`"helm.sh/resource-policy":"keep"`))
 	})
 
 	// A hook that succeeds takes its own permissions with it. The grant it
@@ -286,6 +305,51 @@ var _ = Describe("Upgrading from a chart that shipped the CRD under crds/", Orde
 		Expect(err).NotTo(HaveOccurred())
 		Expect(manifest).To(ContainSubstring("kind: CustomResourceDefinition"),
 			"the CRD never rejoined the release, so a later schema change would not reach the cluster")
+	})
+})
+
+// crds.adopt=false says "I will hand the CRD over myself". Until somebody does,
+// the CRD belongs to no release and Helm will not update it — so the upgrade
+// cannot proceed, and the only question is whether it says why. Helm's own
+// refusal names neither the value that turned adoption off nor the two commands
+// that finish the job, so the chart refuses first and names both.
+var _ = Describe("Declining to adopt a CRD that belongs to no release", Ordered, func() {
+	const namespace = "reactor-no-adopt"
+
+	BeforeAll(func() {
+		removeCRD()
+		_, _ = cluster.Kubectl("create", "namespace", namespace)
+
+		By("leaving the CRD as the crds/ packaging did: applied, owned by nobody")
+		Expect(cluster.Apply(legacyCRD)).To(Succeed())
+	})
+
+	AfterAll(func() {
+		_, _ = cluster.Helm("uninstall", release, "--namespace", namespace, "--ignore-not-found")
+		removeCRD()
+		_, _ = cluster.Kubectl("delete", "namespace", namespace, "--wait=false")
+	})
+
+	It("stops, naming the commands that finish the job", func() {
+		out, err := cluster.Helm("install", release, "charts/reactor", "--namespace", namespace,
+			set, "crds.adopt=false",
+			set, "image.repository="+managerRepository,
+			set, "image.tag="+managerTag,
+			set, "image.pullPolicy=Never",
+			"--timeout=180s")
+		Expect(err).To(HaveOccurred(),
+			"an install that can neither adopt the CRD nor update it reported success")
+		Expect(out).To(ContainSubstring("crds.adopt=false"),
+			"the failure does not say which value declined the adoption")
+		Expect(out).To(ContainSubstring("kubectl label crd " + crdName))
+		Expect(out).To(ContainSubstring("kubectl annotate crd " + crdName))
+	})
+
+	It("leaves the CRD untouched", func() {
+		labels, err := cluster.Kubectl("get", "crd", crdName, "-o", "jsonpath={.metadata.labels}")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(labels).NotTo(ContainSubstring("app.kubernetes.io/managed-by"),
+			"a refused install adopted the CRD anyway")
 	})
 })
 
