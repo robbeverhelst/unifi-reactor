@@ -15,6 +15,7 @@ description: "What the Ready and Applied conditions actually mean, every reason 
 
 | `ObservationStale` | The console has stopped answering at all, and the last state it gave is older than `unifi.maxObservationAge`. Everything is held and still acted on. | [§2a](/troubleshooting/state-keys/#2a-observationstale-and-how-old-a-decision-is-allowed-to-be) |
 | `ActionFailed` | An action returned an error. `status.lastExecution.reason` has the message. | [§5](/troubleshooting/rbac-and-crd/#5-rbac-refuses-a-cross-namespace-target), [§6](/troubleshooting/rbac-and-crd/#6-the-crd-invalid-ownership-metadata-or-a-stale-schema) |
+| `TemplateWillNotRender` | A notification message, an `http.request` body or a `homeAssistant.data` block reads something the template context cannot carry — usually a state key this Automation does not match on. The message names the field, the key and the fix. Targets are still acted on. | [§12a](/troubleshooting/actions-and-targets/#12a-templatewillnotrender) |
 
 `Applied` carries its own reasons, and two of them are not faults: `DeferredToOtherAutomation` is a peer's more restrictive claim winning, and `TargetManagedByHPA` is Reactor declining a target another controller drives — [§15](/troubleshooting/conflicts-and-drift/#15-reactor-and-a-horizontalpodautoscaler-want-the-same-deployment).
 
@@ -57,6 +58,7 @@ Each reason below links to the part of this guide that deals with it. The [Event
 | `ObservationStale` | Warning | the console has stopped answering and decisions are being taken against old state — [§2a](/troubleshooting/state-keys/#2a-observationstale-and-how-old-a-decision-is-allowed-to-be) |
 | `ActionFailed` | Warning | a desired-state action could not be applied — [§5](/troubleshooting/rbac-and-crd/#5-rbac-refuses-a-cross-namespace-target) |
 | `RetryBudgetExhausted` | Warning | Reactor stopped retrying and is waiting for the next state change |
+| `TemplateWillNotRender` | Warning | a template on this Automation can never render, so the action holding it would fail at send time — raised when the object is written, not on the transition it was written for — [§12a](/troubleshooting/actions-and-targets/#12a-templatewillnotrender) |
 | `EdgeActionFailed` / `EdgeActionSkipped` | Warning | an edge action did not happen — [§12](/troubleshooting/actions-and-targets/#12-an-edge-action-did-not-happen--or-happened-too-often) |
 | `ReleaseFailed` | Warning | deletion could not hand a target back and let the object go anyway — [§8](/troubleshooting/conflicts-and-drift/#8-a-workload-is-stuck-down-after-an-automation-was-deleted) |
 | `EventTriggerRemoved` | Warning | a leftover `spec.trigger` automation that does nothing; delete it |
