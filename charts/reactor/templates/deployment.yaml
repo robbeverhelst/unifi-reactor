@@ -158,6 +158,16 @@ spec:
             - name: UNIFI_ACTIONS_ALLOWED_POE_PORTS
               value: {{ join "," . | quote }}
             {{- end }}
+            {{- with .Values.unifi.actions.allowedOutlets }}
+            - name: UNIFI_ACTIONS_ALLOWED_OUTLETS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- if .Values.unifi.actions.allowBatteryBackedOutlets }}
+            # Consent for the battery-backed bank. Rendered only when it is on,
+            # and it allows nothing on its own: it qualifies allowedOutlets.
+            - name: UNIFI_ACTIONS_ALLOW_BATTERY_BACKED_OUTLETS
+              value: "true"
+            {{- end }}
             {{- with (include "reactor.consoleSecret" .) }}
             # UniFi OS local-account credentials. One pair, injected once,
             # whichever of the two features that write to the console is on:

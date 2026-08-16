@@ -125,7 +125,7 @@ disagree. The actions value wins when both are set, and setting both to
 different Secrets is a configuration mistake the chart cannot resolve for you.
 */}}
 {{- define "reactor.consoleSecret" -}}
-{{- if or .Values.unifi.actions.allowedWlans .Values.unifi.actions.allowedPoePorts -}}
+{{- if or .Values.unifi.actions.allowedWlans .Values.unifi.actions.allowedPoePorts .Values.unifi.actions.allowedOutlets -}}
 {{- .Values.unifi.actions.existingSecret -}}
 {{- else if and .Values.unifi.webhook.enabled .Values.unifi.webhook.registration.enabled -}}
 {{- .Values.unifi.webhook.registration.existingSecret -}}

@@ -191,9 +191,9 @@ func (r *AutomationReconciler) reportEdgeAction(
 // it, so "delivered" would read as if a message had gone out.
 //
 // A console action takes the object wording rather than the address wording:
-// it changes a named thing on the console — a wireless network — and its Result
-// names that thing, so "applied to unifi/wlan/Guest" reads the way "applied to
-// Deployment/media/sonarr" does.
+// it changes a named thing on the console — a wireless network, a switch port,
+// a UPS outlet — and its Result names that thing, so "applied to
+// unifi/wlan/Guest" reads the way "applied to Deployment/media/sonarr" does.
 func edgeVerbs(actionType string) (done, failed string) {
 	switch {
 	case isKubernetesAction(actionType), actions.IsConsole(actionType):

@@ -68,6 +68,11 @@ const (
 
 	envActionsAllowedWLANs    = "UNIFI_ACTIONS_ALLOWED_WLANS"
 	envActionsAllowedPoEPorts = "UNIFI_ACTIONS_ALLOWED_POE_PORTS"
+	envActionsAllowedOutlets  = "UNIFI_ACTIONS_ALLOWED_OUTLETS"
+	// envActionsAllowBatteryBacked is the second consent the battery-backed
+	// bank needs. On its own it allows nothing: it can only qualify outlets
+	// already listed.
+	envActionsAllowBatteryBacked = "UNIFI_ACTIONS_ALLOW_BATTERY_BACKED_OUTLETS"
 )
 
 // Config is the UniFi provider's install-level configuration. There is one
@@ -188,8 +193,10 @@ func ConfigFromEnv(lookup func(string) string) (Config, bool, error) {
 			Password:           lookup(envPassword),
 		},
 		Actions: ActionsConfig{
-			AllowedWLANs:    splitList(lookup(envActionsAllowedWLANs)),
-			AllowedPoEPorts: splitList(lookup(envActionsAllowedPoEPorts)),
+			AllowedWLANs:              splitList(lookup(envActionsAllowedWLANs)),
+			AllowedPoEPorts:           splitList(lookup(envActionsAllowedPoEPorts)),
+			AllowedOutlets:            splitList(lookup(envActionsAllowedOutlets)),
+			AllowBatteryBackedOutlets: lookup(envActionsAllowBatteryBacked) == envTrue,
 		},
 	}
 

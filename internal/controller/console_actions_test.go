@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,8 @@ const (
 	testWLANName  = "test-guest"
 	testSwitchMAC = "aa:bb:cc:00:11:33"
 	testPortName  = "test-ap"
+	testUPSMAC    = "aa:bb:cc:00:11:44"
+	testOutletNm  = "test-bench"
 )
 
 // recordingConsole stands in for a provider's console writer. What is being
@@ -161,6 +164,15 @@ var _ = Describe("Console actions", func() {
 
 	wlanAutomation := func(name, actionType string) *reactorv1alpha1.Automation {
 		return create(name, onBackup(wlan(actionType)))
+	}
+
+	outletAction := func(actionType string) reactorv1alpha1.Action {
+		return reactorv1alpha1.Action{
+			Type: actionType,
+			Outlet: &reactorv1alpha1.Outlet{
+				Device: testUPSMAC, Index: 5, Name: testOutletNm,
+			},
+		}
 	}
 
 	statusOf := func(name string) reactorv1alpha1.AutomationStatus {
@@ -362,11 +374,89 @@ var _ = Describe("Console actions", func() {
 			}))
 		})
 
+		It("rejects a unifi.outlet action with no outlet block", func() {
+			rejects("outlet-no-block", reactorv1alpha1.Action{Type: actions.TypeUniFiOutletCut})
+		})
+
+		It("rejects an outlet block on an action that is not a unifi.outlet one", func() {
+			rejects("outlet-wrong-type", reactorv1alpha1.Action{
+				Type:   actions.TypeUniFiPoECycle,
+				PoE:    &reactorv1alpha1.PoEPort{Device: testSwitchMAC, Port: 7, PortName: testPortName},
+				Outlet: &reactorv1alpha1.Outlet{Device: testUPSMAC, Index: 5, Name: testOutletNm},
+			})
+		})
+
+		// The identity rules for the action with the largest blast radius, and
+		// the one the API server can enforce that no other action needs: an
+		// outlet still carrying the console's own "Outlet N" is not named, and
+		// Reactor will not cut mains to a socket nobody has named.
+		It("rejects an outlet that is not identified the way it has to be", func() {
+			for name, outlet := range map[string]reactorv1alpha1.Outlet{
+				"a device name instead of a MAC": {Device: "test-ups", Index: 5, Name: testOutletNm},
+				"an uppercase MAC":               {Device: "AA:BB:CC:00:11:44", Index: 5, Name: testOutletNm},
+				"outlet zero":                    {Device: testUPSMAC, Index: 0, Name: testOutletNm},
+				"an index no chassis has":        {Device: testUPSMAC, Index: 999, Name: testOutletNm},
+				"no name at all":                 {Device: testUPSMAC, Index: 5},
+				"the console placeholder":        {Device: testUPSMAC, Index: 5, Name: "Outlet 5"},
+				"the placeholder, lowercase":     {Device: testUPSMAC, Index: 5, Name: "outlet 5"},
+				"the placeholder, hyphenated":    {Device: testUPSMAC, Index: 5, Name: "outlet-5"},
+				"the placeholder, padded":        {Device: testUPSMAC, Index: 5, Name: " Outlet 5 "},
+			} {
+				rejects("outlet-"+strings.ReplaceAll(name, " ", "-"),
+					reactorv1alpha1.Action{Type: actions.TypeUniFiOutletCut, Outlet: &outlet})
+			}
+		})
+
+		It("accepts a named outlet, and a name that merely starts with the word", func() {
+			for i, name := range []string{testOutletNm, "Outlet cupboard", "Outlet3"} {
+				create(fmt.Sprintf("outlet-named-%d", i), onBackup(reactorv1alpha1.Action{
+					Type:   actions.TypeUniFiOutletCut,
+					Outlet: &reactorv1alpha1.Outlet{Device: testUPSMAC, Index: 5, Name: name},
+				}))
+			}
+		})
+
+		It("accepts a cut on the way in and a restore on the way out", func() {
+			spec := onBackup(outletAction(actions.TypeUniFiOutletCut))
+			spec.OnExit = []reactorv1alpha1.Action{outletAction(actions.TypeUniFiOutletRestore)}
+			create("outlet-pair", spec)
+		})
+
 		It("accepts disable on the way in and enable on the way out", func() {
 			spec := onBackup(wlan(actions.TypeUniFiWLANDisable))
 			spec.OnExit = []reactorv1alpha1.Action{wlan(actions.TypeUniFiWLANEnable)}
 			create("wlan-pair", spec)
 		})
+	})
+
+	It("routes a unifi.outlet action to the console, and claims no target", func() {
+		create("outlet-cut", onBackup(outletAction(actions.TypeUniFiOutletCut)))
+
+		observe("outlet-cut", map[string]string{keyWAN: wanPrimary})
+		observe("outlet-cut", map[string]string{keyWAN: wanBackup})
+
+		applied := console.seen()
+		Expect(applied).To(HaveLen(1))
+		Expect(applied[0].Type).To(Equal(actions.TypeUniFiOutletCut))
+		Expect(applied[0].Outlet.Index).To(Equal(int32(5)))
+		Expect(outbound.requests()).To(BeEmpty())
+
+		// Nothing arbitrates a relay. There is nowhere to record what the outlet
+		// was before Reactor cut it that would outlive the Automation, and no
+		// credentialed path by which an uninstall could close it again — so it
+		// owns no target, and status says so rather than the docs alone.
+		Expect(statusOf("outlet-cut").Targets).To(BeEmpty())
+	})
+
+	It("writes nothing to the console under spec.dryRun", func() {
+		spec := onBackup(outletAction(actions.TypeUniFiOutletCut))
+		spec.DryRun = true
+		create("outlet-dry", spec)
+
+		observe("outlet-dry", map[string]string{keyWAN: wanPrimary})
+		observe("outlet-dry", map[string]string{keyWAN: wanBackup})
+
+		Expect(console.seen()).To(BeEmpty())
 	})
 
 	It("fires the onExit action on the way out", func() {

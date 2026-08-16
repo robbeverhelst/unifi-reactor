@@ -274,7 +274,7 @@ func TestGroupVerdictSaysWhichHypothesisHeld(t *testing.T) {
 		want        string
 	}{
 		{name: "one of four is the individually switchable answer", moved: 1, size: 4, want: "independently"},
-		{name: "four of four is the relay-group answer", moved: 4, size: 4, want: "switching unit"},
+		{name: "four of four is the relay-group answer", moved: 4, size: 4, want: "switches a whole bank"},
 		{name: "a group of one settles nothing", moved: 1, size: 1, want: "inconclusive"},
 	}
 	for _, tt := range tests {
@@ -375,7 +375,7 @@ func TestOutletChangeIsReportedWithItsRelayGroup(t *testing.T) {
 		{
 			name: "the whole bank",
 			off:  []int{5, 6, 7, 8},
-			want: []string{"outlet.8=on->off", "movedInGroup\"=4", "outletsInGroup\"=4", "switching unit"},
+			want: []string{"outlet.8=on->off", "movedInGroup\"=4", "outletsInGroup\"=4", "switches a whole bank"},
 		},
 	}
 	for _, tt := range tests {

@@ -59,6 +59,29 @@ const (
 	// takes three things that must agree rather than an index. See the PoEPort
 	// type in api/v1alpha1.
 	TypeUniFiPoECycle = "unifi.poe.cycle"
+	// TypeUniFiOutletCut and TypeUniFiOutletRestore open and close one switchable
+	// outlet on a UniFi UPS.
+	//
+	// They are verbs for the reason the WLAN pair is: an outlet's position is
+	// plainly a level in the world, and it is an occurrence here, because there
+	// is nowhere to record what it was before Reactor changed it that outlives
+	// the Automation, and no way for the pre-delete sweep to close a relay it has
+	// no credentials to write.
+	//
+	// The verbs are deliberately not enable/disable. This is not a disabling; it
+	// is a mains power cut, and the type is the first thing anyone reads in a
+	// diff. "restore" is the pair of "cut" and means only that the relay is
+	// closed again — it restores nothing that was recorded, because nothing was.
+	//
+	// It is the largest blast radius in this repository and the one where Reactor
+	// is least able to help. A switch reports which of its ports is the uplink,
+	// so unifi.poe.cycle can refuse that one absolutely; a UPS reports nothing
+	// at all about what is plugged into an outlet. The whole defence is that the
+	// operator allowlisted this outlet by MAC, index AND name, and that an outlet
+	// still carrying the console's "Outlet N" placeholder is refused outright.
+	// See the Outlet type in api/v1alpha1.
+	TypeUniFiOutletCut     = "unifi.outlet.cut"
+	TypeUniFiOutletRestore = "unifi.outlet.restore"
 )
 
 // IsConsole reports whether an action type writes to a provider's own console,
@@ -66,7 +89,8 @@ const (
 // outbound client.
 func IsConsole(actionType string) bool {
 	switch actionType {
-	case TypeUniFiWLANEnable, TypeUniFiWLANDisable, TypeUniFiPoECycle:
+	case TypeUniFiWLANEnable, TypeUniFiWLANDisable, TypeUniFiPoECycle,
+		TypeUniFiOutletCut, TypeUniFiOutletRestore:
 		return true
 	}
 	return false

@@ -200,6 +200,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -491,6 +492,16 @@ type mock struct {
 	noOutlets     bool
 	noRelayGroups bool
 
+	// The write half, added with #23. noOutletCaps and noOutletOverrides drop
+	// the two fields the write path needs — the first is the bank Reactor
+	// cannot guess at and refuses on, the second is the document it will not
+	// compose for itself — so both refusals can be driven from a request rather
+	// than argued about. outletWrites records every relay Reactor moved, the way
+	// cycles records every port it cut.
+	noOutletCaps      bool
+	noOutletOverrides bool
+	outletWrites      []string
+
 	// wlans is the wlanconf table the write actions read and change. Synthetic
 	// — see the package comment — and keyed by the id the mock made up.
 	wlans map[string]map[string]any
@@ -606,6 +617,7 @@ func main() {
 	mux.HandleFunc("GET /proxy/network/api/s/{site}/rest/wlanconf", m.serveWLANConf)
 	mux.HandleFunc("PUT /proxy/network/api/s/{site}/rest/wlanconf/{id}", m.updateWLANConf)
 	mux.HandleFunc("POST /proxy/network/api/s/{site}/cmd/devmgr", m.deviceCommand)
+	mux.HandleFunc("PUT /proxy/network/api/s/{site}/rest/device/{id}", m.updateDevice)
 	mux.HandleFunc("GET /wlan", m.describeWLANs)
 	mux.HandleFunc("POST /wlan", m.setWLAN)
 	mux.HandleFunc("GET /poe", m.describePoE)
@@ -1371,6 +1383,38 @@ const (
 	paramOutlet = "outlet"
 	paramGroup  = "group"
 	paramState  = "state"
+
+	// The vocabulary the outlet state key uses, rather than the true/false the
+	// API carries. Every place here that renders a relay position says it this
+	// way, so what the mock prints and what an Automation matches on are spelled
+	// the same.
+	outletOn  = "on"
+	outletOff = "off"
+
+	// The write half. These three are NOT in the committed capture — the
+	// capture's outlet projection keeps index, name, relay_state and
+	// relay_group and nothing else — so unlike the four above they are the
+	// mock stating a shape rather than replaying one.
+	//
+	// They are not invented either. All three were read off the real UPS on
+	// 2026-08-15, when a PUT to rest/device/<_id> carrying a modified
+	// outlet_overrides moved outlet 8 and left its relay-group siblings on.
+	// hack/capture-unifi.sh now carries them, so the next capture will have
+	// them and this comment can shrink.
+	fieldDeviceID        = "_id"
+	fieldOutletOverrides = "outlet_overrides"
+	fieldOutletCaps      = "outlet_caps"
+	fieldCycleEnabled    = "cycle_enabled"
+
+	// mockUPSID is the device address the outlet write PUTs to.
+	mockUPSID = "000000000000000000000042"
+
+	// The observed outlet_caps values: bits [0,2,3,16] on outlets 1-4 and
+	// [0,2,16] on outlets 5-8. The extra bit falls exactly where the hardware
+	// documents four battery-backed and four surge-only outlets, and it is what
+	// Reactor reads to decide whether an outlet needs the second consent.
+	outletCapsBatteryBacked = 1<<0 | 1<<2 | 1<<3 | 1<<16
+	outletCapsSurgeOnly     = 1<<0 | 1<<2 | 1<<16
 )
 
 // capturedOutlets is the outlet table exactly as captured, for a handler that
@@ -1428,6 +1472,19 @@ func (m *mock) rewriteOutlets(device map[string]any) {
 		delete(device, fieldOutletTable)
 		return
 	}
+	if len(table) == 0 {
+		// The captured gateway reports "outlet_table": [], and it must not pick
+		// up the UPS's address on the way past — a device carrying somebody
+		// else's _id is a mock that would let a misaddressed write land on the
+		// right hardware and look correct.
+		return
+	}
+	// The address the outlet write PUTs to. The capture carries no _id — the
+	// projection in hack/capture-unifi.sh never kept one — so the mock states
+	// it, and a UPS without one is a refusal Reactor makes on its own.
+	device[fieldDeviceID] = mockUPSID
+
+	overrides := make([]any, 0, len(table))
 	for _, entry := range table {
 		outlet, ok := entry.(map[string]any)
 		if !ok {
@@ -1443,9 +1500,35 @@ func (m *mock) rewriteOutlets(device map[string]any) {
 		if label := m.outletLabels[index]; label != "" {
 			outlet[fieldName] = label
 		}
+		// outlet_caps comes off the captured relay_group rather than off the
+		// index, because that is the correlation the hardware showed: the bank
+		// that keeps running on battery is the one the console also groups
+		// together. Dropping it is what makes Reactor refuse an outlet whose
+		// bank it cannot read, which is a floor rather than an allowlist miss.
+		if !m.noOutletCaps {
+			outlet[fieldOutletCaps] = outletCapsSurgeOnly
+			if group, grouped := outletGroup(outlet); grouped && group == 1 {
+				outlet[fieldOutletCaps] = outletCapsBatteryBacked
+			}
+		}
 		if m.noRelayGroups {
 			delete(outlet, fieldRelayGroup)
 		}
+
+		state, _ := outlet[fieldRelayState].(bool)
+		name, _ := outlet[fieldName].(string)
+		overrides = append(overrides, map[string]any{
+			fieldIndex: index, fieldName: name,
+			fieldRelayState: state, fieldCycleEnabled: false,
+		})
+	}
+	// outlet_overrides is a second table with the same outlets in it, which is
+	// how the real UPS reports them: the table is what the console observes and
+	// the overrides are what it accepts. Reactor reads the first and writes the
+	// second, so the mock has to serve both or it would be rehearsing a device
+	// that cannot be written to.
+	if !m.noOutletOverrides {
+		device[fieldOutletOverrides] = overrides
 	}
 }
 
@@ -1457,16 +1540,23 @@ func (m *mock) rewriteOutlets(device map[string]any) {
 //	?switching=group        make one outlet unable to move alone
 //	?outlet=5&label=nas     name an outlet, moving its key to outlet.nas
 //	?groups=false           an outlet reporting no relay_group at all
+//	?caps=false             an outlet whose bank Reactor cannot read
+//	?overrides=false        a ups with nothing for the write to modify
 //	?present=false          no outlet_table at all
 //	?reset=true             back to the capture
 //
-// switching is what makes both hypotheses reachable from the same request.
-// Nobody has confirmed whether a UniFi UPS switches an outlet or a bank, so
-// asking for outlet 5 has to be able to produce either reading: on its own with
-// switching=individual, and taking outlets 5-8 with it under switching=group.
-// A parser that only ever saw one of those would be a parser tested against a
-// guess. See issue #23, and hypothesis H1 on #60 for the experiment that
-// settles which of these two the mock is imitating.
+// switching rehearses the question #23 was deferred on, and it is kept now that
+// the hardware has answered it. On 2026-08-15 outlet 8 was set to false on a
+// real UPS and outlets 5, 6 and 7 stayed on, so switching=individual is what
+// this hardware does — but a parser that had only ever seen the answer it
+// expected would be a parser tested against one device, and switching=group is
+// still what proves the reader reports a bank moving together rather than
+// assuming it cannot happen.
+//
+// caps and overrides are the write path's two floors, driven from a request
+// rather than argued about: an outlet whose bank cannot be read is refused
+// whatever the allowlist says, and a UPS reporting no outlet_overrides gives
+// Reactor nothing to modify and it will not compose one.
 func (m *mock) setOutlets(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	m.mu.Lock()
@@ -1476,9 +1566,26 @@ func (m *mock) setOutlets(w http.ResponseWriter, r *http.Request) {
 		m.outletOpen = map[int]bool{}
 		m.outletLabels = map[int]string{}
 		m.outletGrouped, m.noOutlets, m.noRelayGroups = false, false, false
+		m.noOutletCaps, m.noOutletOverrides, m.outletWrites = false, false, nil
 		log.Print("outlets are back to the capture: all eight closed, unnamed, in two relay groups")
 		m.writeOutlets(w)
 		return
+	}
+	if raw := query.Get("caps"); raw != "" {
+		caps, err := strconv.ParseBool(raw)
+		if err != nil {
+			http.Error(w, "caps must be a boolean", http.StatusBadRequest)
+			return
+		}
+		m.noOutletCaps = !caps
+	}
+	if raw := query.Get("overrides"); raw != "" {
+		overrides, err := strconv.ParseBool(raw)
+		if err != nil {
+			http.Error(w, "overrides must be a boolean", http.StatusBadRequest)
+			return
+		}
+		m.noOutletOverrides = !overrides
 	}
 	if raw := query.Get(fieldPresent); raw != "" {
 		present, err := strconv.ParseBool(raw)
@@ -1637,9 +1744,9 @@ func (m *mock) applyOutletLabel(w http.ResponseWriter, query url.Values, outlets
 // rather than the true/false the API carries.
 func parseOutletState(w http.ResponseWriter, state string) (open bool, ok bool) {
 	switch state {
-	case "off":
+	case outletOff:
 		return true, true
-	case "on":
+	case outletOn:
 		return false, true
 	default:
 		http.Error(w, `state must be "on" or "off"`, http.StatusBadRequest)
@@ -1675,15 +1782,24 @@ func (m *mock) writeOutlets(w http.ResponseWriter) {
 		if label := m.outletLabels[index]; label != "" {
 			name = label
 		}
-		state := "on"
+		state := outletOn
 		if m.outletOpen[index] {
-			state = "off"
+			state = outletOff
 		}
 		entry := map[string]any{fieldIndex: index, fieldName: name, paramState: state}
 		if group, grouped := outletGroup(o); grouped && !m.noRelayGroups {
 			entry[fieldRelayGroup] = group
 			key := strconv.Itoa(group)
 			groups[key] = append(groups[key], "outlet."+strconv.Itoa(index))
+		}
+		if !m.noOutletCaps {
+			// Which bank this outlet is on, in the form the write path reads it.
+			// Reported because it is the one thing an operator has to know
+			// before allowlisting an outlet and cannot see in the UniFi UI.
+			entry["batteryBacked"] = false
+			if group, grouped := outletGroup(o); grouped && group == 1 {
+				entry["batteryBacked"] = true
+			}
 		}
 		outlets = append(outlets, entry)
 	}
@@ -1694,10 +1810,16 @@ func (m *mock) writeOutlets(w http.ResponseWriter) {
 		"outlets":     outlets,
 		"relayGroups": groups,
 		"switching":   m.switchingMode(),
-		keyNote: "the outlet table IS captured, unlike the PoE and thermal fields — but " +
-			"whether this UPS switches an outlet or a whole relay group is NOT known, and " +
-			"switching=group vs switching=individual is this mock imitating each guess. " +
-			"Reactor never writes an outlet; see issue #23 and hypothesis H1 on #60",
+		// Every relay Reactor moved through the write path, so "did it cut the
+		// right socket" is one request rather than a log search.
+		"writes":    m.outletWrites,
+		"caps":      !m.noOutletCaps,
+		"overrides": !m.noOutletOverrides,
+		keyNote: "the outlet table IS captured; _id, outlet_caps and outlet_overrides are NOT in the " +
+			"committed capture, and are what a real UPS reported on 2026-08-15 when a PUT to " +
+			"rest/device carrying a modified outlet_overrides moved outlet 8 and left 5, 6 and 7 on. " +
+			"A write recorded here means the console accepted it and now reports the new position — " +
+			"NOT that a relay opened. Nothing but something plugged in can tell you that. See #23",
 	})
 }
 
@@ -2314,6 +2436,160 @@ func (m *mock) deviceCommand(w http.ResponseWriter, r *http.Request) {
 	m.cycles = append(m.cycles, entry)
 	log.Printf("POWER-CYCLED %s (%d so far)", entry, len(m.cycles))
 	writeResponse(w, []any{})
+}
+
+// updateDevice is the enforcing half of the outlet path, and it is the
+// strictest handler here on purpose.
+//
+// It deliberately does NOT refuse a battery-backed outlet, or an outlet nobody
+// has named, or one that is not in Reactor's allowlist. The real console would
+// accept all three without complaint — it has no idea an allowlist exists — and
+// a mock that refused them would let Reactor's own guards rot untested. Those
+// are Reactor's to apply, because on real hardware nothing else will.
+//
+// What it does enforce is what a console genuinely would, plus the one thing a
+// console cannot: that the write is NARROW. The body must be exactly
+// outlet_overrides, the array must be the one just served, and exactly one
+// entry may differ, in relay_state alone. That is the check that catches the
+// change nobody would notice in review — a write that started composing the
+// overrides array rather than carrying back the one it read, which on this
+// hardware would state a position for all eight relays instead of one.
+func (m *mock) updateDevice(w http.ResponseWriter, r *http.Request) {
+	if !m.sessionCookiePresent(r) {
+		http.Error(w, `{"message":"api.err.LoginRequired"}`, http.StatusUnauthorized)
+		return
+	}
+	if r.Header.Get("x-csrf-token") != mockCSRF {
+		http.Error(w, `{"message":"csrf token mismatch"}`, http.StatusForbidden)
+		return
+	}
+	var submitted map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&submitted); err != nil {
+		http.Error(w, `{"message":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if r.PathValue("id") != mockUPSID {
+		http.Error(w, `{"message":"api.err.ObjectNotFound"}`, http.StatusNotFound)
+		return
+	}
+	if len(submitted) != 1 {
+		http.Error(w, fmt.Sprintf(
+			`{"message":"this mock only accepts a body of exactly outlet_overrides; got %d keys"}`,
+			len(submitted)), http.StatusBadRequest)
+		return
+	}
+	submittedOutlets, ok := submitted[fieldOutletOverrides].([]any)
+	if !ok {
+		http.Error(w, `{"message":"this mock only accepts outlet_overrides, as an array"}`,
+			http.StatusBadRequest)
+		return
+	}
+
+	moved, err := m.outletMoveIn(submittedOutlets)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"message":%q}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	m.outletOpen[moved.index] = !moved.on
+
+	entry := fmt.Sprintf("outlet %d (%s) -> %s", moved.index, moved.name, outletPosition(moved.on))
+	m.outletWrites = append(m.outletWrites, entry)
+	log.Printf("OUTLET SWITCHED: %s (%d write(s) so far). The relay position is what this mock now "+
+		"reports; whether a relay opened is not something a mock can tell you", entry, len(m.outletWrites))
+	writeResponse(w, []any{map[string]any{
+		fieldDeviceID: mockUPSID, fieldOutletOverrides: submittedOutlets,
+	}})
+}
+
+// outletMove is the one relay a submitted overrides array asks to move.
+type outletMove struct {
+	index int
+	name  string
+	on    bool
+}
+
+// outletMoveIn compares a submitted overrides array with the one the mock is
+// currently serving and returns the single change it makes, or says what is
+// wrong with it. Callers hold the lock.
+func (m *mock) outletMoveIn(submitted []any) (outletMove, error) {
+	served := m.servedOutletOverrides()
+	if len(submitted) != len(served) {
+		return outletMove{}, fmt.Errorf(
+			"outlet_overrides must be the array just read back, all %d outlets; got %d",
+			len(served), len(submitted))
+	}
+
+	var moves []outletMove
+	for _, entry := range submitted {
+		override, ok := entry.(map[string]any)
+		if !ok {
+			return outletMove{}, errors.New("every outlet_overrides entry must be an object")
+		}
+		index, known := outletIndex(override)
+		if !known {
+			return outletMove{}, errors.New("every outlet_overrides entry must carry an index")
+		}
+		stored, present := served[index]
+		if !present {
+			return outletMove{}, fmt.Errorf("outlet_overrides carries outlet %d, which this ups does "+
+				"not have", index)
+		}
+		changed := changedKeys(stored, override)
+		switch {
+		case len(changed) == 0:
+		case slices.Equal(changed, []string{fieldRelayState}):
+			on, _ := override[fieldRelayState].(bool)
+			name, _ := override[fieldName].(string)
+			moves = append(moves, outletMove{index: index, name: name, on: on})
+		default:
+			return outletMove{}, fmt.Errorf("outlet %d differs from the record just read in %v; this "+
+				"mock only accepts a change to %s", index, changed, fieldRelayState)
+		}
+	}
+
+	if len(moves) != 1 {
+		// Zero is a write that did not need making; more than one is the whole
+		// danger of this endpoint arriving in a single request.
+		return outletMove{}, fmt.Errorf(
+			"exactly one outlet may change per write; this body changes %d", len(moves))
+	}
+	return moves[0], nil
+}
+
+// servedOutletOverrides is the overrides array as the mock is currently serving
+// it, keyed by index. Callers hold the lock.
+func (m *mock) servedOutletOverrides() map[int]map[string]any {
+	served := map[int]map[string]any{}
+	for _, d := range m.devices() {
+		device, ok := d.(map[string]any)
+		if !ok || device[fieldDeviceID] != mockUPSID {
+			continue
+		}
+		entries, ok := device[fieldOutletOverrides].([]any)
+		if !ok {
+			continue
+		}
+		for _, entry := range entries {
+			override, ok := entry.(map[string]any)
+			if !ok {
+				continue
+			}
+			if index, known := outletIndex(override); known {
+				served[index] = override
+			}
+		}
+	}
+	return served
+}
+
+func outletPosition(on bool) string {
+	if on {
+		return outletOn
+	}
+	return outletOff
 }
 
 func (m *mock) hasPort(index int) bool {

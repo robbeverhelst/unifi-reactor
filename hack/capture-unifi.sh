@@ -28,6 +28,7 @@ api() {
 PUB_IP='203.0.113.10'   # TEST-NET-3
 GW_IP='203.0.113.1'
 MAC='aa:bb:cc:00:11:22'
+DEVICE_ID='000000000000000000000042'   # the outlet write PUTs to rest/device/<_id>
 
 # --- allowlists -------------------------------------------------------------
 # A WAN port: only what the uplink decision and the docs need.
@@ -46,6 +47,19 @@ WAN='{is_uplink, up, ifname, name, speed, ip: (if .ip then "'"$PUB_IP"'" else nu
 # is replaced: a port is usually named after the room or the person on the end
 # of it. The write path matches on that name, so what a fixture needs to carry
 # is the shape and the correlation with port_idx, not somebody's study.
+#
+# Outlet names are replaced with the console's own placeholder for exactly the
+# same reason, and it became load-bearing when outlets became switchable: an
+# outlet is named after whatever is plugged into it, and the outlet write
+# matches on that name. The placeholder is also what an unnamed outlet really
+# reports, so a fixture carrying it is not pretending — it is the state every
+# console starts in, and the one Reactor refuses to switch.
+#
+# outlet_caps and outlet_overrides are here because the write path reads the
+# first and modifies the second. Both were confirmed present on real hardware on
+# 2026-08-15; the fixture committed before that date predates this projection
+# and carries neither, which is why the write path is exercised against
+# hack/mock-unifi rather than against a capture.
 DEVICE='{
   model, type, name, state, adopted, version, displayable_version,
   disconnection_reason,
@@ -64,14 +78,25 @@ DEVICE='{
   last_wan_status,
   isp: (.active_geo_info.WAN.isp_name // null),
   vbms_table,
-  outlet_table: (if .outlet_table then [.outlet_table[] | {index, name, relay_state, relay_group}] else null end)
+  outlet_table: (if .outlet_table then [.outlet_table[] | {
+    index, relay_state, relay_group, outlet_caps,
+    name: ("Outlet " + (.index | tostring))
+  }] else null end),
+  outlet_overrides: (if .outlet_overrides then [.outlet_overrides[] | {
+    index, relay_state, cycle_enabled,
+    name: ("Outlet " + (.index | tostring))
+  }] else null end)
 } | with_entries(select(.value != null))'
 
 echo "capturing stat/device -> gateway + UPS"
 api stat/device > /tmp/cap-device.json
 jq '{meta: {rc: "ok"}, data: [.data[] | select(.model == "UDMPRO") | '"$DEVICE"']}' \
   /tmp/cap-device.json > "$OUT/stat-device-gateway.json"
-jq '{meta: {rc: "ok"}, data: [.data[] | select(.vbms_table != null) | '"$DEVICE"' | .mac = "'"$MAC"'"]}' \
+# The UPS gets a placeholder _id as well as a placeholder MAC: the outlet write
+# PUTs to rest/device/<_id>, so the fixture has to carry the shape of an address
+# without carrying a real one.
+jq '{meta: {rc: "ok"}, data: [.data[] | select(.vbms_table != null) | '"$DEVICE"'
+      | .mac = "'"$MAC"'" | ._id = "'"$DEVICE_ID"'"]}' \
   /tmp/cap-device.json > "$OUT/stat-device-ups.json"
 
 # A switch and an access point. Neither has ever been captured, and between them
