@@ -784,9 +784,9 @@ about torrents.
 
 ### UniFi console actions
 
-Shipped as `unifi.wlan.enable` / `unifi.wlan.disable` (#24) and
-`unifi.poe.cycle` (#25). They are the first actions that **write** to the
-console the provider observes, rather than to the cluster or to an address an
+Shipped as `unifi.wlan.enable` / `unifi.wlan.disable` (#24),
+`unifi.poe.cycle` (#25) and `unifi.outlet.cut` / `unifi.outlet.restore` (#23).
+They are the actions that **write** to the console the provider observes, rather than to the cluster or to an address an
 automation named, and three things about them are decisions rather than
 implementation.
 
@@ -804,14 +804,40 @@ transition never arrives is stated in the CRD doc, the README and the chart
 values rather than discovered. `unifi.poe.cycle` needs no argument at all: a
 cycle has no level.
 
+`unifi.outlet.*` landed in the same column for the same reason — a relay has no
+place to record its prior position that outlives the `Automation`, and closing
+one again needs the credentialed write the sweep cannot make. It is named `cut`
+and `restore` rather than `enable` and `disable` because it is not a disabling;
+it is a mains power cut, and the type is the first thing anybody reads in a
+diff.
+
 **The destination control is the console-side equivalent of
 `actions.allowedDestinations`.** `spec.actions` is writable by anyone who can
 create an `Automation` in their own namespace, so what may be changed on the
 console is decided by the operator at install time —
-`unifi.actions.allowedWlans` and `unifi.actions.allowedPoePorts`, both empty by
-default, both refusing everything, with no per-automation override. A PoE entry
-names a switch MAC *and* a port index, because an index alone means something
-different after somebody re-patches a rack.
+`unifi.actions.allowedWlans`, `unifi.actions.allowedPoePorts` and
+`unifi.actions.allowedOutlets`, all empty by default, all refusing everything,
+with no per-automation override. A PoE entry names a switch MAC *and* a port
+index, because an index alone means something different after somebody
+re-patches a rack.
+
+An outlet entry names a MAC, an index **and** the outlet's name — one part more,
+and the extra part is the whole of the argument. A switch reports which of its
+ports is its own uplink, so `unifi.poe.cycle` has one thing the hardware will
+tell it. A UPS reports nothing whatsoever about what is plugged into an outlet,
+so MAC-and-index would mean the operator agreed to *whatever is in outlet 5*,
+which after a re-plug is something else. Only the name is a thing rather than a
+position, which is also why an outlet still carrying the console's own
+`Outlet 5` placeholder is refused outright: naming it is the only moment anybody
+records what the socket feeds.
+
+The battery-backed bank takes a second, separate consent
+(`unifi.actions.allowBatteryBackedOutlets`), and it is a consent rather than a
+floor on purpose. Cutting a battery-backed outlet mid-outage is the most
+damaging thing configurable here — and it is also the only cut that extends
+runtime, since a surge-only outlet is already dark when the mains are. A floor
+would have made load-shedding, the thing the feature exists for, impossible. An
+outlet whose bank cannot be read *is* a floor, and is refused always.
 
 **Identity is checked before every write, and some refusals are floors.** A
 port is identified by MAC, index and name, all three confirmed against the

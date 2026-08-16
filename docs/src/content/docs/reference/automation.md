@@ -26,8 +26,8 @@ Types divide into two kinds. A desired-state action (kubernetes.scale,
 kubernetes.cronjob.suspend) declares a level and is arbitrated continuously
 across every Automation sharing its target. An edge action (kubernetes.restart,
 http.request, notification.*, homeassistant.service, qbittorrent.*,
-unifi.wlan.*, unifi.poe.cycle) expresses an occurrence: it fires on this Automation's own
-transitions, owns no target and arbitrates with nothing.
+unifi.wlan.*, unifi.poe.cycle, unifi.outlet.*) expresses an occurrence: it fires on this
+Automation's own transitions, owns no target and arbitrates with nothing.
 
 The dividing line is not "does this express a level" — pausing a torrent
 client plainly does. It is whether there is somewhere to record the value the
@@ -46,7 +46,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `type` _string_ | Type of the action, e.g. "kubernetes.scale". |  | Enum: [kubernetes.scale kubernetes.cronjob.suspend kubernetes.cordon kubernetes.restart http.request notification.ntfy notification.discord notification.slack homeassistant.service qbittorrent.pause qbittorrent.resume unifi.wlan.enable unifi.wlan.disable unifi.poe.cycle] <br /> |
+| `type` _string_ | Type of the action, e.g. "kubernetes.scale". |  | Enum: [kubernetes.scale kubernetes.cronjob.suspend kubernetes.cordon kubernetes.restart http.request notification.ntfy notification.discord notification.slack homeassistant.service qbittorrent.pause qbittorrent.resume unifi.wlan.enable unifi.wlan.disable unifi.poe.cycle unifi.outlet.cut unifi.outlet.restore] <br /> |
 | `target` _[TargetRef](#targetref)_ | Target of a kubernetes.* action. |  | Optional: \{\} <br /> |
 | `replicas` _integer_ | Replicas is the desired replica count for kubernetes.scale. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `suspended` _boolean_ | Suspended is whether kubernetes.cronjob.suspend wants the target CronJob<br />suspended. Omitting it means true, which is what the action is named<br />after; write suspended: false in spec.onExit to ask for it back.<br />Suspending stops new Jobs being created. It deliberately does nothing to<br />a Job already running: killing work in flight is a different and much<br />more dangerous action than declining to start more of it, and mid-flight<br />deletion is not something an outage should decide on your behalf. |  | Optional: \{\} <br /> |
@@ -57,6 +57,7 @@ _Appears in:_
 | `qbittorrent` _[QBittorrent](#qbittorrent)_ | QBittorrent is the instance a qbittorrent.* action acts on. |  | Optional: \{\} <br /> |
 | `wlan` _[WLAN](#wlan)_ | WLAN is the wireless network a unifi.wlan.* action acts on. |  | Optional: \{\} <br /> |
 | `poe` _[PoEPort](#poeport)_ | PoE is the switch port a unifi.poe.cycle power-cycles. |  | Optional: \{\} <br /> |
+| `outlet` _[Outlet](#outlet)_ | Outlet is the UPS outlet a unifi.outlet.* action switches. |  | Optional: \{\} <br /> |
 | `timeoutSeconds` _integer_ | TimeoutSeconds bounds a single attempt at this action, so an<br />unreachable target or endpoint cannot occupy a reconcile indefinitely.<br />Defaults to 30 for the kubernetes.* actions and for the unifi.* console<br />ones — which are a login, a check and a write rather than a single request<br />— and to 10 for the outbound ones, which may retry within the same<br />reconcile. Exceeding it is recorded as a failed execution, not held open. |  | Maximum: 600 <br />Minimum: 1 <br />Optional: \{\} <br /> |
 
 ## Automation
@@ -234,6 +235,76 @@ _Appears in:_
 | `secretRef` _[SecretReference](#secretreference)_ | SecretRef names a Secret in this Automation's namespace holding the<br />destination. Required keys: url. Optional: authorization, sent as the<br />Authorization header. |  |  |
 | `title` _string_ | Title of the notification, rendered as a Go text/template against the<br />transition. Transports without a title concept prepend it to the message. |  | MaxLength: 256 <br />Optional: \{\} <br /> |
 | `message` _string_ | Message body, rendered as a Go text/template against the transition.<br />Available fields are Automation, Namespace, Name, Provider, Matching,<br />Key, From, To, State and Time. See the README for the syntax. |  | MaxLength: 2048 <br />MinLength: 1 <br /> |
+
+## Outlet
+
+Outlet is the UPS outlet a unifi.outlet.cut or unifi.outlet.restore switches.
+
+This is the action with the largest blast radius in this repository. It opens
+or closes a mains relay, and what is on the other side of it is invisible to
+Reactor: a UPS outlet reports its index, its name and its switch position,
+and nothing whatsoever about what is plugged into it. That is the difference
+between this and unifi.poe.cycle, where the switch at least reports which
+port is its own uplink and Reactor can refuse that one absolutely. There is no
+equivalent here. Nothing stops an operator allowlisting the outlet carrying
+the gateway except knowing which one that is.
+
+So an outlet is identified by three things that must all agree with the UPS's
+own outlet table, checked immediately before the relay is written:
+
+  - device, the UPS's MAC. Not its name, which is a label somebody can change
+    without changing which hardware it is.
+  - index, the outlet's position on the chassis.
+  - name, what that outlet is called on the console.
+
+The third is required, and here it does more work than portName does for
+unifi.poe.cycle. These outlets ship called "Outlet 1" … "Outlet 8", which is
+the index spelled out rather than a name — the same reading the outlet.&lt;n>
+state key takes. An outlet still carrying that placeholder is REFUSED, at
+admission and again against the hardware: naming an outlet is how somebody
+says out loud what is plugged into it, and Reactor will not cut mains to a
+socket nobody has named. Once named, the name is checked against the console
+before the write, so re-plugging the rack becomes a refused action with a
+sentence rather than a power cut to something else.
+
+Two floors apply whatever the install allowlists, in the way the outbound
+dialer refuses loopback whatever the destination allowlist says. An outlet
+whose bank Reactor cannot determine is never switched — outlet_caps is what
+says whether an outlet is battery-backed, and a UPS that does not report it is
+refused rather than assumed safe. And a battery-backed outlet is never
+switched unless the install has said so in a second, separate value, because
+cutting one during a power cut is the most dangerous thing here and the least
+likely to be intended. See ActionsConfig in internal/providers/unifi.
+
+It is an edge action named as a verb, and the reason is the rule the WLAN type
+states: what makes a desired-state action possible is not the fold but that
+the target is a Kubernetes object, so the value it held before Reactor claimed
+it can be recorded as an annotation ON that object, outliving the Automation
+and readable by the pre-delete sweep. A UPS outlet has no such place, and
+releasing one would need a credentialed console write that the pre-delete
+sweep is designed to be incapable of. So the same two limitations follow, and
+on mains power they are louder than anywhere else:
+
+  - It is not arbitrated. Two Automations cutting the same outlet do not
+    resolve to one claim; whichever restores it first restores it.
+  - Nothing hands it back. If the exit transition never arrives — the
+    Automation is deleted, Reactor is uninstalled, the state key stops being
+    observable — the outlet stays open until a human closes it.
+
+One thing nobody has established: that writing the relay actually opens it.
+The write was accepted on real hardware and the console reported the new
+position back, but the outlet under test was empty. Until somebody plugs a
+lamp in and watches it go dark, this is a capability the operator believes
+they have.
+
+_Appears in:_
+- [Action](#action)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `device` _string_ | Device is the MAC address of the UPS, lowercase and colon-separated, e.g.<br />"aa:bb:cc:00:11:22". A MAC rather than a device name because a name is a<br />label: renaming the UPS would silently repoint this action. |  | Pattern: `^[0-9a-f]\{2\}(:[0-9a-f]\{2\})\{5\}$` <br /> |
+| `index` _integer_ | Index is the outlet's position on the chassis, as the console numbers it,<br />starting at 1. |  | Maximum: 64 <br />Minimum: 1 <br /> |
+| `name` _string_ | Name is what the outlet is called on the console, and it is checked before<br />anything is written. It is required, and "Outlet 3" is rejected rather than<br />accepted: that is the placeholder every outlet ships with, and it names a<br />position rather than a thing.<br />Name the outlet in UniFi after what is plugged into it. That name is what<br />makes an automation readable, it is what the outlet.&lt;n> state key is<br />addressed by once it exists, and it is the only defence this action has<br />against being pointed at the wrong socket — because the UPS does not report<br />what any outlet feeds.<br />The 32-character bound is not a guess about how long a name might be. A<br />CEL rule's cost is estimated from the longest string it can be handed, and<br />this one is charged against a budget the whole schema shares — at 128 it<br />took a fifth of it on its own. 32 is more than enough for a name that has<br />to be typed identically into a console, an allowlist and an automation. |  | MaxLength: 32 <br />MinLength: 1 <br /> |
 
 ## PoEPort
 

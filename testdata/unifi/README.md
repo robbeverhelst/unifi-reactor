@@ -425,7 +425,7 @@ Zero and negative both mean "no estimate" and publish no `ups.runtime` key: `bat
 
 UniFi also has a `network:ups_overload_detected` alarm trigger, which corroborates `ups.load` but is not read: nothing derives state from a delivery payload.
 
-## Outlets (`outlet_table`) — captured, and read-only on purpose
+## Outlets (`outlet_table`) — captured; the write fields are not, yet
 
 Every field the `outlet.<n>` keys need is in `api/stat-device-ups.json`, taken off a real console:
 
@@ -446,30 +446,53 @@ One more thing this capture settles, and it is easy to miss: the **gateway** rec
 `"outlet_table": []`. Having the field is not having outlets, so a device is the outlet-bearing one
 when it lists outlets, never when it merely mentions the field.
 
-> ⚠️ **`relay_group` is the reason there is no write path.** If the relay group is what the hardware
-> switches, then asking for outlet 3 to go off takes outlets 1–4 with it. The documented write path —
-> `outlet_overrides` via `PUT rest/device` — comes from the **USP-PDU-Pro and USP-Strip**, which
-> expose `outlet_caps`, `outlet_power`, `outlet_current` and `cycle_enabled` per outlet and have no
-> `relay_group` at all. This UPS exposes none of those and does have relay groups, so the documented
-> path is documented for a different device class and confirms nothing here. Switching is
-> [#23](https://github.com/robbeverhelst/unifi-reactor/issues/23).
+`relay_group` was the reason there was no write path for as long as there wasn't one. If the relay
+group had been what the hardware switches, then asking for outlet 3 to go off would have taken
+outlets 1–4 with it. It is not: on **2026-08-15** outlet 8 was set to `relay_state: false` on the
+real UPS through `outlet_overrides`, and outlets 5, 6 and 7 stayed on. `outlet_caps` decodes as bits
+`[0,2,3,16]` for outlets 1–4 and `[0,2,16]` for 5–8 — one extra capability on the first bank,
+exactly where the hardware documents four battery-backed and four surge-only outlets. `relay_group`
+partitions by capability, not by what switches together. Switching shipped as
+[#23](https://github.com/robbeverhelst/unifi-reactor/issues/23).
 
-The experiment that settles it needs no capture and no code — it needs the console. With Reactor
-running and this key published, toggle **one** outlet by hand in the UniFi UI, in a bank carrying
-nothing that matters, and read the line Reactor logs: `movedInGroup=1` of `4` means outlets switch
-individually, `4` of `4` means the relay group is the switching unit. That is hypothesis H1 on
-[#60](https://github.com/robbeverhelst/unifi-reactor/issues/60). While in the UI, **name the
-outlets** — the second half of the same visit, and what turns `outlet.3` into `outlet.nas`.
+> ⚠️ **Nothing established that the relay physically opens.** The outlet under test was empty, so
+> the only evidence is the console reporting back the value written to it. The lamp test — plug
+> something in, drive a transition, watch it go dark — is still open.
 
-`hack/mock-unifi`'s `/outlets` rehearses both answers (`switching=individual` and `switching=group`)
-so the parser is exercised against each. Unlike the WLAN table and the PoE switch there, this
-endpoint rewrites the real capture rather than inventing a shape.
+### Three fields the write path needs, and why they are not in the committed capture
 
-## What the write path has, which is nothing
+`_id`, `outlet_table[].outlet_caps` and `outlet_overrides` were all present on the real device and
+are all **absent from `api/stat-device-ups.json`**, because the projection in
+`hack/capture-unifi.sh` predates the write path and never kept them. That projection now carries all
+three, so the next capture will have them; nothing was hand-edited into the existing fixture to
+close the gap.
 
-`unifi.wlan.*` and `unifi.poe.cycle` write to the console, and **no capture backs any of it**. There
-is no `rest/wlanconf` response here and no switch record — every device capture above is a gateway
-or a UPS — so the fields those actions read are inferred rather than observed.
+| Field | Used by | If absent |
+| --- | --- | --- |
+| `_id` | the address `PUT rest/device/<_id>` goes to | refused |
+| `outlet_table[].outlet_caps` | telling a battery-backed outlet from a surge-only one | refused — a floor, whatever the allowlist says |
+| `outlet_overrides` | the array the write modifies | refused — Reactor will not compose one |
+
+Outlet **names** are projected to the console's own `Outlet <index>` placeholder, for the same
+reason port names are replaced by their index: an outlet is named after whatever is plugged into it,
+and the write path matches on that name. The placeholder is also what an unnamed outlet genuinely
+reports, so the fixture is not pretending — it is the state every console starts in, and the one
+Reactor refuses to switch.
+
+`hack/mock-unifi`'s `/outlets` rehearses both answers to the bank question (`switching=individual`
+and `switching=group`) so the parser is exercised against each, and serves the three fields above so
+the write path can be driven end to end. The outlet table it rewrites is the real capture; those
+three are labelled in the mock's own output as not being one.
+
+## What the write path has, which is almost nothing
+
+`unifi.wlan.*`, `unifi.poe.cycle` and `unifi.outlet.*` write to the console, and **almost no capture
+backs any of it**. There is no `rest/wlanconf` response here and no switch record — every device
+capture above is a gateway or a UPS — so the fields those two actions read are inferred rather than
+observed.
+
+The outlet action is the exception, and only partly: its fields *were* seen on real hardware, and
+none of them is in a committed fixture yet, for the reason given in the outlet section above.
 
 > Since the state batch, `hack/capture-unifi.sh` writes a `stat-device-switch.json` when a switch is
 > adopted, and its `port_table` projection carries the write path's three fields (`is_uplink`,
