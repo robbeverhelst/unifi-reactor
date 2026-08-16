@@ -313,7 +313,7 @@ Parsers are written against real captured responses, never against assumed forma
 
 For a new provider, add a `hack/capture-<provider>.sh` in the same shape as `hack/capture-unifi.sh`: fetch, project down to the allowlisted fields with `jq`, replace the few remaining identifying values with placeholders (documentation-range IPs, fixed dummy MACs and IDs), write into `testdata/<provider>/`. Supporting a new field in your parser means adding it to that allowlist deliberately, one at a time.
 
-**Extend the safety net.** `hack/verify-testdata.sh` runs as part of `make test` and rejects unredacted secret fields, routable IPs, and real MACs. Add your provider's secret-bearing field names to it. The script is the net; the capture script is the mechanism. Never hand-edit a captured response into "safe" — capture it again with the allowlist fixed.
+**Extend the safety net.** `hack/verify-testdata.sh` runs as part of `make test` and rejects unredacted secret fields, routable IPs, real MACs, and carrier fields that are not the placeholder. Add your provider's secret-bearing field names to it. The script is the net; the capture script is the mechanism. Never hand-edit a captured response into "safe" — capture it again with the allowlist fixed.
 
 **Write a `testdata/<provider>/README.md`** recording what hardware and what software version produced the captures, which fields each file documents, and which mappings are *inferred* rather than observed. The UniFi one flags that the `wan` mapping has never seen a real failover, and that honesty is worth more than the fixture.
 

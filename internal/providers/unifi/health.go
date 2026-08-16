@@ -63,9 +63,11 @@ type healthSubsystem struct {
 	// no counts is not a subsystem with zero APs, and zero adopted APs is a
 	// site with no WiFi rather than a site whose WiFi is fine.
 	//
-	// The capture carries all three — 2, 3 and 1 — and they are internally
-	// consistent: 2 connected plus 1 disconnected is the 3 that are adopted,
-	// which is what says NumAdopted is the denominator wifi should use.
+	// The capture carries all three — 3, 4 and 1 — and they are internally
+	// consistent: 3 connected plus 1 disconnected is the 4 that are adopted,
+	// which is what says NumAdopted is the denominator wifi should use. The
+	// counts are scaled onto a placeholder site by hack/capture-unifi.sh; that
+	// arithmetic is the part of them a capture is for.
 	NumAP           *int `json:"num_ap"`
 	NumAdopted      *int `json:"num_adopted"`
 	NumDisconnected *int `json:"num_disconnected"`

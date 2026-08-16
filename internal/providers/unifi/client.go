@@ -601,7 +601,7 @@ func ispFrom(d deviceRecord) string {
 }
 
 // slugify lowercases and collapses every run of non-alphanumeric characters
-// into a single hyphen, so "Telenet BV" becomes "telenet-bv".
+// into a single hyphen, so "Example Telecom NV" becomes "example-telecom-nv".
 func slugify(name string) string {
 	var b strings.Builder
 	b.Grow(len(name))

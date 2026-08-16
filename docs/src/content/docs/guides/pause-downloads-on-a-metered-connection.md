@@ -172,7 +172,7 @@ non-alphanumeric turned into a hyphen. Look yours up before matching on it:
 
 ```sh
 kubectl -n reactor-system logs deploy/reactor | grep 'key=isp'
-# INFO state transition provider=unifi key=isp from= to=telenet
+# INFO state transition provider=unifi key=isp from= to=example-telecom
 ```
 
 It is debounced at 2 samples, because a geolocation lookup on a freshly assigned

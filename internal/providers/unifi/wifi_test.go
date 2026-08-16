@@ -27,10 +27,15 @@ func counts(t *testing.T, health *healthResponse, adopted, disconnected, connect
 	wlan.NumAdopted, wlan.NumDisconnected, wlan.NumAP = &adopted, &disconnected, &connected
 }
 
-// The capture was taken with 3 APs adopted, 1 disconnected and 2 connected, and
-// the console calling the subsystem "warning". Both signals agree on that
-// reading, which is the whole reason the counts are trusted as the sharper of
-// the two rather than as a contradiction of it.
+// The capture carries 4 APs adopted, 1 disconnected and 3 connected, with the
+// console calling the subsystem "warning". Both signals agree on that reading,
+// which is the whole reason the counts are trusted as the sharper of the two
+// rather than as a contradiction of it.
+//
+// The numbers themselves are a placeholder site — hack/capture-unifi.sh scales
+// every count in a capture, because how many access points somebody owns is
+// not API shape. What survives the scaling is what this test is about: the
+// arithmetic, and that none/some/all still lands where it did.
 func TestWiFiAgainstTheCapture(t *testing.T) {
 	health := capturedHealth(t)
 	wlan := subsystem(t, &health, healthSubsystemWLAN)
@@ -38,10 +43,10 @@ func TestWiFiAgainstTheCapture(t *testing.T) {
 		t.Fatalf("the capture's wlan status is %q, expected %q — this test is written against it",
 			wlan.Status, healthStatusWarning)
 	}
-	if wlan.NumAdopted == nil || *wlan.NumAdopted != 3 ||
+	if wlan.NumAdopted == nil || *wlan.NumAdopted != 4 ||
 		wlan.NumDisconnected == nil || *wlan.NumDisconnected != 1 ||
-		wlan.NumAP == nil || *wlan.NumAP != 2 {
-		t.Fatalf("the capture's wlan counts are not the 3/1/2 this test is written against: %+v", wlan)
+		wlan.NumAP == nil || *wlan.NumAP != 3 {
+		t.Fatalf("the capture's wlan counts are not the 4/1/3 this test is written against: %+v", wlan)
 	}
 
 	before := disagreements(t, signalWiFiStatusDisagrees)

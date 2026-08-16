@@ -1019,7 +1019,7 @@ func (m *mock) rewriteUptimeStats(subsystem map[string]any) {
 }
 
 // rewriteWLAN applies the AP-count overrides, keeping num_ap consistent with
-// them: the capture has 2 connected alongside 3 adopted and 1 disconnected, and
+// them: the capture has 3 connected alongside 4 adopted and 1 disconnected, and
 // a mock that broke that arithmetic would be rehearsing a console nobody has.
 func (m *mock) rewriteWLAN(subsystem map[string]any) {
 	if m.apAdopted != nil {

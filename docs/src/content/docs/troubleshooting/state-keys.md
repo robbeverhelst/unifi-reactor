@@ -145,7 +145,7 @@ the `wlan` subsystem's AP counts rather than from its `status` string, so:
 | --- | --- |
 | `The wlan subsystem reports no AP counts` (debug) | `num_adopted` or `num_disconnected` is missing. Neither is read as zero, so the key is withheld |
 | `No access point is adopted` (debug) | Zero adopted APs — there is no WiFi here to be healthy. Not the same as `ok` |
-| `wifi: warning` you cannot explain | The debug line names the numbers: `wifi wifi=warning adopted=3 disconnected=1 connected=2`. One of your APs is out of contact — `devices` and the per-device keys say which |
+| `wifi: warning` you cannot explain | The debug line names the numbers: `wifi wifi=warning adopted=4 disconnected=1 connected=3`. One of your APs is out of contact — `devices` and the per-device keys say which |
 | `The console's own wlan status and the value derived from its AP counts disagree` | UniFi's own wording and the counts have parted company. The counts are what `wifi` reports. If this fires steadily, UniFi's `warning` means something the counts do not — worth reporting on [#9](https://github.com/robbeverhelst/unifi-reactor/issues/9) |
 
 The same granularity applies to the UPS keys. `ups.runtime` is published only

@@ -176,7 +176,7 @@ Each key is published only when the matching hardware is adopted by your control
 | --- | --- | --- |
 | `wan` | `primary`, `backup` | which uplink the gateway is currently using |
 | `wan.quality` | `good`, `degraded` | how well that uplink has been performing, against the configured thresholds |
-| `isp` | a slug, e.g. `telenet`, or `unknown` | the carrier behind the live uplink |
+| `isp` | a slug, e.g. `example-telecom`, or `unknown` | the carrier behind the live uplink |
 | `internet` | `ok`, `degraded`, `down` | whether the outside world is reachable at all |
 | `ups` | `online`, `on-battery` | whether a UniFi UPS is on mains or running on battery |
 | `ups.battery` | `normal`, `low`, `critical` | remaining charge against the configured thresholds |
@@ -194,7 +194,7 @@ Each key is published only when the matching hardware is adopted by your control
 
 ```sh
 kubectl -n reactor-system logs deploy/reactor | grep 'key=isp'
-# INFO state transition provider=unifi key=isp from= to=telenet
+# INFO state transition provider=unifi key=isp from= to=example-telecom
 ```
 
 A key that stops being reported is **held**, not treated as a condition that ended — losing sight of the hardware must not scale workloads back up mid-outage.
