@@ -70,16 +70,16 @@ What it does, so that nothing about it is a surprise:
 
 A CRD that belongs to a **different** Helm release is never adopted. That upgrade stops before it changes anything, naming the release that owns it — take it from there deliberately, or upgrade with `--set crds.install=false` and leave the CRD to whoever manages it.
 
-**Doing it by hand instead.** With `--set crds.adopt=false` the chart renders no hook, and the upgrade fails the way it used to:
+**Doing it by hand instead.** With `--set crds.adopt=false` the chart renders no hook — and stops the upgrade, because nothing is then left that could put the schema live and Helm will not update a CRD it does not own:
 
 ```text
-Error: UPGRADE FAILED: rendered manifests contain a resource that already
-exists. Unable to continue with update: CustomResourceDefinition
-"automations.reactor.robbeverhelst.com" ... invalid ownership metadata;
-label validation error: missing key "app.kubernetes.io/managed-by" ...
+Error: UPGRADE FAILED: execution error at (reactor/templates/crds.yaml:...):
+the CustomResourceDefinition automations.reactor.robbeverhelst.com belongs to
+no Helm release ... and crds.adopt=false turned off the hook that would have
+handed it over.
 ```
 
-The fix is the pair of commands the hook runs for you — use your own release name and namespace, then upgrade again:
+It stops before anything is applied, and repeats the pair of commands the hook runs for you — use your own release name and namespace, then upgrade again:
 
 ```sh
 kubectl label crd automations.reactor.robbeverhelst.com \
@@ -90,6 +90,32 @@ kubectl annotate crd automations.reactor.robbeverhelst.com \
 ```
 
 The same commands are the fallback if the hook itself fails — its logs say why, and adopting by hand needs no more than this. Once adopted, by either route, it never recurs.
+
+### `helm get manifest` shows no CRD after that upgrade
+
+Expected, on that one revision, and only that one. The CRD is live, owned by your release, and serving the schema the chart shipped — it simply is not part of the manifest Helm recorded for that revision.
+
+Helm checks whether it owns an object while it *prepares* an upgrade, before it runs a single hook. An upgrade that rendered a CRD nobody owns would therefore fail before the hook that establishes ownership could exist. So the chart leaves the CRD out of the release on the adopting upgrade, and the hook applies the schema in the same patch that takes ownership.
+
+That is why the two views disagree, and why both are right:
+
+```sh
+helm template reactor oci://ghcr.io/robbeverhelst/charts/reactor   # renders the CRD
+helm get manifest reactor -n reactor-system                        # does not
+```
+
+`helm template` has no cluster to look in, so it cannot tell the CRD is unowned and renders the ordinary case. The release was rendered against your cluster, where the CRD was unowned, so it rendered the adopting case.
+
+The next `helm upgrade` finds the CRD owned, carries it in the release like any other resource, and it stays there. Nothing is different about a release deployed through Pulumi, Argo CD or Flux — the decision is a `lookup` at render time, made by whichever Helm does the rendering.
+
+To check where you are:
+
+```sh
+kubectl get crd automations.reactor.robbeverhelst.com \
+  -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}{"\n"}'
+```
+
+A release name means the CRD is adopted and the next upgrade will carry it. Empty means adoption has not happened yet.
 
 ### A valid Automation is rejected, or a field is silently dropped
 

@@ -48,7 +48,15 @@ Those versions installed the CRD through `crds/`, which Helm applies without rec
 
 It is rendered only when there is something to adopt, so a fresh install and every later upgrade carry no Job and no cluster-scoped permission. A CRD belonging to a *different* release is never adopted: that upgrade stops, naming the release that owns it.
 
-Set `crds.adopt=false` to hand the CRD over yourself instead; [the troubleshooting guide](https://reactor.robbeverhelst.com/troubleshooting/rbac-and-crd/#upgrading-from-chart-030-or-earlier) has the two `kubectl` commands, which are also the fallback if the hook ever fails.
+Set `crds.adopt=false` to hand the CRD over yourself instead; [the troubleshooting guide](https://reactor.robbeverhelst.com/troubleshooting/rbac-and-crd/#upgrading-from-chart-030-or-earlier) has the two `kubectl` commands, which are also the fallback if the hook ever fails. Until somebody runs them the CRD still belongs to no release, so the upgrade stops there too — with the same two commands in the message.
+
+#### `helm get manifest` shows no CRD after that upgrade
+
+Expected, on that one revision, and only that one.
+
+Helm checks whether it owns an object while it *prepares* an upgrade, before it runs a single hook — so an upgrade that renders a CRD nobody owns fails before the hook that would establish ownership could exist. The chart therefore leaves the CRD out of the release on the adopting upgrade and lets the hook apply the schema instead. `helm get manifest` for that revision lists `serviceaccount.yaml`, `rbac.yaml` and `deployment.yaml` and no `CustomResourceDefinition`, while `helm template` — which has no cluster to look in, so it cannot tell the CRD is unowned — renders one. Both are correct.
+
+The next `helm upgrade` finds the CRD owned, renders it as an ordinary part of the release, and it stays there. Nothing has to be done to make that happen, and nothing is different about a release deployed through Pulumi, Argo CD or Flux: the decision is a `lookup` made at render time, by whichever Helm does the rendering.
 
 ### Managing the CRD outside the release
 
