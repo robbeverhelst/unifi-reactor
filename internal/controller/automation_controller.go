@@ -435,6 +435,12 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// console being unreachable must not be able to keep a claim alive.
 	inForce := automation.InForce()
 
+	// Decided from the spec alone, so it is known on the very first reconcile —
+	// before any state has been observed, and long before the transition the
+	// templates were written for. See reportBrokenTemplates for why it is a
+	// report rather than a refusal.
+	faults := templateFaults(&automation)
+
 	assessment := r.evaluate(&automation)
 	// Reported whatever happens below, including on the two held-state paths:
 	// the age of the state a decision was taken against is the thing every
@@ -442,8 +448,7 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// the paths that went well.
 	automation.Status.ObservedAt = observedAtOf(assessment)
 	if inForce && !assessment.known {
-		r.setCondition(&automation, conditionReady, metav1.ConditionFalse, "ProviderStateUnavailable",
-			fmt.Sprintf("no state observed yet for provider %q", automation.Spec.When.Provider))
+		r.reportUnobservedProvider(&automation, faults)
 		if err := r.updateStatus(ctx, &automation); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -457,13 +462,7 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// failure. Hold the current matching state instead and say so in status.
 	if inForce && len(assessment.missing) > 0 {
 		automation.Status.ObservedState = assessment.observed
-		r.eventOnNewReason(&automation, conditionReady, corev1.EventTypeWarning,
-			reasonStateKeyUnavailable, actionEvaluate,
-			"provider %q stopped reporting %s; holding the last known state rather than treating lost sight of it as the condition ending",
-			automation.Spec.When.Provider, strings.Join(assessment.missing, ", "))
-		r.setCondition(&automation, conditionReady, metav1.ConditionFalse, reasonStateKeyUnavailable,
-			fmt.Sprintf("provider %q is not reporting %s; holding last known state",
-				automation.Spec.When.Provider, strings.Join(assessment.missing, ", ")))
+		r.reportMissingStateKeys(&automation, assessment, faults)
 		if err := r.updateStatus(ctx, &automation); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -523,10 +522,10 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	r.reportTransition(&automation, matching != wasMatching, matching)
 
 	if inForce {
-		r.setReadyCondition(&automation, assessment)
+		r.setReadyCondition(&automation, assessment, faults)
 		r.setAppliedCondition(&automation, outcomes)
 	} else {
-		r.setOutOfForceConditions(&automation)
+		r.setOutOfForceConditions(&automation, faults)
 	}
 	if err := r.updateStatus(ctx, &automation); err != nil {
 		return ctrl.Result{}, err
@@ -734,6 +733,44 @@ func observedAtOf(assessment evaluation) *metav1.Time {
 	return &at
 }
 
+// reportUnobservedProvider says that nothing has been seen from this
+// Automation's provider yet, which on a fresh install is every Automation for
+// as long as the first poll takes.
+//
+// It is also the one Ready reason a newly written Automation is most likely to
+// be sitting on when somebody first reads its status, which is why the template
+// check gets to speak over it: an object that cannot render what it says it
+// sends is broken whether or not the provider has answered.
+func (r *AutomationReconciler) reportUnobservedProvider(
+	automation *reactorv1alpha1.Automation,
+	faults []string,
+) {
+	if r.reportBrokenTemplates(automation, faults) {
+		return
+	}
+	r.setCondition(automation, conditionReady, metav1.ConditionFalse, "ProviderStateUnavailable",
+		fmt.Sprintf("no state observed yet for provider %q", automation.Spec.When.Provider))
+}
+
+// reportMissingStateKeys says which keys the provider has stopped reporting and
+// that the last known matching state is being held rather than dropped.
+func (r *AutomationReconciler) reportMissingStateKeys(
+	automation *reactorv1alpha1.Automation,
+	assessment evaluation,
+	faults []string,
+) {
+	if r.reportBrokenTemplates(automation, faults) {
+		return
+	}
+	r.eventOnNewReason(automation, conditionReady, corev1.EventTypeWarning,
+		reasonStateKeyUnavailable, actionEvaluate,
+		"provider %q stopped reporting %s; holding the last known state rather than treating lost sight of it as the condition ending",
+		automation.Spec.When.Provider, strings.Join(assessment.missing, ", "))
+	r.setCondition(automation, conditionReady, metav1.ConditionFalse, reasonStateKeyUnavailable,
+		fmt.Sprintf("provider %q is not reporting %s; holding last known state",
+			automation.Spec.When.Provider, strings.Join(assessment.missing, ", ")))
+}
+
 // setReadyCondition reports whether this Automation is valid, reconciling, and
 // deciding against an observation recent enough to be worth deciding against.
 //
@@ -756,7 +793,11 @@ func observedAtOf(assessment evaluation) *metav1.Time {
 func (r *AutomationReconciler) setReadyCondition(
 	automation *reactorv1alpha1.Automation,
 	assessment evaluation,
+	faults []string,
 ) {
+	if r.reportBrokenTemplates(automation, faults) {
+		return
+	}
 	if !assessment.freshness.Stale {
 		r.setCondition(automation, conditionReady, metav1.ConditionTrue, "Reconciled",
 			"automation evaluated against observed state")
@@ -849,16 +890,29 @@ func (r *AutomationReconciler) setAppliedCondition(
 // anything — so they differ only in what they say about it. The reason is what
 // tells `kubectl describe` which of the two is the case, and it is the only
 // place that distinction is visible on the object.
-func (r *AutomationReconciler) setOutOfForceConditions(automation *reactorv1alpha1.Automation) {
+//
+// A template that can never render is the one thing here that is a fault, and
+// it is reported out of force as well as in it. A dry run is where somebody
+// asks what an Automation would do before letting it do anything, and "it would
+// fail to render the message" is the most useful answer that mode can give.
+func (r *AutomationReconciler) setOutOfForceConditions(
+	automation *reactorv1alpha1.Automation,
+	faults []string,
+) {
+	broken := r.reportBrokenTemplates(automation, faults)
 	if automation.Spec.DryRun {
-		r.setCondition(automation, conditionReady, metav1.ConditionTrue, reasonDryRun,
-			"spec.dryRun is true: state is observed and evaluated, and nothing is written")
+		if !broken {
+			r.setCondition(automation, conditionReady, metav1.ConditionTrue, reasonDryRun,
+				"spec.dryRun is true: state is observed and evaluated, and nothing is written")
+		}
 		r.setCondition(automation, conditionApplied, metav1.ConditionFalse, reasonDryRun,
 			"a dry run claims no target; status.targets[].preview reports what this would do in force")
 		return
 	}
-	r.setCondition(automation, conditionReady, metav1.ConditionTrue, reasonSuspended,
-		"spec.suspend is true: state is still observed, and no target is claimed")
+	if !broken {
+		r.setCondition(automation, conditionReady, metav1.ConditionTrue, reasonSuspended,
+			"spec.suspend is true: state is still observed, and no target is claimed")
+	}
 	r.setCondition(automation, conditionApplied, metav1.ConditionFalse, reasonSuspended,
 		"suspended, so this automation's targets are arbitrated as if it did not exist")
 }

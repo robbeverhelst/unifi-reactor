@@ -133,6 +133,11 @@ spec:
                             object; omitting it sends an empty one. Available fields are Automation,
                             Namespace, Name, Provider, Matching, Key, From, To, State and Time, and a
                             json function quotes a value safely for embedding. See the README.
+
+                            State carries the keys in spec.when.state and nothing else. A reference
+                            to any other key — or to a field the context does not have — is reported
+                            on the object as Ready=False with reason TemplateWillNotRender when it is
+                            reconciled, rather than failing when the action fires.
                           maxLength: 4096
                           type: string
                         domain:
@@ -199,6 +204,11 @@ spec:
                             Message body, rendered as a Go text/template against the transition.
                             Available fields are Automation, Namespace, Name, Provider, Matching,
                             Key, From, To, State and Time. See the README for the syntax.
+
+                            State carries the keys in spec.when.state and nothing else. A reference
+                            to any other key — or to a field the context does not have — is reported
+                            on the object as Ready=False with reason TemplateWillNotRender when it is
+                            reconciled, rather than failing when the action fires.
                           maxLength: 2048
                           minLength: 1
                           type: string
@@ -319,6 +329,11 @@ spec:
                             The body is the only part of the request state can reach, and it only
                             ever carries values this Automation already observes, to a destination
                             the operator allowed.
+
+                            State carries the keys in spec.when.state and nothing else. A reference
+                            to any other key — or to a field the context does not have — is reported
+                            on the object as Ready=False with reason TemplateWillNotRender when it is
+                            reconciled, rather than failing when the action fires.
                           maxLength: 4096
                           type: string
                         headers:
@@ -629,6 +644,11 @@ spec:
                             object; omitting it sends an empty one. Available fields are Automation,
                             Namespace, Name, Provider, Matching, Key, From, To, State and Time, and a
                             json function quotes a value safely for embedding. See the README.
+
+                            State carries the keys in spec.when.state and nothing else. A reference
+                            to any other key — or to a field the context does not have — is reported
+                            on the object as Ready=False with reason TemplateWillNotRender when it is
+                            reconciled, rather than failing when the action fires.
                           maxLength: 4096
                           type: string
                         domain:
@@ -695,6 +715,11 @@ spec:
                             Message body, rendered as a Go text/template against the transition.
                             Available fields are Automation, Namespace, Name, Provider, Matching,
                             Key, From, To, State and Time. See the README for the syntax.
+
+                            State carries the keys in spec.when.state and nothing else. A reference
+                            to any other key — or to a field the context does not have — is reported
+                            on the object as Ready=False with reason TemplateWillNotRender when it is
+                            reconciled, rather than failing when the action fires.
                           maxLength: 2048
                           minLength: 1
                           type: string
@@ -815,6 +840,11 @@ spec:
                             The body is the only part of the request state can reach, and it only
                             ever carries values this Automation already observes, to a destination
                             the operator allowed.
+
+                            State carries the keys in spec.when.state and nothing else. A reference
+                            to any other key — or to a field the context does not have — is reported
+                            on the object as Ready=False with reason TemplateWillNotRender when it is
+                            reconciled, rather than failing when the action fires.
                           maxLength: 4096
                           type: string
                         headers:
