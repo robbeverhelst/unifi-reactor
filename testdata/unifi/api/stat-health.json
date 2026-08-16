@@ -6,10 +6,10 @@
     {
       "subsystem": "wlan",
       "status": "warning",
-      "num_user": 9,
+      "num_user": 10,
       "num_guest": 0,
-      "num_ap": 2,
-      "num_adopted": 3,
+      "num_ap": 3,
+      "num_adopted": 4,
       "num_disconnected": 1,
       "num_pending": 0
     },
@@ -20,13 +20,13 @@
       "num_disconnected": 0,
       "num_pending": 0,
       "num_gw": 1,
-      "num_sta": 23,
+      "num_sta": 10,
       "wan_ip": "203.0.113.10",
       "gateways": [
         "203.0.113.1"
       ],
-      "isp_name": "Telenet",
-      "isp_organization": "Telenet BV",
+      "isp_name": "Example Telecom",
+      "isp_organization": "Example Telecom NV",
       "uptime_stats": {
         "WAN": {
           "alerting_monitors": [
@@ -130,7 +130,7 @@
     {
       "subsystem": "lan",
       "status": "ok",
-      "num_user": 14,
+      "num_user": 10,
       "num_guest": 0,
       "num_adopted": 4,
       "num_disconnected": 0,

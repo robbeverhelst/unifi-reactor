@@ -36,7 +36,7 @@ import (
 //   - error becomes derivable. No capture has ever shown any subsystem saying
 //     "error", so mapping it through would be inference; "every adopted AP is
 //     disconnected" is an observation, and it is what error means here.
-//   - The two agree in the only capture there is — status "warning" with 1 of 3
+//   - The two agree in the only capture there is — status "warning" with 1 of 4
 //     adopted APs disconnected — so this is a sharpening of the console's
 //     verdict rather than a disagreement with it.
 //
@@ -73,8 +73,8 @@ func wifiFrom(ctx context.Context, subsystem healthSubsystem) string {
 		wifi = wifiWarning
 	}
 
-	// num_ap is the count of APs actually connected: in the capture it is 2
-	// alongside 3 adopted and 1 disconnected, which is the arithmetic that says
+	// num_ap is the count of APs actually connected: in the capture it is 3
+	// alongside 4 adopted and 1 disconnected, which is the arithmetic that says
 	// num_adopted is the right denominator. It is logged rather than derived
 	// from, so that a firmware where it stops adding up is visible here first.
 	log.V(1).Info("wifi", "wifi", wifi, "adopted", *adopted, "disconnected", *disconnected,

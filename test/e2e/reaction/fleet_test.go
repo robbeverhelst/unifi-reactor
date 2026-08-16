@@ -73,11 +73,11 @@ var _ = Describe("Reacting to the fleet, firmware, thermals, WiFi and PoE", Orde
 
 	BeforeAll(func() {
 		resetConsole()
-		// The capture itself has one of three access points disconnected, so
+		// The capture itself has one of four access points disconnected, so
 		// the console's own baseline is wifi: warning. This block starts from a
 		// healthy one and breaks it deliberately, rather than beginning
 		// half-broken.
-		Expect(mock.WiFi("adopted=3&disconnected=0")).To(Succeed())
+		Expect(mock.WiFi("adopted=4&disconnected=0")).To(Succeed())
 		for _, policy := range policies {
 			Expect(cluster.Apply(workload(policy.target, baseline))).To(Succeed())
 			Expect(cluster.Apply(scaleAutomation(policy.name, policy.when, policy.target, 0))).To(Succeed())
@@ -95,7 +95,7 @@ var _ = Describe("Reacting to the fleet, firmware, thermals, WiFi and PoE", Orde
 	// instead of releasing it. That is the behaviour half this file exists to
 	// prove, and it would hang the teardown of the other half.
 	AfterAll(func() {
-		Expect(mock.WiFi("adopted=3&disconnected=0")).To(Succeed())
+		Expect(mock.WiFi("adopted=4&disconnected=0")).To(Succeed())
 		Expect(mock.Temperature("celsius=45")).To(Succeed())
 		Expect(mock.PoE("watts=12&budget=60&silent=false")).To(Succeed())
 		Expect(mock.Firmware("upgradable=false")).To(Succeed())
@@ -142,7 +142,7 @@ var _ = Describe("Reacting to the fleet, firmware, thermals, WiFi and PoE", Orde
 		}).Should(Succeed())
 	})
 
-	// The capture's own wlan subsystem is the first half of this: 1 of 3 adopted
+	// The capture's own wlan subsystem is the first half of this: 1 of 4 adopted
 	// access points disconnected, which is what a real console was reporting
 	// when it was captured.
 	//
@@ -151,7 +151,7 @@ var _ = Describe("Reacting to the fleet, firmware, thermals, WiFi and PoE", Orde
 	// `warning` stops matching at `error`, because those are different values of
 	// one key rather than steps of a ladder. Match the value you mean.
 	It("sheds while access points are missing, and reports all of them gone as a different value", func() {
-		By("restoring the capture: 1 of 3 access points disconnected")
+		By("restoring the capture: 1 of 4 access points disconnected")
 		Expect(mock.WiFi("reset=true")).To(Succeed())
 		Eventually(func(g Gomega) {
 			g.Expect(automationOf(g, wifiPolicy).Status.ObservedState).To(HaveKeyWithValue(keyWiFi, wifiWarning))
@@ -159,7 +159,7 @@ var _ = Describe("Reacting to the fleet, firmware, thermals, WiFi and PoE", Orde
 		}).Should(Succeed())
 
 		By("losing all of them, which is error rather than a worse warning")
-		Expect(mock.WiFi("adopted=3&disconnected=3")).To(Succeed())
+		Expect(mock.WiFi("adopted=4&disconnected=4")).To(Succeed())
 		Eventually(func(g Gomega) {
 			g.Expect(automationOf(g, wifiPolicy).Status.ObservedState).To(HaveKeyWithValue(keyWiFi, wifiError))
 			// An Automation matching `warning` no longer matches, so its claim

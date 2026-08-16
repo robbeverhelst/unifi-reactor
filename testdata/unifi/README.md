@@ -8,11 +8,28 @@ Real responses from a UDM Pro (UniFi Network **10.5.67**, gateway firmware 5.1.2
 UNIFI_URL=https://192.168.1.1 UNIFI_API_KEY=<key> ./hack/capture-unifi.sh
 ```
 
-That script is the policy. **It keeps an explicit allowlist of fields and discards everything else**, then replaces the few remaining sensitive values with placeholders (public IPs become TEST-NET-3, MACs and site IDs become fixed dummies). Adding a field to a parser means adding it to the allowlist, deliberately, one at a time.
+That script is the policy. **It keeps an explicit allowlist of fields and discards everything else**, then replaces the value of some of the fields it keeps with a placeholder. Adding a field to a parser means adding it to the allowlist, deliberately, one at a time — and filing it in one of the two tiers below while you are there.
 
 The allowlist matters more than it looks. `stat/device` returns entire device records — roughly 8 KB each, containing device management keys (`x_authkey`), syslog keys, adoption identifiers, and full topology tables. The parser needs about a dozen fields. An earlier version of these fixtures was produced by *removing* the sensitive fields someone thought of rather than *keeping* only the needed ones, and a live credential reached this repository's history as a result. Allowlist, not denylist.
 
-`hack/verify-testdata.sh` runs as part of `make test` and rejects unredacted secret fields, routable IPs outside documentation ranges, and MACs outside the placeholder prefix. It is the safety net, not the mechanism.
+### The two tiers
+
+Surviving the allowlist is not one decision but two, and until [#94](https://github.com/robbeverhelst/unifi-reactor/issues/94) the second one was never written down. Every field that reaches a fixture is in exactly one of these:
+
+1. **Kept as captured** — the value *is* API shape. Subsystem names, statuses, firmware versions, relay states, battery telemetry. A reader learns something about UniFi from it and nothing about whose console it is.
+2. **Kept in shape, value replaced** — the field is API shape, but its value describes this particular household. Public IPs (TEST-NET-3), MACs and device `_id`s (fixed dummies), device, port and outlet names, the carrier, and every client and device count.
+
+Tier 2 is not "the sensitive fields": none of it is a credential. It is *the fields whose value is about the owner rather than about the API*, and that is the distinction which is easy to lose. `isp_name` and `isp_organization` sat in tier 1 through two releases carrying a real carrier, because being read by a parser is what puts a field in the allowlist and was mistaken for what keeps its value. Being read earns a field its place; it does not earn its value one.
+
+The counts are tier 2 for the same reason. `num_user`, `num_sta`, `num_ap`, `num_adopted` and the rest are an inventory — how many people are here and what they own — and only three of them are read by anything, as none/some/all rather than as numbers. So the script scales every count onto one placeholder site, keeping everything a parser can see: an absent count stays absent, a zero stays zero, and `num_ap + num_disconnected` still equals `num_adopted`.
+
+`hack/verify-testdata.sh` runs as part of `make test` and rejects unredacted secret fields, routable IPs outside documentation ranges, MACs outside the placeholder prefix, and carrier fields that are not the placeholder. It is the safety net, not the mechanism.
+
+That last check is required-to-equal rather than forbidden-to-be, and the direction is the whole of its value. A list of carrier names never to publish would have to hold the real one as a literal, in a public file, which is the thing being removed rather than a guard against it — and it would only ever catch the carriers somebody thought to add. Requiring `isp`, `isp_name` and `isp_organization` to equal what `hack/capture-unifi.sh` writes catches *every* carrier from every future capture and names none of them. It is also how the MAC guard already reasons: the rule there is "inside the `aa:bb:cc` prefix", not "not one of these MACs".
+
+The placeholders are read out of the capture script, so the value a capture writes and the value the guard requires cannot drift apart.
+
+The counts are deliberately unguarded. There is no positive rule to write — every small integer is a plausible count — and enumerating forbidden ones would be the same inverted mistake. The capture script scaling them is the whole of the fix there.
 
 ## Files
 
@@ -34,7 +51,7 @@ Captured with WAN1 (ethernet) active and WAN2 (SFP+) enabled but down. Four fiel
 | --- | --- | --- |
 | `wan1.is_uplink` / `wan2.is_uplink` | `true` / `false` | derives `wan: primary \| backup`. **The signal of record**, and the unverified one |
 | `uplink.name` | `eth8`, matching `wan1.ifname` | independent second opinion, matched against each port's `ifname`. Used when `is_uplink` names no single live port; otherwise only to report disagreement |
-| `isp` | `Telenet` | published as the `isp` state key, slugified. Compared with `wan` across observations: if one moves and the other does not, that is logged |
+| `isp` | `Example Telecom` — a placeholder, see [below](#the-two-tiers) | published as the `isp` state key, slugified. Compared with `wan` across observations: if one moves and the other does not, that is logged |
 | `last_wan_status` | `{"WAN": "online"}` | never derived from — only `online` has ever been seen, so the failed value is unknown. Used only to notice the live uplink not calling itself online |
 
 > ⚠️ **The mapping is inferred, not observed.** No real failover has been captured, so which of these fields actually moves during one is unconfirmed — including whether `is_uplink` means "is carrying traffic" or "is configured as the uplink". See issue #34, and the runbook below for how to settle it.
@@ -105,14 +122,14 @@ The third key from this capture, and the only one in the `device.<name>`/
 
 | Field | In the capture | What the provider does with it |
 | --- | --- | --- |
-| `num_adopted` | `3` | the denominator: how many APs this site owns |
+| `num_adopted` | `4` | the denominator: how many APs this site owns |
 | `num_disconnected` | `1` | some → `warning`, all → `error`, none → `ok` |
-| `num_ap` | `2` | never derived from — logged, because `2 + 1 = 3` is the arithmetic that says `num_adopted` is the right denominator |
+| `num_ap` | `3` | never derived from — logged, because `3 + 1 = 4` is the arithmetic that says `num_adopted` is the right denominator |
 | `status` | `warning` | never derived from either. Cross-checked against the counts, and a mismatch is counted as `wifi-status-disagrees` |
 
 `wifi` comes from the counts rather than from `status`, and issue
 [#9](https://github.com/robbeverhelst/unifi-reactor/issues/9) asked for that to be
-documented rather than left mysterious. The counts can be explained — "1 of 3
+documented rather than left mysterious. The counts can be explained — "1 of 4
 access points is disconnected" — and they make `error` *derivable*, where mapping
 the vendor string through would have been inference: no capture has ever shown
 any subsystem saying `error`, on any subsystem. Here the two agree exactly, which

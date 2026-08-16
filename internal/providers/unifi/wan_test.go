@@ -46,8 +46,11 @@ import (
 const (
 	gatewayCapture = "stat-device-gateway.json"
 
-	// capturedISP is the carrier in the committed capture, and its slug.
-	capturedISP = "telenet"
+	// capturedISP is the slug of the carrier in the committed capture. The
+	// capture carries a placeholder name rather than the console's real one —
+	// the isp key is a real feature, so a fixture has to carry *a* carrier, and
+	// never had to carry the true one. See hack/capture-unifi.sh.
+	capturedISP = "example-telecom"
 
 	// backupCarrier is an obviously synthetic ISP name. The real backup carrier
 	// is unknown — the 5G uplink has never carried traffic — so inventing a
@@ -358,13 +361,13 @@ func TestAnUnknownCarrierIsNotACarrierChange(t *testing.T) {
 
 func TestISPNormalization(t *testing.T) {
 	for input, want := range map[string]string{
-		"Telenet":            capturedISP,
-		"Telenet BV":         "telenet-bv",
+		"Example Telecom":    capturedISP,
+		"Example Telecom NV": "example-telecom-nv",
 		"  Proximus  NV  ":   "proximus-nv",
 		"AT&T":               "at-t",
 		"Orange (Belgium)":   "orange-belgium",
 		"KPN B.V.":           "kpn-b-v",
-		"telenet":            "telenet",
+		"example telecom":    capturedISP,
 		"3 Ireland":          "3-ireland",
 		"":                   "",
 		"!!!":                "",

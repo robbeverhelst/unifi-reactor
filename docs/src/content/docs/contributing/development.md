@@ -256,7 +256,7 @@ The script **keeps an explicit allowlist of fields and discards everything else*
 
 This is allowlist rather than denylist for a reason: `stat/device` returns whole device records containing management keys, syslog keys, and adoption identifiers, and the parser needs a dozen fields out of hundreds. An earlier version of these fixtures stripped the sensitive fields someone thought of instead of keeping only the needed ones, and a live credential reached this repository's history as a result.
 
-`make test` runs `hack/verify-testdata.sh`, which rejects unredacted secret fields, routable IPs, and real MACs. That is the safety net; the capture script is the mechanism.
+`make test` runs `hack/verify-testdata.sh`, which rejects unredacted secret fields, routable IPs, real MACs, and carrier fields that are not the placeholder. That is the safety net; the capture script is the mechanism.
 
 `hack/webhook-logger.mjs` dumps incoming webhook deliveries verbatim to `testdata/unifi/webhooks/raw/` (gitignored) when capturing from a real Alarm Manager. Apply the same allowlist discipline before committing any of it.
 

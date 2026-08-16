@@ -290,7 +290,7 @@ var consoleAtRest = map[string]string{
 	keyUPSLoad:    upsLoadNormal,
 	keyInternet:   internetOK,
 	keyDevices:    devicesAllOnline,
-	// warning, not ok: the capture has one of three access points
+	// warning, not ok: the capture has one of four access points
 	// disconnected, so a console put back to it is half-broken by construction.
 	// The fleet specs start by fixing that; a reset does not.
 	keyWiFi:   wifiWarning,

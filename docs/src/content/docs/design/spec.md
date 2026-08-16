@@ -38,7 +38,7 @@ A homelab often needs to react to those events.
 For example:
 
 ```text
-Telenet WAN fails
+Primary WAN fails
         ↓
 UDM switches to U5G backup
         ↓
@@ -51,7 +51,7 @@ large downloads stop
 backup jobs stop
 bandwidth-heavy workloads scale down
         ↓
-Telenet returns
+primary WAN returns
         ↓
 Reactor receives recovery event
         ↓

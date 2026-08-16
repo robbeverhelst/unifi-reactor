@@ -95,7 +95,7 @@ func TestObserveAgainstCapturedGatewayAndUPS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Observe: %v", err)
 	}
-	// The captures were taken with WAN1 active, Telenet as the carrier, the
+	// The captures were taken with WAN1 active, a placeholder carrier, the
 	// UPS on mains at 97%, the www subsystem reporting ok, and WAN1 at 100%
 	// availability and 16 ms average latency.
 	for key, want := range map[string]string{

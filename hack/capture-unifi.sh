@@ -24,11 +24,42 @@ api() {
   curl -sk --fail -m 20 -H "X-API-KEY: $UNIFI_API_KEY" "$UNIFI_URL/proxy/network/api/s/$SITE/$1"
 }
 
-# Placeholders. Real values never reach disk.
+# --- the two tiers ----------------------------------------------------------
+# Everything that survives the allowlist below is in exactly one of two tiers,
+# and adding a field means filing it in one of them on purpose:
+#
+#   1. kept as captured — the value is API shape. Subsystem names, statuses,
+#      firmware versions, relay states, battery telemetry. A reader learns
+#      something about UniFi from it and nothing about whose console it is.
+#   2. kept in shape, value replaced — the field is API shape but its value
+#      describes this particular household. Public IPs, MACs, device _ids,
+#      device and port and outlet names, the carrier, and the counts.
+#
+# Tier 2 is not "the sensitive fields": none of it is a credential. It is "the
+# fields whose value is about the owner rather than about the API". isp_name
+# and isp_organization sat in tier 1 through two releases because nobody put
+# that question to them — they are real fields a parser reads, so being in the
+# allowlist at all looked like the deliberate decision. See #94. Being read is
+# what earns a field a place here; it is not what earns its value one.
+
+# Tier 2 placeholders. Real values never reach disk.
 PUB_IP='203.0.113.10'   # TEST-NET-3
 GW_IP='203.0.113.1'
 MAC='aa:bb:cc:00:11:22'
 DEVICE_ID='000000000000000000000042'   # the outlet write PUTs to rest/device/<_id>
+# Two words, so a fixture still exercises the slugifier's space rule, and
+# unmistakably not a carrier anybody buys service from.
+ISP='Example Telecom'
+ISP_ORG='Example Telecom NV'
+# One placeholder site for every count. A stat/health response counts the
+# household — the people, their phones, the access points on their walls — and
+# none of that is API shape. Only three counts are read by anything
+# (num_adopted, num_disconnected and num_ap on the wlan subsystem) and they are
+# read as none/some/all rather than as numbers, so scaling every count onto
+# this site costs no fidelity and keeps num_ap + num_disconnected == num_adopted.
+CLIENTS=10    # any non-zero number of clients or stations
+DEVICES=4     # adopted devices, and adopted access points
+GATEWAYS=1    # a site has one gateway: that is shape, not inventory
 
 # --- allowlists -------------------------------------------------------------
 # A WAN port: only what the uplink decision and the docs need.
@@ -55,6 +86,10 @@ WAN='{is_uplink, up, ifname, name, speed, ip: (if .ip then "'"$PUB_IP"'" else nu
 # reports, so a fixture carrying it is not pretending — it is the state every
 # console starts in, and the one Reactor refuses to switch.
 #
+# The carrier is replaced for the reason the public IP is. `isp` is a real
+# state key, so a fixture has to carry *a* carrier — it never had to carry the
+# true one, and the true one says which company bills this address.
+#
 # outlet_caps and outlet_overrides are here because the write path reads the
 # first and modifies the second. Both were confirmed present on real hardware on
 # 2026-08-15; the fixture committed before that date predates this projection
@@ -76,7 +111,7 @@ DEVICE='{
   wan2: (if .wan2 then (.wan2 | '"$WAN"') else null end),
   uplink: (if .uplink then {name: .uplink.name, type: .uplink.type} else null end),
   last_wan_status,
-  isp: (.active_geo_info.WAN.isp_name // null),
+  isp: (if .active_geo_info.WAN.isp_name then "'"$ISP"'" else null end),
   vbms_table,
   outlet_table: (if .outlet_table then [.outlet_table[] | {
     index, relay_state, relay_group, outlet_caps,
@@ -129,12 +164,36 @@ for pair in "switch:/tmp/cap-switch.json" "ap:/tmp/cap-ap.json"; do
   echo "  wrote stat-device-$kind.json"
 done
 
+# Every count here is scaled onto the placeholder site declared above. An
+# absent count stays absent and a zero stays zero — the parsers branch on both,
+# and "no guests" and "no access points adopted" are shapes rather than numbers
+# — while the AP triple keeps the only relation anything reads out of it:
+# whether none, some, or all of the adopted access points are disconnected.
 echo "capturing stat/health"
-api stat/health | jq '{meta: {rc: "ok"}, data: [.data[] | {
-  subsystem, status, num_user, num_guest, num_ap, num_adopted, num_disconnected, num_pending, num_gw, num_sta,
+api stat/health | jq '
+def scaled(n): if . == null then null elif . == 0 then 0 else n end;
+{meta: {rc: "ok"}, data: [.data[]
+  | . as $s
+  # The wan subsystem counts gateways; the others count devices and access
+  # points. Two placeholders, so num_adopted and num_gw cannot contradict.
+  | (if $s.subsystem == "wan" then '"$GATEWAYS"' else '"$DEVICES"' end) as $adopted
+  | (if ($s.num_disconnected // 0) == 0 then 0
+     elif ($s.num_disconnected // 0) >= ($s.num_adopted // 0) then $adopted
+     else 1 end) as $down
+  | {
+  subsystem, status,
+  num_user: (.num_user | scaled('"$CLIENTS"')),
+  num_guest: (.num_guest | scaled('"$CLIENTS"')),
+  num_ap: (if .num_ap == null then null else $adopted - $down end),
+  num_adopted: (.num_adopted | scaled($adopted)),
+  num_disconnected: (if .num_disconnected == null then null else $down end),
+  num_pending: (.num_pending | scaled(1)),
+  num_gw: (.num_gw | scaled('"$GATEWAYS"')),
+  num_sta: (.num_sta | scaled('"$CLIENTS"')),
   wan_ip: (if .wan_ip then "'"$PUB_IP"'" else null end),
   gateways: (if .gateways then ["'"$GW_IP"'"] else null end),
-  isp_name, isp_organization,
+  isp_name: (if .isp_name then "'"$ISP"'" else null end),
+  isp_organization: (if .isp_organization then "'"$ISP_ORG"'" else null end),
   uptime_stats
 } | with_entries(select(.value != null))]}' > "$OUT/stat-health.json"
 

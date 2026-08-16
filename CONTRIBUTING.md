@@ -56,7 +56,7 @@ So, concretely:
 
 - **Never paste a raw API response into a test, a fixture, or an issue.** Not "just this once", not with a couple of fields blanked out.
 - **Never hand-edit a committed capture** to look sanitized. Fix the allowlist and capture again.
-- `hack/verify-testdata.sh` runs as part of `make test` and rejects unredacted secret fields, routable IPs, and real MACs. It is the safety net, not the mechanism — passing it is not evidence that a hand-made fixture is safe.
+- `hack/verify-testdata.sh` runs as part of `make test` and rejects unredacted secret fields, routable IPs, real MACs, and carrier fields that are not the placeholder. It is the safety net, not the mechanism — passing it is not evidence that a hand-made fixture is safe.
 - Webhook captures follow the same discipline. `hack/webhook-logger.mjs` writes deliveries verbatim to a gitignored directory; allowlist them before committing anything.
 
 [`testdata/unifi/README.md`](testdata/unifi/README.md) documents what each fixture contains and which mappings are inferred rather than observed.
