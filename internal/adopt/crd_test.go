@@ -254,6 +254,37 @@ func TestAdoptsOwnershipWithoutAManifest(t *testing.T) {
 	}
 }
 
+// TestAdoptionCarriesTheChartsAnnotations covers the half of the patch that is
+// not the schema. On the adopting upgrade the chart deliberately leaves the CRD
+// out of the release, so the template — and helm.sh/resource-policy: keep with
+// it — is not applied until the NEXT upgrade. Carrying the chart's annotations
+// here closes that gap, so a CRD is never owned by a release without the policy
+// that says an uninstall must leave it, and every Automation stored under it,
+// alone.
+//
+// Ownership is written last and is not something the mounted manifest can
+// influence: a chart whose CRD carried a meta.helm.sh annotation of its own
+// would otherwise point the live object at a release that does not exist.
+func TestAdoptionCarriesTheChartsAnnotations(t *testing.T) {
+	misleading := strings.Replace(chartCRD, "helm.sh/resource-policy: keep",
+		"helm.sh/resource-policy: keep\n    "+releaseNameAnnotation+": somebody-else", 1)
+	c := fake.NewClientBuilder().WithScheme(scheme()).WithObjects(liveCRD(nil)).Build()
+
+	if err := CRD(context.Background(), c, options(manifest(t, misleading))); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	annotations := readBack(t, c).GetAnnotations()
+	if got := annotations["helm.sh/resource-policy"]; got != "keep" {
+		t.Errorf("helm.sh/resource-policy = %q, want %q: an uninstall before the next upgrade "+
+			"would have nothing telling Helm to leave the CRD alone", got, "keep")
+	}
+	if got := annotations[releaseNameAnnotation]; got != release {
+		t.Errorf("%s = %q, want %q: the mounted manifest overwrote the release taking ownership",
+			releaseNameAnnotation, got, release)
+	}
+}
+
 // TestRejectsAManifestForSomethingElse guards the input that would be worst to
 // act on: patching one CRD's schema from another object's spec.
 func TestRejectsAManifestForSomethingElse(t *testing.T) {
