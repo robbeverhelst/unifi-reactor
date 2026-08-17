@@ -8,5 +8,5 @@ contact_links:
     url: https://reactor.robbeverhelst.com/design/spec/
     about: The architecture, the state-first rationale, the roadmap, and the explicit non-goals.
   - name: Contributing
-    url: https://github.com/robbeverhelst/unifi-reactor/blob/main/CONTRIBUTING.md
+    url: https://github.com/robbeverhelst/unifi-reactor/blob/main/.github/CONTRIBUTING.md
     about: The dev loop, the fixture capture policy, and how to run everything without UniFi hardware.

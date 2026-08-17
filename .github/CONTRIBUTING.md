@@ -59,7 +59,7 @@ So, concretely:
 - `hack/verify-testdata.sh` runs as part of `make test` and rejects unredacted secret fields, routable IPs, real MACs, and carrier fields that are not the placeholder. It is the safety net, not the mechanism — passing it is not evidence that a hand-made fixture is safe.
 - Webhook captures follow the same discipline. `hack/webhook-logger.mjs` writes deliveries verbatim to a gitignored directory; allowlist them before committing anything.
 
-[`testdata/unifi/README.md`](testdata/unifi/README.md) documents what each fixture contains and which mappings are inferred rather than observed.
+[`testdata/unifi/README.md`](../testdata/unifi/README.md) documents what each fixture contains and which mappings are inferred rather than observed.
 
 ## Keep the engine provider-agnostic
 
@@ -95,8 +95,8 @@ Check the [troubleshooting guide](https://reactor.robbeverhelst.com/troubleshoot
 
 **Redact before posting.** Logs and resource dumps can carry your public IP, your ISP, internal hostnames, and site identifiers. Nothing in a bug report needs them.
 
-**Security problems do not go in a public issue.** [SECURITY.md](SECURITY.md) has the reporting route and what is in scope — Reactor holds a credential to your network infrastructure and, by default, cluster-wide permission to patch Deployments, so anything widening that reach belongs there rather than here.
+**Security problems do not go in a public issue.** [SECURITY.md](../SECURITY.md) has the reporting route and what is in scope — Reactor holds a credential to your network infrastructure and, by default, cluster-wide permission to patch Deployments, so anything widening that reach belongs there rather than here.
 
 ## Releases
 
-Releases are cut entirely by CI from a tag; nothing is published from a developer machine. Tagging `vX.Y.Z` builds the multi-arch image, packages the chart, and attaches `install.yaml` to a GitHub Release with generated notes. See [CHANGELOG.md](CHANGELOG.md) for how release notes work.
+Releases are cut entirely by CI from a tag; nothing is published from a developer machine. Tagging `vX.Y.Z` builds the multi-arch image, packages the chart, and attaches `install.yaml` to a GitHub Release with generated notes. See [CHANGELOG.md](../CHANGELOG.md) for how release notes work.
