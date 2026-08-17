@@ -263,11 +263,11 @@ Everything above answers *should I use this?* — [**reactor.robbeverhelst.com**
 | [Design](https://reactor.robbeverhelst.com/design/spec/) | the architecture, the state-first rationale, and the roadmap in full |
 | [Contributing](https://reactor.robbeverhelst.com/contributing/) | the dev loop, adding a provider, and the reverse-engineered UniFi API notes |
 
-In this repository: [chart reference](charts/reactor/README.md) · [captured UniFi payloads](testdata/unifi/README.md) · [contributing](CONTRIBUTING.md) · [security policy](SECURITY.md)
+In this repository: [chart reference](charts/reactor/README.md) · [captured UniFi payloads](testdata/unifi/README.md) · [contributing](.github/CONTRIBUTING.md) · [security policy](SECURITY.md)
 
 ## Contributing
 
-PRs welcome — [CONTRIBUTING.md](CONTRIBUTING.md) has the full version, including the fixture capture policy, which is a genuinely unusual rule and not one you would guess. The short version:
+PRs welcome — [CONTRIBUTING.md](.github/CONTRIBUTING.md) has the full version, including the fixture capture policy, which is a genuinely unusual rule and not one you would guess. The short version:
 
 ```sh
 make test          # unit + envtest
@@ -277,7 +277,7 @@ make dev-deploy DEV_CONTEXT=<your-cluster> UNIFI_URL=... UNIFI_API_KEY=...
 
 No UniFi hardware needed — `make dev-mock` serves the captured payloads and rehearses a WAN failover or a power outage on demand. Conventional commits; tagging `vX.Y.Z` builds and publishes the multi-arch image, the OCI chart, and `install.yaml` from CI, with [generated release notes standing in for a changelog](CHANGELOG.md).
 
-Bug reports go through the [issue templates](https://github.com/robbeverhelst/unifi-reactor/issues/new/choose), which ask for the four things that make a report reproducible. Participation is covered by the [Code of Conduct](CODE_OF_CONDUCT.md).
+Bug reports go through the [issue templates](https://github.com/robbeverhelst/unifi-reactor/issues/new/choose), which ask for the four things that make a report reproducible. Participation is covered by the [Code of Conduct](.github/CODE_OF_CONDUCT.md).
 
 ## License
 
