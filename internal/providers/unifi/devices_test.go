@@ -296,7 +296,7 @@ func TestFleetAndGatewayKeysDegradeIndependently(t *testing.T) {
 		t.Error("wan should be absent when no gateway is in the list")
 	}
 
-	gateway := deviceRecord{Model: "UDMPRO", WAN1: &wanPort{IsUplink: true, Up: true}}
+	gateway := deviceRecord{Model: gatewayModel, WANs: []wanEntry{{Index: 1, wanPort: wanPort{IsUplink: true, Up: true}}}}
 	withoutFleet := fleetState(t, false, gateway)
 	if withoutFleet[stateKeyWAN] != wanPrimary {
 		t.Errorf("state[wan] = %q, want %q", withoutFleet[stateKeyWAN], wanPrimary)

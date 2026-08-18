@@ -25,6 +25,7 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -189,11 +190,17 @@ type deviceStatResponse struct {
 }
 
 type deviceRecord struct {
-	Model  string     `json:"model"`
-	Type   string     `json:"type"`
-	Name   string     `json:"name"`
-	WAN1   *wanPort   `json:"wan1"`
-	WAN2   *wanPort   `json:"wan2"`
+	Model string `json:"model"`
+	Type  string `json:"type"`
+	Name  string `json:"name"`
+	// WANs is every wanN block the record carries, in index order, collected by
+	// UnmarshalJSON below. It is deliberately not a fixed set of named fields:
+	// this struct once declared wan1 and wan2 because that is what the author's
+	// gateway had, and a gateway with a cellular backup reports the cellular
+	// uplink as wan3 — which was then silently never decoded, and the wan key
+	// vanished on the exact failover it exists to report (#104). How many wanN
+	// a gateway can carry is unknown, so the only safe list is "all of them".
+	WANs   []wanEntry `json:"-"`
 	Uplink *uplinkRef `json:"uplink"`
 	// ISP is the capture's name for active_geo_info.WAN.isp_name — the carrier
 	// the console geolocated the current public address to.
@@ -216,6 +223,12 @@ type deviceRecord struct {
 }
 
 type wanPort struct {
+	// IsUplink is a plain bool, so a record with no is_uplink key at all
+	// decodes to false — and the cellular entry is exactly that record: the
+	// field is absent, not false (#104). "Absent claims nothing" happens to be
+	// the safe direction, but it is an accident of the decode rather than a
+	// decision, and a *bool would only earn its nil handling once something
+	// needs to tell "absent" from "explicitly not the uplink". Nothing does.
 	IsUplink bool   `json:"is_uplink"`
 	Up       bool   `json:"up"`
 	IfName   string `json:"ifname"`
@@ -223,9 +236,76 @@ type wanPort struct {
 	IP       string `json:"ip"`
 }
 
+// wanEntry is one wanN block together with the N it was keyed by.
+type wanEntry struct {
+	// Index is the N in wanN. Its one meaning is that wanPrimaryIndex is the
+	// primary and everything above it is a backup; the numbering has no other
+	// significance, and it is not dense — a gateway may report wan1 and wan3
+	// with no wan2.
+	Index int
+	wanPort
+}
+
+// wanPrimaryIndex is the one WAN index that means "primary". This is the only
+// place the numbering carries meaning: every other index is a backup.
+const wanPrimaryIndex = 1
+
+// UnmarshalJSON decodes the named fields as usual, then walks the raw object
+// once more to collect every wanN key. The second pass is what a fixed field
+// list cannot do: it decodes uplinks this repository has never seen the name
+// of, instead of silently dropping them (#104).
+func (d *deviceRecord) UnmarshalJSON(data []byte) error {
+	type plain deviceRecord
+	if err := json.Unmarshal(data, (*plain)(d)); err != nil {
+		return err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	for key, value := range raw {
+		index, ok := wanIndexOf(key)
+		if !ok {
+			continue
+		}
+		// Decoded via a pointer so an explicit null — which is how the capture
+		// script writes a WAN the console did not report — is skipped, exactly
+		// as the old *wanPort fields skipped it.
+		var port *wanPort
+		if err := json.Unmarshal(value, &port); err != nil {
+			return err
+		}
+		if port == nil {
+			continue
+		}
+		d.WANs = append(d.WANs, wanEntry{Index: index, wanPort: *port})
+	}
+	// The raw object is a map, so the collection order is random; index order
+	// is the one the rest of this file may rely on.
+	slices.SortFunc(d.WANs, func(a, b wanEntry) int { return a.Index - b.Index })
+	return nil
+}
+
+// wanIndexOf extracts the N from a wanN key. Only "wan" followed entirely by
+// digits qualifies, so wan_ip and friends do not.
+func wanIndexOf(key string) (int, bool) {
+	digits, found := strings.CutPrefix(key, "wan")
+	if !found || digits == "" {
+		return 0, false
+	}
+	index := 0
+	for _, r := range digits {
+		if r < '0' || r > '9' {
+			return 0, false
+		}
+		index = index*10 + int(r-'0')
+	}
+	return index, index >= wanPrimaryIndex
+}
+
 // uplinkRef is the gateway's own statement of which interface it is uplinked
-// through. It is the second, independent answer to the question wan1/wan2
-// is_uplink answers.
+// through. It is the second, independent answer to the question the wanN
+// is_uplink fields answer.
 type uplinkRef struct {
 	Name string `json:"name"`
 	Type string `json:"type"`
@@ -391,7 +471,7 @@ func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse
 			logf.FromContext(ctx).WithName("unifi-devices").V(1).Info(
 				"Skipping a device that is not adopted", "model", d.Model, "type", d.Type)
 		}
-		if !gatewaySeen && (d.WAN1 != nil || d.WAN2 != nil) {
+		if !gatewaySeen && len(d.WANs) > 0 {
 			gatewaySeen = true
 			if wan := c.wanFrom(ctx, d); wan != "" {
 				state[stateKeyWAN] = wan
@@ -448,11 +528,17 @@ type wanSignal struct {
 // byIsUplink is the signal the wan mapping has always been derived from, and
 // the one issue #34 exists to verify: it has only ever been observed on a
 // gateway with a single live uplink, so "the port with is_uplink set is the
-// live one" is inference, not observation.
+// live one" is inference, not observation. A cellular uplink never appears
+// here at all — its record carries no is_uplink key — so on a cellular
+// failover this signal says nothing and byUplinkName decides.
 func (d deviceRecord) byIsUplink() wanSignal {
-	primary := d.WAN1 != nil && d.WAN1.IsUplink
-	backup := d.WAN2 != nil && d.WAN2.IsUplink
-	return resolveSignal(primary, backup)
+	var claims []int
+	for _, w := range d.WANs {
+		if w.IsUplink {
+			claims = append(claims, w.Index)
+		}
+	}
+	return resolveSignal(claims)
 }
 
 // byUplinkName is the independent second opinion: the gateway names the
@@ -463,19 +549,31 @@ func (d deviceRecord) byUplinkName() wanSignal {
 	if d.Uplink == nil {
 		return wanSignal{}
 	}
-	return resolveSignal(d.WAN1.named(d.Uplink.Name), d.WAN2.named(d.Uplink.Name))
+	var claims []int
+	for _, w := range d.WANs {
+		if w.named(d.Uplink.Name) {
+			claims = append(claims, w.Index)
+		}
+	}
+	return resolveSignal(claims)
 }
 
-func resolveSignal(primary, backup bool) wanSignal {
-	switch {
-	case primary && backup:
-		return wanSignal{ambiguous: true}
-	case backup:
+// resolveSignal turns the WAN indices a field claimed into that field's
+// answer. Exactly one claim answers — wanPrimaryIndex is the primary,
+// anything else a backup. More than one is ambiguous even when every claimant
+// is a backup: the field is contradicting itself, and which backup carries
+// the traffic is exactly what it has failed to say.
+func resolveSignal(claims []int) wanSignal {
+	switch len(claims) {
+	case 0:
+		return wanSignal{}
+	case 1:
+		if claims[0] == wanPrimaryIndex {
+			return wanSignal{value: wanPrimary}
+		}
 		return wanSignal{value: wanBackup}
-	case primary:
-		return wanSignal{value: wanPrimary}
 	}
-	return wanSignal{}
+	return wanSignal{ambiguous: true}
 }
 
 // wanFrom decides which uplink is live, and reports rather than resolves any
@@ -488,6 +586,11 @@ func resolveSignal(primary, backup bool) wanSignal {
 // missing key and a coin flip respectively, so it can only be an improvement.
 // Everything else is a log line, because deciding which signal wins needs a
 // real failover to have been observed, and one has not been (issue #34).
+//
+// The unclaimed path is load-bearing, not defensive: it is the one a cellular
+// failover takes. The cellular entry carries no is_uplink key at all, so
+// is_uplink names nobody and the uplink interface — which the gateway points
+// at the cellular tunnel — is what resolves the key to backup (#104).
 func (c *Client) wanFrom(ctx context.Context, d deviceRecord) string {
 	log := logf.FromContext(ctx).WithName("unifi-wan")
 	claimed, named := d.byIsUplink(), d.byUplinkName()

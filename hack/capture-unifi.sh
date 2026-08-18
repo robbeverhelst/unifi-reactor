@@ -107,8 +107,6 @@ DEVICE='{
     port_idx, poe_enable, poe_power, poe_class, is_uplink, port_poe,
     name: ("port-" + (.port_idx | tostring))
   }] else null end),
-  wan1: (if .wan1 then (.wan1 | '"$WAN"') else null end),
-  wan2: (if .wan2 then (.wan2 | '"$WAN"') else null end),
   uplink: (if .uplink then {name: .uplink.name, type: .uplink.type} else null end),
   last_wan_status,
   isp: (if .active_geo_info.WAN.isp_name then "'"$ISP"'" else null end),
@@ -121,7 +119,16 @@ DEVICE='{
     index, relay_state, cycle_enabled,
     name: ("Outlet " + (.index | tostring))
   }] else null end)
-} | with_entries(select(.value != null))'
+}
+# Every wanN the console reports, through the WAN projection above. This used
+# to name wan1 and wan2, which is how a gateway with a cellular backup — which
+# reports it as wan3 — could never produce a fixture reproducing #104. The wanN
+# fields themselves stay in the allowlist one at a time exactly as before; what
+# is dynamic is only which N exist. mbb is deliberately NOT projected: nothing
+# reads it, and it carries a cell_id and a modem MAC, which under the #94 rule
+# would put it in the replace-the-value tier before it could ever be committed.
++ (with_entries(select((.key | test("^wan[0-9]+$")) and .value != null)) | map_values('"$WAN"'))
+| with_entries(select(.value != null))'
 
 echo "capturing stat/device -> gateway + UPS"
 api stat/device > /tmp/cap-device.json
