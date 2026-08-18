@@ -135,6 +135,85 @@ func TestThePlaceholderCarrierIsAccepted(t *testing.T) {
 	}
 }
 
+// captureWithSIM writes a throwaway tree holding one device capture whose mbb
+// block carries the given extra JSON alongside the six fields the projection
+// keeps. Everything else about it passes every other guard in the script.
+func captureWithSIM(t *testing.T, extra string) string {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, "testdata", "unifi", "api")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("building a throwaway capture tree: %v", err)
+	}
+	sim := `"active": true, "slot": 1, "card_present": true, "has_data_plan": true, ` +
+		`"data_warning": false, "data_limited": false`
+	if extra != "" {
+		sim += ", " + extra
+	}
+	fixture := `{"meta": {"rc": "ok"}, "data": [{"model": "UDMPRO", "mbb": {"sim": [{` + sim + `}]}}]}`
+	if err := os.WriteFile(filepath.Join(dir, "stat-device-gateway.json"), []byte(fixture), 0o644); err != nil {
+		t.Fatalf("writing the throwaway capture: %v", err)
+	}
+	return root
+}
+
+// The projection the capture script applies to mbb — the six fields and
+// nothing else — has to pass, or no capture with a cellular uplink could ever
+// be committed at all.
+func TestTheProjectedSIMBlockIsAccepted(t *testing.T) {
+	root := captureWithSIM(t, "")
+	if out, err := runVerifyTestdata(t, root); err != nil {
+		t.Fatalf("verify-testdata.sh rejected the exact projection the capture script writes:\n%s", out)
+	}
+}
+
+// The identifiers a real SIM entry carries alongside those six fields. The
+// policy for these is absent rather than redacted, so any appearance is a
+// violation — and pin_tries_remaining is deliberately in the list as a bare
+// number, because a guard that only recognised quoted values would wave every
+// numeric secret through.
+func TestSIMIdentifiersAreRejected(t *testing.T) {
+	tests := []struct{ name, field string }{
+		{"iccid", `"iccid": "89000000000000000000"`},
+		{"imei", `"imei": "000000000000000"`},
+		{"pin retry counter", `"pin_tries_remaining": 3`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := captureWithSIM(t, tt.field)
+			if out, err := runVerifyTestdata(t, root); err == nil {
+				t.Fatalf("verify-testdata.sh accepted a capture carrying a SIM identifier:\n%s", out)
+			}
+		})
+	}
+}
+
+// spn is the carrier's name as the SIM reports it, and it gets the guard #94
+// gave the WAN carrier: required to equal the placeholder, so every real
+// carrier from every future capture is caught without any of their names ever
+// appearing in this repository.
+func TestASIMCarrierThatIsNotThePlaceholderIsRejected(t *testing.T) {
+	root := captureWithSIM(t, `"spn": "Northwind Mobile"`)
+
+	out, err := runVerifyTestdata(t, root)
+	if err == nil {
+		t.Fatalf("verify-testdata.sh accepted a capture carrying a real-looking SIM carrier:\n%s", out)
+	}
+	if !strings.Contains(out, "spn") {
+		t.Errorf("the failure should name the spn field; got:\n%s", out)
+	}
+	if strings.Contains(out, "Northwind") {
+		t.Errorf("the failure echoed the carrier it caught, got:\n%s", out)
+	}
+}
+
+func TestTheSIMCarrierPlaceholderIsAccepted(t *testing.T) {
+	root := captureWithSIM(t, fmt.Sprintf(`"spn": %q`, placeholderCarrier(t, "ISP")))
+	if out, err := runVerifyTestdata(t, root); err != nil {
+		t.Fatalf("verify-testdata.sh rejected the placeholder carrier in spn:\n%s", out)
+	}
+}
+
 func TestTheCommittedCapturesPassEveryGuard(t *testing.T) {
 	if out, err := runVerifyTestdata(t, ""); err != nil {
 		t.Fatalf("the committed captures do not pass hack/verify-testdata.sh:\n%s", out)
