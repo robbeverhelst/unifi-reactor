@@ -25,6 +25,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"time"
 )
 
@@ -54,15 +55,23 @@ const (
 	TypeQBittorrentResume = "qbittorrent.resume"
 )
 
+// outboundTypes is the one list of outbound action types, read by dispatch and
+// by the startup line naming what an empty destination policy refuses, for the
+// reason consoleTypes gives.
+var outboundTypes = []string{
+	TypeHTTPRequest, TypeNtfy, TypeDiscord, TypeSlack, TypeHomeAssistant,
+	TypeQBittorrentPause, TypeQBittorrentResume,
+}
+
 // IsOutbound reports whether an action type leaves the cluster, and so whether
 // it is one this package sends.
 func IsOutbound(actionType string) bool {
-	switch actionType {
-	case TypeHTTPRequest, TypeNtfy, TypeDiscord, TypeSlack, TypeHomeAssistant,
-		TypeQBittorrentPause, TypeQBittorrentResume:
-		return true
-	}
-	return false
+	return slices.Contains(outboundTypes, actionType)
+}
+
+// OutboundTypes returns every outbound action type, in declaration order.
+func OutboundTypes() []string {
+	return slices.Clone(outboundTypes)
 }
 
 const (
