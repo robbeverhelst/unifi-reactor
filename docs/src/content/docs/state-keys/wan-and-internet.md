@@ -1,6 +1,6 @@
 ---
 title: "WAN and internet state keys"
-description: "wan says which uplink is selected, internet says whether the outside world is reachable at all, and wan.quality says whether the link has been any good. Three different questions."
+description: "wan says which uplink is selected, internet says whether the outside world is reachable at all, wan.quality says whether the link has been any good, and data.usage says how much of the cellular allowance is left. Four different questions."
 ---
 
 ## `wan` covers every uplink the gateway reports
@@ -15,6 +15,27 @@ A cellular backup is not a physical WAN port. The gateway reports it as a tunnel
     state:
       wan: backup      # the primary uplink is not the one carrying traffic
 ```
+
+## `data.usage` is the allowance behind the cellular uplink
+
+`wan: backup` says a metered link may be carrying the traffic; `data.usage` says how much of its allowance is left to carry it with. It is derived from the **active** SIM in the gateway's modem record, and the values are the console's own judgement rather than Reactor's arithmetic: the console does the byte accounting and the threshold comparison against whatever the SIM's real plan is, and reports the result as two flags. There is no threshold to configure and nothing counted on Reactor's side.
+
+| Value | Meaning |
+| --- | --- |
+| `under` | there is an allowance and it is not close |
+| `warning` | approaching the plan's limit |
+| `over` | the limit has been reached — which wins when the console sets both flags |
+
+The key is **absent, not `under`**, when there is nothing to be under: no modem, no SIM reporting itself active, no card in the active slot, or a SIM with no data plan. `under` is a claim about headroom, and a site with no cellular uplink has none to claim — an absent key is quiet, a wrong `under` lies. For the same reason, a gateway whose SIMs contradict each other — more than one reporting itself active — publishes nothing and says so in the log, because guessing which slot is live could report the idle SIM's headroom while the live one is over its cap.
+
+```yaml
+  when:
+    provider: unifi
+    state:
+      data.usage: warning   # slow down before the cap, not after it
+```
+
+Match on `warning` rather than `over` when the reaction is throttling: by the time the limit is reached, the SIM is already being shaped or billed. `data.usage` ships at the [default debounce of 1 sample](/concepts/settling-a-noisy-signal/) — the console has already settled these flags against the real plan, so there is no reading left to settle — and it pairs naturally with `wan: backup` in automations like [pausing downloads on a metered connection](/guides/pause-downloads-on-a-metered-connection/).
 
 ## `internet` is the one `wan` cannot express
 

@@ -133,7 +133,7 @@ func TestDataUsageThroughTheDeviceList(t *testing.T) {
 
 	warned := planned()
 	warned.DataWarning = true
-	state, err := c.stateFromDevices(ctx, deviceStatResponse{Data: []deviceRecord{modem(warned)}})
+	state, _, err := c.stateFromDevices(ctx, deviceStatResponse{Data: []deviceRecord{modem(warned)}})
 	if err != nil {
 		t.Fatalf("stateFromDevices: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestDataUsageThroughTheDeviceList(t *testing.T) {
 	noPlan := planned()
 	noPlan.HasDataPlan = false
 	ups := deviceRecord{VBMS: &vbmsTable{}}
-	state, err = c.stateFromDevices(ctx, deviceStatResponse{Data: []deviceRecord{modem(noPlan), ups}})
+	state, _, err = c.stateFromDevices(ctx, deviceStatResponse{Data: []deviceRecord{modem(noPlan), ups}})
 	if err != nil {
 		t.Fatalf("stateFromDevices: %v", err)
 	}
