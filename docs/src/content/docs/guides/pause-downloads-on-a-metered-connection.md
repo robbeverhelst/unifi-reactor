@@ -228,28 +228,30 @@ kubectl -n media get automation pause-torrents-on-backup-wan -o jsonpath='{.stat
 
 ## One honesty note about `wan`
 
-**A genuine WAN failover has never been observed on real hardware**
-([#34](https://github.com/robbeverhelst/unifi-reactor/issues/34)). `wan` is
-derived from which port reports `is_uplink`, inferred from a single capture in
-which only one uplink was live, so whether that field follows the traffic or
-merely marks the port configured as primary is unconfirmed. The provider is
-exercised against five different hypotheses about what a failover looks like and
-reports something defensible under all of them — which is not the same as
-knowing.
+**A genuine WAN failover has now been observed on real hardware**
+([#34](https://github.com/robbeverhelst/unifi-reactor/issues/34), closed as
+verified): on 2026-08-18 the primary uplink was unplugged for 75 seconds, the
+console failed over to a cellular backup and back, and `wan` moved from
+`primary` to `backup` and back to `primary`. One caveat survives it. That
+failover was resolved by the gateway's own uplink interface name, because a
+cellular uplink's record carries no `is_uplink` field at all — so whether
+`is_uplink` moves cleanly when one *wired* port takes over from another is
+still unobserved.
 
 What that means for this guide, practically:
 
-- Treat `wan` as less battle-tested than `ups`, and watch for the
+- Watch for the
   [disagreement warnings](/troubleshooting/state-keys/#10-wan-and-isp-disagree-about-a-failover)
-  Reactor raises when `wan` and `isp` do not move together.
+  Reactor raises when `wan` and `isp` do not move together — a second console
+  is not obliged to fail over the way this one did.
 - `internet: down` answers a different question — whether the outside world is
   reachable at all — and comes from the console's own `www` health subsystem
   rather than from `is_uplink`. It is debounced at 3 samples, so about 90s at
   the default poll before an outage or a recovery is believed. `wan` is
   debounced at 1 and reacts on the first observation.
-- If you have a gateway with two working uplinks, the [capture
+- If you have a gateway with two working *wired* uplinks, the [capture
   runbook](https://github.com/robbeverhelst/unifi-reactor/blob/main/testdata/unifi/README.md#capturing-a-real-failover)
-  is fifteen minutes that would close this for everyone.
+  is fifteen minutes that would settle the wired-to-wired case for everyone.
 
 ## Where to go next
 

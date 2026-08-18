@@ -154,9 +154,9 @@ Per-device keys are opt-in in Reactor (`unifi.devices.perDeviceKeys`), so `devic
 
 > The statuses `/internet` will serve — `warning` and `error`, which map to `degraded` and `down` — have never been seen on a real console's `www` subsystem. Rehearsing them shows what Reactor does with them; it does not confirm a console ever sends them. See [the capture notes](https://github.com/robbeverhelst/unifi-reactor/blob/main/testdata/unifi/README.md#internet-reachability-and-link-quality-stathealth).
 
-### Rehearsing a failover that has never been observed
+### Rehearsing failovers, including the shapes not yet observed
 
-`/flip` moves every WAN signal at once, which is what the `wan` mapping assumes a failover looks like. That assumption has never been checked against real hardware ([#34](https://github.com/robbeverhelst/unifi-reactor/issues/34)), so the mock can also render the other plausible shapes — because a parser tested against one hypothesis is only tested against one hypothesis:
+`/flip` moves every WAN signal at once, which is the `clean` shape below. The one failover observed on real hardware ([#34](https://github.com/robbeverhelst/unifi-reactor/issues/34)) did not look like that: it was a failover to a cellular backup, whose record carries no `is_uplink` at all, so `is_uplink` named nobody and the uplink-interface fallback resolved the key — the `no-uplink` shape. A wired-to-wired failover has still not been observed, so the mock renders every plausible shape — because a parser tested against one hypothesis is only tested against one hypothesis:
 
 ```sh
 curl http://localhost:9443/wan          # current state, and what each variant means
@@ -175,7 +175,7 @@ curl -X POST 'http://localhost:9443/wan?link=primary'
 
 Add `&isp=<name>` to rehearse the carrier changing too; the default is an obviously synthetic one, because the real backup carrier has never been seen.
 
-The same hypotheses are asserted in `internal/providers/unifi/wan_test.go`, derived from the committed capture in code. Neither the mock nor those tests produce a fixture: settling which hypothesis is real needs hardware, and the [capture runbook](https://github.com/robbeverhelst/unifi-reactor/blob/main/testdata/unifi/README.md#capturing-a-real-failover) is the procedure for it.
+The same hypotheses are asserted in `internal/providers/unifi/wan_test.go`, derived from the committed capture in code. Neither the mock nor those tests produce a fixture: settling which hypothesis is real for a wired-to-wired failover needs hardware, and the [capture runbook](https://github.com/robbeverhelst/unifi-reactor/blob/main/testdata/unifi/README.md#capturing-a-real-failover) is the procedure for it.
 
 Point the operator at it with `UNIFI_URL=http://<your-host>:9443 UNIFI_API_KEY=mock`. Use a LAN address rather than `localhost` so the pod can reach your machine.
 

@@ -89,18 +89,21 @@ kubectl -n reactor-system logs deploy/reactor | grep unifi-wan
 
 | What you see | What it means | What to do |
 | --- | --- | --- |
-| `The gateway's WAN signals disagree about which uplink is live` | `is_uplink` and `uplink.name` point at different ports. Reactor reports the `is_uplink` answer. | Check which uplink is actually carrying traffic in the UniFi UI, and say which one Reactor got right on [#34](https://github.com/robbeverhelst/unifi-reactor/issues/34) |
-| `The ISP behind the uplink changed but the gateway still reports the same uplink` | Your traffic moved to a different carrier while `wan` did not move. If that was a failover, `wan` missed it. | Same — this is the observation issue #34 is open for |
+| `The gateway's WAN signals disagree about which uplink is live` | `is_uplink` and `uplink.name` point at different ports. Reactor reports the `is_uplink` answer. | Check which uplink is actually carrying traffic in the UniFi UI, and if the disagreement holds, open an issue saying which one Reactor got right |
+| `The ISP behind the uplink changed but the gateway still reports the same uplink` | Your traffic moved to a different carrier while `wan` did not move. If that was a failover, `wan` missed it. | Open an issue — a failover `wan` missed is exactly the evidence the mapping still needs |
 | `The gateway changed uplink but the ISP behind it did not change` | `wan` moved without your carrier changing. Normal if both uplinks are with the same ISP; suspicious otherwise. | Nothing, unless your two uplinks are with different carriers |
-| `The uplink believed to be live does not report itself as online` | The port Reactor thinks is carrying traffic reports something other than `online` in `last_wan_status`. | Note the exact status value on [#34](https://github.com/robbeverhelst/unifi-reactor/issues/34) — only `online` has ever been observed, and the failed value is unknown |
+| `The uplink believed to be live does not report itself as online` | The port Reactor thinks is carrying traffic reports something other than `online` in `last_wan_status`. | Note the exact status value in an issue — only `online` has ever been observed, and the failed value is unknown |
 | `is_uplink does not name a single live WAN port` | No port claimed the uplink, or more than one did. Reactor fell back to the gateway's uplink interface. | Nothing; this is the fallback working. On a failover to a **cellular** backup it is the expected path for as long as cellular carries the traffic — a cellular uplink never reports `is_uplink` at all, so the uplink interface is the signal that resolves it ([#104](https://github.com/robbeverhelst/unifi-reactor/issues/104)). On all-wired gateways it is worth reporting if it persists rather than appearing for one poll during a switchover |
-| `The health endpoint accumulated uptime on an uplink other than the one wan names` | A **third** signal, from a different endpoint, disagrees — and the strongest one, because uptime is traffic the console watched pass rather than a statement about configuration. | This is the most useful thing you can report on [#34](https://github.com/robbeverhelst/unifi-reactor/issues/34). Post the `uptime_stats` block alongside every `wanN` block's fields |
+| `The health endpoint accumulated uptime on an uplink other than the one wan names` | A **third** signal, from a different endpoint, disagrees — and the strongest one, because uptime is traffic the console watched pass rather than a statement about configuration. Early releases derived the uplink this check expected from `wan`'s two-valued answer, so it assumed the only backup was the second uplink and fired every poll through a failover to a third; that false positive is fixed, and the check now takes the resolved uplink index. | On a current release this is a genuine disagreement between passed traffic and the uplink `wan` names, and worth reporting in a new issue. Post the `uptime_stats` block alongside every `wanN` block's fields |
 
 None of these stops anything: state is still published and Automations still run. They exist
-because the `wan` mapping has never been checked against a real failover, and a wrong mapping
-that says nothing is far worse than one that complains. If you have a gateway with two working
-uplinks, [#34](https://github.com/robbeverhelst/unifi-reactor/issues/34) is where these lines
-turn into an answer.
+because a wrong mapping that says nothing is far worse than one that complains. One genuine
+failover — to a cellular backup — has now been observed end to end
+([#34](https://github.com/robbeverhelst/unifi-reactor/issues/34) has the record), and the
+fallback line above accompanied the whole of it: that was the line earning its keep rather than
+misfiring. A wired-to-wired failover has not been observed, so on an all-wired gateway with two
+working uplinks these lines are still where the evidence would come from — report them in a new
+issue rather than on #34, which is closed.
 
 ### What is *not* a disagreement
 
@@ -189,7 +192,8 @@ kubectl -n reactor-system logs deploy/reactor | grep 'device fleet'
 | --- | --- |
 | No `devices` key at all | Nothing in the device list is adopted *and* reporting a recognisable state. `No adopted device reported a recognisable state` at debug level confirms it |
 | A device you own is not in `offlineDevices` and has no key | `Skipping a device that is not adopted`, or `An adopted device reports no state`. An absent `state` is never read as offline |
-| `A device reports a state this provider does not recognise` | Provisioning, upgrading or heartbeat-missed. It counts towards neither key on purpose — a firmware upgrade is not a fleet outage. **Please report the number**, it is what would extend the mapping |
+| `A device reports a transient state` (debug) | Provisioning, upgrading or heartbeat-missed — states a healthy device passes through, recognised explicitly. It counts towards neither key on purpose: a firmware upgrade is not a fleet outage, and a device mid-provision is genuinely neither online nor offline |
+| `A device reports a state this provider does not recognise` | A state number this provider has never seen — the transient states above log their own `V(1)` line instead. It counts towards neither key on purpose. **Please report the number**, it is what would extend the mapping |
 | `Two or more devices share one key after slugifying their names` | `AP 1` and `ap-1` both want `device.ap-1`, so neither is published. Rename one on the console. `devices` still counts both |
 | A key vanished and `Ready=False`/`StateKeyUnavailable` | The device was renamed, removed or unadopted. Reactor holds the last known state rather than firing `onExit`, which is why retitling a switch does not scale a workload back up. Update the Automation to the new slug |
 
@@ -292,30 +296,38 @@ changes, so it is in the default log stream.
 | The key was `outlet.nas` and is now gone | You renamed the outlet. The old key vanishing is lost visibility, so the last known state is **held** and `Ready=False` reports `StateKeyUnavailable` — nothing fires `onExit` because you relabelled a socket. Point the automation at the new key |
 | `Two or more outlets are addressed by the same key` | Two outlets have the same name, or one is named after another's index. Neither is published, because picking one would be arbitrary and this key names something carrying mains power. Rename one |
 | `outletsUnreadable=outlet.4=no relay_state` | That outlet will not say what position it is in. Absent is not off, so it publishes nothing rather than reporting an outage |
-| `More than one adopted device reports an outlet table` | Outlet indexes restart on every chassis, so only the first device's outlets are published. Report it on [#23](https://github.com/robbeverhelst/unifi-reactor/issues/23), which has to decide how a second one is addressed before either can be switched |
+| `More than one adopted device reports an outlet table` | Outlet indexes restart on every chassis, so only the first device's outlets are published. Report it in a new issue: switching shipped for a single chassis ([#23](https://github.com/robbeverhelst/unifi-reactor/issues/23)), and how a second one is addressed still has to be decided before its outlets can be published or switched |
 
-### Reactor will not switch an outlet, and that is deliberate
+### An outlet switches alone, not as a bank — settled, with one thing still open
 
-There is no action, no flag and no allowlist for it. The captured UPS puts
-outlets 1–4 in `relay_group: 1` and 5–8 in `relay_group: 2`, and nobody has
-confirmed whether the hardware switches an outlet or a whole bank — if it is the
-bank, "turn off outlet 3" means "cut outlets 1 to 4". See
-[#23](https://github.com/robbeverhelst/unifi-reactor/issues/23).
+The captured UPS puts outlets 1–4 in `relay_group: 1` and 5–8 in
+`relay_group: 2`, and for as long as nobody had confirmed whether the hardware
+switches an outlet or a whole bank, there was no write path — if the bank had
+been the switching unit, "turn off outlet 3" would have meant "cut outlets 1 to
+4". That question is settled: on 2026-08-15 a write against the real UPS moved
+outlet 8 off while outlets 5, 6 and 7 stayed on, so `relay_group` partitions
+outlets by capability rather than by what switches together, and
+[`unifi.outlet.*`](/actions/unifi-console/) shipped as
+[#23](https://github.com/robbeverhelst/unifi-reactor/issues/23) — allowlist-gated,
+and the allowlist is empty by default.
 
-If you have the console in front of you, you can settle it in a minute. Pick an
-outlet in a bank carrying nothing you care about, toggle **one** outlet in the
-UniFi UI, and read the next line Reactor logs:
+Reactor still reads the movement out loud, because a second UPS model is not
+obliged to answer the same way. Toggle **one** outlet in the UniFi UI and the
+next line it logs is the readout:
 
 ```text
-Outlet state changed. If you are running the relay-group experiment on issue #60, this line is its readout
+Outlet state changed. If you are checking whether this ups switches an outlet or a whole bank, this line is the readout
   moved=outlet.5=on->off relayGroup=2 movedInGroup=1 outletsInGroup=4
   verdict="outlets in this group moved independently of each other"
 ```
 
-`movedInGroup=1` of `4` means outlets switch individually. `4` of `4` means the
-relay group is the switching unit. Either way, post it on
-[#60](https://github.com/robbeverhelst/unifi-reactor/issues/60) — that one line
-is what unblocks #23.
+`movedInGroup=1` of `4` means outlets switch individually. `4` of `4` would mean
+the relay group is the switching unit on your hardware — open an issue with that
+line before allowing anything to switch it. What remains open is narrower, and it
+is [#109](https://github.com/robbeverhelst/unifi-reactor/issues/109): the outlet
+in the 2026-08-15 test was empty, so nobody has watched a relay actually open
+under load, and a console that recorded the override without driving the relay
+would look identical from here.
 
 ---
 
@@ -344,9 +356,10 @@ mapping has not seen. Confirm, then report it:
 kubectl -n reactor-system logs deploy/reactor | grep "wan will not be published"
 ```
 
-Post the gateway's `uplink.name` and the `ifname` of every `wanN` block on
-[#104](https://github.com/robbeverhelst/unifi-reactor/issues/104), with
-addresses removed.
+Post the gateway's `uplink.name` and the `ifname` of every `wanN` block in a
+new issue, with addresses removed —
+[#104](https://github.com/robbeverhelst/unifi-reactor/issues/104) has the
+history of the last combination that did this, and it is closed.
 
 ---
 

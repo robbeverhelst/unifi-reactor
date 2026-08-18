@@ -261,12 +261,16 @@ kubectl -n media get automation notify-on-wan-failover -o jsonpath='{.status.edg
 
 ## Worth knowing about the trigger
 
-`wan` is the one state key whose mapping has **never been confirmed against a
-real failover** ([#34](https://github.com/robbeverhelst/unifi-reactor/issues/34)):
-it is derived from which port reports `is_uplink`, inferred from a capture in
-which only one uplink was live. A notification is the safest possible place to
-find that out — it writes nothing, and a message that never arrives costs you an
-evening rather than a workload.
+`wan` has now been confirmed against a real failover
+([#34](https://github.com/robbeverhelst/unifi-reactor/issues/34), closed as
+verified): on 2026-08-18 the primary uplink was unplugged, the console failed
+over to a cellular backup and back, and `wan` moved with it. One caveat
+survives: that failover was resolved by the gateway's own uplink interface
+name, because a cellular uplink carries no `is_uplink` field at all — so a
+wired-to-wired failover, one wired port taking over from another, remains
+unobserved. A notification is still the safest possible place to find out how
+your hardware behaves — it writes nothing, and a message that never arrives
+costs you an evening rather than a workload.
 
 Which makes this Automation a good first one to install even if you plan to
 scale things later: it tells you whether `wan` moves on your hardware before
