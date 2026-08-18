@@ -26,7 +26,7 @@ jobs:
           persist-credentials: false
       # Installs deps with the lockfile's package manager (bun), runs the build,
       # and uploads docs/dist as the Pages artifact.
-      - uses: withastro/action@15aa0a5a1e067940253e3b259413ab2ae882a740 # v5
+      - uses: withastro/action@e84f40bd8d2caa9e768ec82ad30dd81f0b280853 # v6
         with:
           path: docs
 
