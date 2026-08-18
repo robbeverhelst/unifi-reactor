@@ -220,6 +220,7 @@ type deviceRecord struct {
 	temperatureFields
 	poeFields
 	outletFields
+	dataUsageFields
 }
 
 type wanPort struct {
@@ -352,6 +353,7 @@ type vbmsTable struct {
 //	wan.quality  good    | degraded    (how well that uplink is performing)
 //	isp          a slug, or unknown    (the carrier behind the live uplink)
 //	internet     ok | degraded | down  (whether the outside world is reachable)
+//	data.usage   under | warning | over  (the active SIM against its data plan)
 //	ups          online  | on-battery  (whether the UPS is running on mains)
 //	ups.battery  normal  | low | critical
 //	ups.runtime  ample   | short | critical
@@ -455,6 +457,7 @@ func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse
 	state := map[string]string{}
 	gatewaySeen := false
 	wanIndex := 0
+	mbbSeen := false
 	// One tally per fleet-wide key, each holding whatever operator configuration
 	// it needs, so that publishing takes nothing but the state map.
 	fleet := newDeviceTally(c.PerDeviceKeys)
@@ -486,6 +489,16 @@ func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse
 			}
 			state[stateKeyISP] = ispFrom(d)
 			c.crossCheckOverTime(ctx, state[stateKeyWAN], state[stateKeyISP])
+		}
+		// First-modem-wins, like the gateway above: multiple modems per site
+		// are out of scope, and a second record must not fill in a key the
+		// first one deliberately left unpublished — a contradiction between
+		// SIMs is silence, not an invitation for another device to answer.
+		if !mbbSeen && d.MBB != nil {
+			mbbSeen = true
+			if usage := dataUsageFrom(ctx, d); usage != "" {
+				state[stateKeyDataUsage] = usage
+			}
 		}
 		if _, seen := state[stateKeyUPS]; !seen && d.VBMS != nil {
 			state[stateKeyUPS] = upsOnline

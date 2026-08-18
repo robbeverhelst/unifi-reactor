@@ -280,6 +280,7 @@ temperature: 3
 wifi: 2
 poe: 3
 outlet.*: 1
+data.usage: 1
 ```
 
 Per-key overrides. ups.battery is a threshold crossing, so a charge
@@ -331,6 +332,14 @@ settle. It matches wan and ups, which are debounced at 1 for the same
 reason. Stating it means raising `default` cannot quietly delay an outlet
 by a poll, and it is a prefix because outlet keys are named outlet.&lt;index>
 until somebody names the outlets, and outlet.&lt;name> afterwards.
+
+data.usage is written down at 1 for outlet.*'s reason: there is nothing
+here to settle. The console has already done the byte accounting and the
+threshold comparison against the SIM's real plan before Reactor ever
+sees the flags this key is read from, so an extra sample would be
+second-guessing a judgement rather than settling a reading. It matches
+wan, not ups.battery — the threshold crossing happened on the console's
+side, where the hysteresis belongs.
 
 An entry may end in "*", which matches every key with that prefix. It is
 how a group whose key names come from your hardware gets settled at all:
