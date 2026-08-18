@@ -71,7 +71,7 @@ var _ = Describe("Reacting to observed state", Ordered, func() {
 
 		By("reporting the arbitrated outcome in status")
 		automation := automationOf(Default, wanShed)
-		Expect(automation.Status.Matching).To(BeTrue())
+		Expect(automation.Status.Matching).To(HaveValue(BeTrue()))
 		Expect(automation.Status.ObservedState).To(HaveKeyWithValue(keyWAN, wanBackup))
 		target := targetStatus(automation, hello)
 		Expect(target).NotTo(BeNil())
@@ -116,7 +116,7 @@ var _ = Describe("Reacting to observed state", Ordered, func() {
 		Expect(annotations).NotTo(HaveKey(annotationClaimedAt))
 
 		automation := automationOf(Default, wanShed)
-		Expect(automation.Status.Matching).To(BeFalse())
+		Expect(automation.Status.Matching).To(HaveValue(BeFalse()))
 		Expect(targetStatus(automation, hello).Effective).To(BeNil())
 	})
 

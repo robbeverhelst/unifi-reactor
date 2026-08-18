@@ -63,7 +63,7 @@ var _ = Describe("Previewing an automation without running it", Ordered, func() 
 		// when something is.
 		Eventually(func(g Gomega) {
 			automation := automationOf(g, previews)
-			g.Expect(automation.Status.Matching).To(BeFalse())
+			g.Expect(automation.Status.Matching).To(HaveValue(BeFalse()))
 
 			entry := targetStatus(automation, target)
 			g.Expect(entry).NotTo(BeNil())
@@ -88,7 +88,7 @@ var _ = Describe("Previewing an automation without running it", Ordered, func() 
 		Expect(mock.WAN(wanBackup)).To(Succeed())
 
 		Eventually(func(g Gomega) {
-			g.Expect(automationOf(g, previews).Status.Matching).To(BeTrue())
+			g.Expect(automationOf(g, previews).Status.Matching).To(HaveValue(BeTrue()))
 		}).Should(Succeed())
 
 		Consistently(func(g Gomega) {

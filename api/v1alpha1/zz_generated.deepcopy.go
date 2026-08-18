@@ -203,6 +203,11 @@ func (in *AutomationStatus) DeepCopyInto(out *AutomationStatus) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.Matching != nil {
+		in, out := &in.Matching, &out.Matching
+		*out = new(bool)
+		**out = **in
+	}
 	if in.ObservedState != nil {
 		in, out := &in.ObservedState, &out.ObservedState
 		*out = make(map[string]string, len(*in))

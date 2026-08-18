@@ -326,7 +326,7 @@ func awaitConsoleObserved() {
 	Eventually(func(g Gomega) {
 		observer := automationOf(g, witness)
 		g.Expect(observer.Status.ObservedState).To(Equal(consoleAtRest))
-		g.Expect(observer.Status.Matching).To(BeTrue())
+		g.Expect(observer.Status.Matching).To(HaveValue(BeTrue()))
 	}).Should(Succeed(), "Reactor is still acting on the console state the previous spec left behind")
 }
 

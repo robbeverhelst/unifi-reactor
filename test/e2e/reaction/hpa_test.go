@@ -65,7 +65,7 @@ var _ = Describe("Declining a workload a HorizontalPodAutoscaler drives", Ordere
 		Expect(mock.UPS("mode=battery&level=80")).To(Succeed())
 
 		Eventually(func(g Gomega) {
-			g.Expect(automationOf(g, shed).Status.Matching).To(BeTrue())
+			g.Expect(automationOf(g, shed).Status.Matching).To(HaveValue(BeTrue()))
 		}).Should(Succeed())
 
 		Consistently(func(g Gomega) {

@@ -35,7 +35,7 @@ import (
 // goes through here.
 func (r *AutomationReconciler) updateStatus(ctx context.Context, automation *reactorv1alpha1.Automation) error {
 	metrics.AutomationEvaluated(automation.Namespace, automation.Name,
-		automation.Status.Matching,
+		automation.Status.IsMatching(),
 		meta.IsStatusConditionTrue(automation.Status.Conditions, conditionReady))
 	return r.Status().Update(ctx, automation)
 }

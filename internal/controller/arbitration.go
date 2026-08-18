@@ -736,7 +736,7 @@ func (r *AutomationReconciler) referencingAutomations(
 func (r *AutomationReconciler) matchingOf(automation *reactorv1alpha1.Automation) bool {
 	assessment := r.evaluate(automation)
 	if !assessment.known || len(assessment.missing) > 0 {
-		return automation.Status.Matching
+		return automation.Status.IsMatching()
 	}
 	return assessment.matching
 }

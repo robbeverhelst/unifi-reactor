@@ -205,7 +205,7 @@ var _ = Describe("Deciding against an observation that has stopped arriving", fu
 
 		Expect(replicasOf(staleTarget)).To(BeEquivalentTo(0),
 			"going blind released a claim, which is the workload coming back up mid-outage")
-		Expect(automationOf(name).Status.Matching).To(BeTrue(),
+		Expect(automationOf(name).Status.Matching).To(HaveValue(BeTrue()),
 			"an observation that stopped arriving was treated as the condition ending")
 	})
 

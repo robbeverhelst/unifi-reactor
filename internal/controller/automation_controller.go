@@ -485,11 +485,11 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// last known matching whenever the state it needs is unavailable, the same
 	// rule as above.
 	readable := assessment.known && len(assessment.missing) == 0
-	matching := automation.Status.Matching
+	matching := automation.Status.IsMatching()
 	if readable {
 		matching = assessment.matching
 	}
-	wasMatching := automation.Status.Matching
+	wasMatching := automation.Status.IsMatching()
 	if matching != wasMatching {
 		log.Info("state transition", "automation", automation.Name, "matching", matching, "inForce", inForce)
 	}
@@ -506,7 +506,7 @@ func (r *AutomationReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		if matching != wasMatching {
 			automation.Status.LastTransition = r.transitionFor(&automation, assessment.observed)
 		}
-		automation.Status.Matching = matching
+		automation.Status.Matching = &matching
 	}
 	if changed := slices.ContainsFunc(outcomes, func(o targetOutcome) bool { return o.changed }); changed {
 		automation.Status.LastExecution = &reactorv1alpha1.ExecutionStatus{
