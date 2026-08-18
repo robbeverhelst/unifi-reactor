@@ -38,18 +38,23 @@ func captured(t *testing.T, name string) []byte {
 }
 
 // merged builds one device list from several captured responses, the way a
-// real controller returns every device in a single call.
+// real controller returns every device in a single call. The records are kept
+// as raw JSON rather than round-tripped through deviceRecord: the parser only
+// decodes, so a re-serialisation would silently feed the tests its own subset
+// of the capture instead of the capture.
 func merged(t *testing.T, names ...string) []byte {
 	t.Helper()
-	var all deviceStatResponse
+	records := make([]json.RawMessage, 0, len(names))
 	for _, name := range names {
-		var parsed deviceStatResponse
+		var parsed struct {
+			Data []json.RawMessage `json:"data"`
+		}
 		if err := json.Unmarshal(captured(t, name), &parsed); err != nil {
 			t.Fatalf("parsing %s: %v", name, err)
 		}
-		all.Data = append(all.Data, parsed.Data...)
+		records = append(records, parsed.Data...)
 	}
-	b, err := json.Marshal(all)
+	b, err := json.Marshal(map[string]any{"meta": map[string]string{"rc": "ok"}, "data": records})
 	if err != nil {
 		t.Fatalf("marshalling merged payload: %v", err)
 	}
@@ -161,9 +166,11 @@ func TestObserveWithoutAGatewayStillReportsTheUPS(t *testing.T) {
 func TestWANBackupWhenWAN2IsUplink(t *testing.T) {
 	c := NewClient("", nil, "", false)
 	state, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{
-		Model: "UDMPRO",
-		WAN1:  &wanPort{IsUplink: false, Up: false},
-		WAN2:  &wanPort{IsUplink: true, Up: true},
+		Model: gatewayModel,
+		WANs: []wanEntry{
+			{Index: 1, wanPort: wanPort{IsUplink: false, Up: false}},
+			{Index: 2, wanPort: wanPort{IsUplink: true, Up: true}},
+		},
 	}}})
 	if err != nil {
 		t.Fatalf("stateFromDevices: %v", err)

@@ -19,6 +19,8 @@ package unifi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -46,6 +48,10 @@ import (
 const (
 	gatewayCapture = "stat-device-gateway.json"
 
+	// gatewayModel is the console model every capture and hand-built gateway
+	// record in these tests reports.
+	gatewayModel = "UDMPRO"
+
 	// capturedISP is the slug of the carrier in the committed capture. The
 	// capture carries a placeholder name rather than the console's real one —
 	// the isp key is a real feature, so a fixture has to carry *a* carrier, and
@@ -66,7 +72,42 @@ const (
 
 	// loggedDisagreement is the substring every cross-check warning shares.
 	loggedDisagreement = "disagree"
+
+	// loggedUnclaimed is the line the provider logs when is_uplink resolves
+	// nothing and the gateway's uplink interface decides instead — the path a
+	// cellular failover takes, since the cellular entry has no is_uplink key.
+	loggedUnclaimed = "is_uplink does not name a single live WAN port"
+
+	// cellularIfName is the interface the live hardware behind #104 reports
+	// for its cellular uplink: a GRE tunnel, not a physical WAN port.
+	cellularIfName = "gre1"
 )
+
+// wan returns the collected entry for wanN, so a hypothesis edits "wan2"
+// rather than a slice position. Asking for an index the record does not carry
+// is a bug in the test.
+func wan(d *deviceRecord, index int) *wanEntry {
+	for i := range d.WANs {
+		if d.WANs[i].Index == index {
+			return &d.WANs[i]
+		}
+	}
+	panic(fmt.Sprintf("no wan%d in this record", index))
+}
+
+// withCellularBackup appends a third uplink shaped exactly as the gateway
+// behind #104 reports its cellular backup: a GRE tunnel, up and holding an
+// address — and with no is_uplink key at all, which the plain-bool field
+// decodes as false. It goes in as wan3 so the fixture's wired pair stays the
+// observed ground truth.
+func withCellularBackup(d *deviceRecord) {
+	d.WANs = append(d.WANs, wanEntry{Index: 3, wanPort: wanPort{
+		Up:     true,
+		IfName: cellularIfName,
+		Name:   cellularIfName,
+		IP:     "203.0.113.11",
+	}})
+}
 
 // gatewayFromCapture returns the committed gateway record with one
 // transformation applied, so the starting point of every hypothesis is real.
@@ -144,9 +185,9 @@ func TestFailoverHypotheses(t *testing.T) {
 			// like, the current mapping is simply right.
 			name: "every signal moves",
 			apply: func(d *deviceRecord) {
-				d.WAN1.IsUplink, d.WAN1.Up = false, false
-				d.WAN2.IsUplink, d.WAN2.Up = true, true
-				d.Uplink.Name = d.WAN2.IfName
+				wan(d, 1).IsUplink, wan(d, 1).Up = false, false
+				wan(d, 2).IsUplink, wan(d, 2).Up = true, true
+				d.Uplink.Name = wan(d, 2).IfName
 				d.LastWANStatus = map[string]any{wanStatusKeyPrimary: statusFailed, wanStatusKeyBackup: wanStatusOnline}
 				d.ISP = backupCarrier
 			},
@@ -159,8 +200,8 @@ func TestFailoverHypotheses(t *testing.T) {
 			// worth knowing about before trusting either.
 			name: "only is_uplink moves",
 			apply: func(d *deviceRecord) {
-				d.WAN1.IsUplink = false
-				d.WAN2.IsUplink, d.WAN2.Up = true, true
+				wan(d, 1).IsUplink = false
+				wan(d, 2).IsUplink, wan(d, 2).Up = true, true
 			},
 			wantWAN:    wanBackup,
 			wantISP:    capturedISP,
@@ -173,8 +214,8 @@ func TestFailoverHypotheses(t *testing.T) {
 			// a failover — so the only defence is that it says so loudly.
 			name: "is_uplink stays pinned while everything else moves",
 			apply: func(d *deviceRecord) {
-				d.WAN2.Up = true
-				d.Uplink.Name = d.WAN2.IfName
+				wan(d, 2).Up = true
+				d.Uplink.Name = wan(d, 2).IfName
 				d.LastWANStatus = map[string]any{wanStatusKeyPrimary: statusFailed, wanStatusKeyBackup: wanStatusOnline}
 				d.ISP = backupCarrier
 			},
@@ -191,11 +232,11 @@ func TestFailoverHypotheses(t *testing.T) {
 			// for no reason beyond the order of a switch statement.
 			name: "both ports claim the uplink",
 			apply: func(d *deviceRecord) {
-				d.WAN2.IsUplink, d.WAN2.Up = true, true
+				wan(d, 2).IsUplink, wan(d, 2).Up = true, true
 			},
 			wantWAN:    wanPrimary,
 			wantISP:    capturedISP,
-			wantLogged: []string{"is_uplink does not name a single live WAN port", `"bothPortsClaimedUplink"=true`},
+			wantLogged: []string{loggedUnclaimed, `"bothPortsClaimedUplink"=true`},
 		},
 		{
 			// The switchover window: the old uplink has dropped and the new
@@ -204,13 +245,46 @@ func TestFailoverHypotheses(t *testing.T) {
 			// disappeared".
 			name: "neither port claims the uplink mid-switchover",
 			apply: func(d *deviceRecord) {
-				d.WAN1.IsUplink, d.WAN1.Up = false, false
-				d.WAN2.Up = true
-				d.Uplink.Name = d.WAN2.IfName
+				wan(d, 1).IsUplink, wan(d, 1).Up = false, false
+				wan(d, 2).Up = true
+				d.Uplink.Name = wan(d, 2).IfName
 			},
 			wantWAN:    wanBackup,
 			wantISP:    capturedISP,
-			wantLogged: []string{"is_uplink does not name a single live WAN port"},
+			wantLogged: []string{loggedUnclaimed},
+		},
+		{
+			// A gateway reporting wan1 and wan3 with no wan2 — nothing promises
+			// the numbering is dense, so a gap must resolve exactly as the
+			// contiguous record does.
+			name: "a numbering gap still resolves",
+			apply: func(d *deviceRecord) {
+				withCellularBackup(d)
+				d.WANs = slices.DeleteFunc(d.WANs, func(w wanEntry) bool { return w.Index == 2 })
+				wan(d, 1).IsUplink, wan(d, 1).Up = false, false
+				d.Uplink.Name = cellularIfName
+			},
+			wantWAN:    wanBackup,
+			wantISP:    capturedISP,
+			wantLogged: []string{loggedUnclaimed},
+		},
+		{
+			// is_uplink contradicting itself across two backups. Both indices
+			// mean backup, but which one carries the traffic is exactly what
+			// the field failed to say, so it stays ambiguous — and with no
+			// uplink block to break the tie, the provider reports backup and
+			// says it may be wrong, as it always has on an ambiguous claim.
+			name: "two backups both claim the uplink and nothing breaks the tie",
+			apply: func(d *deviceRecord) {
+				withCellularBackup(d)
+				wan(d, 1).IsUplink, wan(d, 1).Up = false, false
+				wan(d, 2).IsUplink, wan(d, 2).Up = true, true
+				wan(d, 3).IsUplink = true
+				d.Uplink = nil
+			},
+			wantWAN:    wanBackup,
+			wantISP:    capturedISP,
+			wantLogged: []string{"Both WAN ports report is_uplink"},
 		},
 		{
 			// Nothing left to go on. The key is omitted rather than guessed,
@@ -218,7 +292,7 @@ func TestFailoverHypotheses(t *testing.T) {
 			// of running onExit actions mid-failover.
 			name: "no signal at all",
 			apply: func(d *deviceRecord) {
-				d.WAN1.IsUplink = false
+				wan(d, 1).IsUplink = false
 				d.Uplink = nil
 			},
 			wantWAN: "",
@@ -260,6 +334,94 @@ func TestFailoverHypotheses(t *testing.T) {
 	}
 }
 
+// The regression #104 is about, asserted the way the bug presented on real
+// hardware: primary down, is_uplink claimed by nobody — the cellular entry
+// carries no is_uplink key at all — and the gateway's uplink interface naming
+// the third WAN's tunnel. The key must be PRESENT and read backup. Before
+// every wanN was collected, this exact record produced no wan key, so a
+// `when: {wan: backup}` Automation held "everything is fine" straight through
+// the failover it was written for.
+func TestCellularFailoverReportsBackup(t *testing.T) {
+	ctx, logs := logged(t)
+	c := NewClient("", nil, "", false)
+
+	state, err := c.stateFromDevices(ctx, gatewayFromCapture(t, func(d *deviceRecord) {
+		withCellularBackup(d)
+		wan(d, 1).IsUplink, wan(d, 1).Up = false, false
+		d.Uplink.Name = cellularIfName
+	}))
+	if err != nil {
+		t.Fatalf("stateFromDevices: %v", err)
+	}
+	value, present := state[stateKeyWAN]
+	if !present {
+		t.Fatalf("state carries no wan key at all — the failover to cellular is invisible, which is the bug #104 reported; state = %v", state)
+	}
+	if value != wanBackup {
+		t.Fatalf("state[wan] = %q, want %q", value, wanBackup)
+	}
+	// The path taken must be the documented one: is_uplink resolves nothing,
+	// the uplink interface decides.
+	if !strings.Contains(logs(), loggedUnclaimed) {
+		t.Errorf("expected the provider to report %q, logged:\n%s", loggedUnclaimed, logs())
+	}
+}
+
+// The common case on the same hardware: three WANs visible, wired primary
+// live. Nothing may change, and nothing may be reported as a disagreement —
+// a third uplink at rest is not noise.
+func TestACellularBackupAtRestChangesNothing(t *testing.T) {
+	ctx, logs := logged(t)
+	c := NewClient("", nil, "", false)
+
+	state, err := c.stateFromDevices(ctx, gatewayFromCapture(t, withCellularBackup))
+	if err != nil {
+		t.Fatalf("stateFromDevices: %v", err)
+	}
+	if state[stateKeyWAN] != wanPrimary {
+		t.Errorf("state[wan] = %q, want %q", state[stateKeyWAN], wanPrimary)
+	}
+	if strings.Contains(logs(), loggedDisagreement) {
+		t.Errorf("a cellular backup sitting idle is not a disagreement:\n%s", logs())
+	}
+}
+
+// The decode itself: every wanN key is collected, in index order, with the
+// named fields still decoding alongside them. This is JSON-level on purpose —
+// absent-versus-false on is_uplink only exists at the decode boundary.
+func TestEveryWANIsCollected(t *testing.T) {
+	blob := `{
+		"model": "UDMPRO",
+		"wan10": {"up": false, "ifname": "eth10"},
+		"wan1": {"is_uplink": true, "up": true, "ifname": "eth8"},
+		"wan3": {"up": true, "ifname": "gre1"},
+		"wan2": null,
+		"wan_ip": "203.0.113.10"
+	}`
+	var d deviceRecord
+	if err := json.Unmarshal([]byte(blob), &d); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if d.Model != gatewayModel {
+		t.Errorf("Model = %q; the named fields must keep decoding next to the wanN collection", d.Model)
+	}
+	indices := make([]int, 0, len(d.WANs))
+	for _, w := range d.WANs {
+		indices = append(indices, w.Index)
+	}
+	// wan2 is null (a WAN the console did not report), wan_ip is not a WAN,
+	// and wan10 must sort after wan3 numerically rather than lexically.
+	if want := []int{1, 3, 10}; !slices.Equal(indices, want) {
+		t.Fatalf("collected indices %v, want %v", indices, want)
+	}
+	if wan(&d, 3).IsUplink {
+		t.Errorf("wan3 carries no is_uplink key, which must decode as false — absent claims nothing")
+	}
+	if !wan(&d, 1).IsUplink || wan(&d, 1).IfName != "eth8" {
+		t.Errorf("wan1 = %+v, want the values it was given", *wan(&d, 1))
+	}
+}
+
 // The cross-check issue #6 exists for: wan and isp are independent answers to
 // "did the uplink change", and they are only meaningful together across two
 // observations.
@@ -272,9 +434,9 @@ func TestISPAndWANDisagreementAcrossObservations(t *testing.T) {
 		{
 			name: "the uplink changed but the carrier did not",
 			then: func(d *deviceRecord) {
-				d.WAN1.IsUplink = false
-				d.WAN2.IsUplink, d.WAN2.Up = true, true
-				d.Uplink.Name = d.WAN2.IfName
+				wan(d, 1).IsUplink = false
+				wan(d, 2).IsUplink, wan(d, 2).Up = true, true
+				d.Uplink.Name = wan(d, 2).IfName
 			},
 			wantLogged: "changed uplink but the ISP behind it did not change",
 		},
@@ -320,9 +482,9 @@ func TestNoDisagreementWhenBothSignalsMoveTogether(t *testing.T) {
 		t.Fatalf("first observation: %v", err)
 	}
 	state, err := c.stateFromDevices(ctx, gatewayFromCapture(t, func(d *deviceRecord) {
-		d.WAN1.IsUplink, d.WAN1.Up = false, false
-		d.WAN2.IsUplink, d.WAN2.Up = true, true
-		d.Uplink.Name = d.WAN2.IfName
+		wan(d, 1).IsUplink, wan(d, 1).Up = false, false
+		wan(d, 2).IsUplink, wan(d, 2).Up = true, true
+		d.Uplink.Name = wan(d, 2).IfName
 		d.LastWANStatus = map[string]any{wanStatusKeyPrimary: statusFailed, wanStatusKeyBackup: wanStatusOnline}
 		d.ISP = backupCarrier
 	}))

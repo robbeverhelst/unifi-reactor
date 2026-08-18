@@ -93,8 +93,8 @@ kubectl -n reactor-system logs deploy/reactor | grep unifi-wan
 | `The ISP behind the uplink changed but the gateway still reports the same uplink` | Your traffic moved to a different carrier while `wan` did not move. If that was a failover, `wan` missed it. | Same — this is the observation issue #34 is open for |
 | `The gateway changed uplink but the ISP behind it did not change` | `wan` moved without your carrier changing. Normal if both uplinks are with the same ISP; suspicious otherwise. | Nothing, unless your two uplinks are with different carriers |
 | `The uplink believed to be live does not report itself as online` | The port Reactor thinks is carrying traffic reports something other than `online` in `last_wan_status`. | Note the exact status value on [#34](https://github.com/robbeverhelst/unifi-reactor/issues/34) — only `online` has ever been observed, and the failed value is unknown |
-| `is_uplink does not name a single live WAN port` | No port claimed the uplink, or both did. Reactor fell back to the gateway's uplink interface. | Nothing; this is the fallback working. Worth reporting if it persists rather than appearing for one poll during a switchover |
-| `The health endpoint accumulated uptime on an uplink other than the one wan names` | A **third** signal, from a different endpoint, disagrees — and the strongest one, because uptime is traffic the console watched pass rather than a statement about configuration. | This is the most useful thing you can report on [#34](https://github.com/robbeverhelst/unifi-reactor/issues/34). Post the `uptime_stats` block alongside the `wan1`/`wan2` fields |
+| `is_uplink does not name a single live WAN port` | No port claimed the uplink, or more than one did. Reactor fell back to the gateway's uplink interface. | Nothing; this is the fallback working. On a failover to a **cellular** backup it is the expected path for as long as cellular carries the traffic — a cellular uplink never reports `is_uplink` at all, so the uplink interface is the signal that resolves it ([#104](https://github.com/robbeverhelst/unifi-reactor/issues/104)). On all-wired gateways it is worth reporting if it persists rather than appearing for one poll during a switchover |
+| `The health endpoint accumulated uptime on an uplink other than the one wan names` | A **third** signal, from a different endpoint, disagrees — and the strongest one, because uptime is traffic the console watched pass rather than a statement about configuration. | This is the most useful thing you can report on [#34](https://github.com/robbeverhelst/unifi-reactor/issues/34). Post the `uptime_stats` block alongside every `wanN` block's fields |
 
 None of these stops anything: state is still published and Automations still run. They exist
 because the `wan` mapping has never been checked against a real failover, and a wrong mapping
@@ -316,6 +316,37 @@ Outlet state changed. If you are running the relay-group experiment on issue #60
 relay group is the switching unit. Either way, post it on
 [#60](https://github.com/robbeverhelst/unifi-reactor/issues/60) — that one line
 is what unblocks #23.
+
+---
+
+## 10g. `wan` disappeared during a failover
+
+The symptom: `wan` read `primary`, the gateway failed over, and instead of
+`backup` the key *vanished* — `StateKeyUnavailable` on every Automation
+matching it, and a `when: {wan: backup}` Automation that never fired. A
+missing key holds the last decision (see
+[§2](#2-statekeyunavailable-and-held-state)), so the automation written for
+exactly this failover stayed quiet through it: the last thing it observed was
+"not matching, the primary is fine".
+
+On releases carrying the fix for
+[#104](https://github.com/robbeverhelst/unifi-reactor/issues/104) the known
+cause is gone: a gateway with a cellular backup reports it as a **third** WAN
+(`wan3`), Reactor used to decode exactly two, and on failover the live uplink
+matched nothing it had decoded. Every `wanN` the gateway reports is now
+collected, so that failover reads `backup`.
+
+If the key still disappears on a current release, the gateway is uplinked
+through an interface that matches no `wanN` entry at all — a combination this
+mapping has not seen. Confirm, then report it:
+
+```sh
+kubectl -n reactor-system logs deploy/reactor | grep "wan will not be published"
+```
+
+Post the gateway's `uplink.name` and the `ifname` of every `wanN` block on
+[#104](https://github.com/robbeverhelst/unifi-reactor/issues/104), with
+addresses removed.
 
 ---
 

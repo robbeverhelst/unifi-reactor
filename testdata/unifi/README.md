@@ -35,7 +35,7 @@ The counts are deliberately unguarded. There is no positive rule to write — ev
 
 | File | Endpoint | What it documents |
 | --- | --- | --- |
-| `api/stat-device-gateway.json` | `GET /proxy/network/api/s/<site>/stat/device` (gateway) | `wan1`/`wan2` (`is_uplink`, `up`, `ifname`, `speed`), `uplink`, `last_wan_status`, `isp` (allowlisted from `active_geo_info.WAN.isp_name`), `state`/`adopted`/`name` (the `devices` key) |
+| `api/stat-device-gateway.json` | `GET /proxy/network/api/s/<site>/stat/device` (gateway) | every `wanN` (`is_uplink`, `up`, `ifname`, `speed`) — this capture predates the cellular backup, so it carries only `wan1`/`wan2`; a gateway with a cellular backup reports `wan3` (#104) — `uplink`, `last_wan_status`, `isp` (allowlisted from `active_geo_info.WAN.isp_name`), `state`/`adopted`/`name` (the `devices` key) |
 | `api/stat-device-ups.json` | same call, UPS record | `vbms_table` battery state, `outlet_table`, `state`/`adopted`/`name` |
 | `api/stat-health.json` | `GET /proxy/network/api/s/<site>/stat/health` | per-subsystem `status` (the `internet` key), WAN `uptime_stats` monitors (the `wan.quality` key), ISP |
 | `api/integration-info.json` | `GET /proxy/network/integration/v1/info` | controller version, for the compatibility guard |
