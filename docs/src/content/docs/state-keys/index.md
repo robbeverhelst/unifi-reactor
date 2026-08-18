@@ -1,6 +1,6 @@
 ---
 title: "State keys"
-description: "The whole vocabulary the UniFi provider publishes — wan, internet, ups, devices, firmware, temperature, wifi, poe, outlets — with the values each key can hold."
+description: "The whole vocabulary the UniFi provider publishes — wan, internet, data usage, ups, devices, firmware, temperature, wifi, poe, outlets — with the values each key can hold."
 ---
 
 ## State keys
@@ -13,6 +13,7 @@ Each key is published only when the matching hardware is adopted by your control
 | `wan.quality` | `good`, `degraded` | how well that uplink has been performing, against the configured thresholds |
 | `isp` | a slug, e.g. `example-telecom`, or `unknown` | the carrier behind the live uplink |
 | `internet` | `ok`, `degraded`, `down` | whether the outside world is reachable at all |
+| `data.usage` | `under`, `warning`, `over` | the active SIM's traffic against its data plan, as the console judges it. Absent without a cellular uplink — see [WAN and internet](/state-keys/wan-and-internet/#datausage-is-the-allowance-behind-the-cellular-uplink) |
 | `ups` | `online`, `on-battery` | whether a UniFi UPS is on mains or running on battery |
 | `ups.battery` | `normal`, `low`, `critical` | remaining charge against the configured thresholds |
 | `ups.runtime` | `ample`, `short`, `critical` | how long the UPS says it can carry its current load |

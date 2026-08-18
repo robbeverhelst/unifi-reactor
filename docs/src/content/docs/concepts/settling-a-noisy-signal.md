@@ -25,6 +25,7 @@ unifi:
       wifi: 2           # ...and an AP heartbeat can miss a beat
       poe: 3            # ...and a PoE draw moves when a radio comes up
       outlet.*: 1       # a relay is a switch position; there is nothing to settle
+      data.usage: 1     # the console already settled this against the real plan
 ```
 
 Each extra sample costs one `pollInterval` of reaction time, so the default is `1`: a WAN failover and a power cut both deserve an immediate reaction, and neither flaps. `ups.battery` ships at `2` because it is a threshold crossing — a charge hovering at 30% would otherwise report `low`, `normal`, `low` — and because a battery drains over minutes, so spending one more poll to be sure costs nothing. At the default 30s poll that makes a battery-level escalation react in 60s worst case instead of 30s.
