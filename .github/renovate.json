@@ -8,6 +8,7 @@
   ],
   "labels": ["dependencies"],
   "rangeStrategy": "bump",
+  "postUpdateOptions": ["gomodTidy"],
   "packageRules": [
     {
       "matchUpdateTypes": ["minor", "patch"],
