@@ -26,15 +26,25 @@ import (
 	"github.com/robbeverhelst/unifi-reactor/internal/metrics"
 )
 
-// The two values of the console's per-device state field this provider is
-// willing to read. UniFi documents others — provisioning, upgrading, heartbeat
-// missed, adoption pending — and none of them has been captured, so anything
-// else is treated as "this device says nothing" rather than being folded into
-// one of these. Reading an unfamiliar state as offline is how a firmware that
-// added a value would shed a cluster's load.
+// The two values of the console's per-device state field this provider
+// translates into a published value. UniFi's enum is wider: an independent Go
+// client for the same API carries Upgrading = 4, Provisioning = 5 and
+// HeartbeatMissing = 6, and state 5 has now been observed on real hardware
+// (#97) — three device classes entering it within the same second of a config
+// push, one of them re-entering it hours later. Those three are states a
+// healthy device passes through, so they are recognised below but still
+// deliberately not folded into online or offline: a device mid-provision is
+// genuinely neither, and reading an unfamiliar state as offline is how a
+// firmware that added a value would shed a cluster's load. Anything outside
+// this set — adoption pending is documented but has never been captured — is
+// treated as "this device says nothing".
 const (
 	deviceStateOffline = 0
 	deviceStateOnline  = 1
+
+	deviceStateUpgrading        = 4
+	deviceStateProvisioning     = 5
+	deviceStateHeartbeatMissing = 6
 )
 
 // deviceHealthFields are the fields the devices and device.<name> keys are
@@ -118,11 +128,19 @@ func (t *deviceTally) observe(ctx context.Context, d deviceRecord) {
 		value = deviceOnline
 	case deviceStateOffline:
 		value = deviceOffline
+	case deviceStateUpgrading, deviceStateProvisioning, deviceStateHeartbeatMissing:
+		// Not translated into a value: these are states a healthy device
+		// passes through, and reading any of them as offline would report a
+		// firmware update as a fleet outage. V(1) rather than INFO, because a
+		// site that pushes config regularly would otherwise produce a steady
+		// INFO drip that says nothing new after the first line (#97).
+		log.V(1).Info("A device reports a transient state; it counts towards neither devices nor a key of its own",
+			"state", *d.State, "model", d.Model, "type", d.Type)
+		return
 	default:
-		// An unrecognised state is not translated into a value, for the same
-		// reason an unrecognised www status is not: provisioning and upgrading
-		// are states a healthy device passes through, and reading either as
-		// offline would report a firmware update as a fleet outage.
+		// An unrecognised state is not translated into a value either, and it
+		// stays at INFO: a state this provider has never heard of is exactly
+		// what an operator should see and report.
 		log.Info("A device reports a state this provider does not recognise; it counts towards neither "+
 			"devices nor a key of its own. Please report it — the set of states is what this key is derived from",
 			"state", *d.State, "model", d.Model, "type", d.Type)

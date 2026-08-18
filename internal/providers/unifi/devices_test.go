@@ -20,6 +20,9 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/go-logr/logr/funcr"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // adoptedDevice is a device record in the shape the captures have: adopted,
@@ -140,11 +143,13 @@ func TestMissingStateIsNotAnOfflineDevice(t *testing.T) {
 	}
 }
 
-// Provisioning, upgrading and heartbeat-missed are states UniFi documents and
-// no capture has ever shown. None of them may be folded into offline: a fleet
-// mid-firmware-upgrade is not a fleet outage.
+// Neither the known transient states — upgrading, provisioning, heartbeat
+// missed — nor a value this provider has never heard of may be folded into
+// offline: a fleet mid-firmware-upgrade is not a fleet outage. State 5 is the
+// one real hardware has shown (#97), so it is pinned here by constructing the
+// record directly; no capture carries it.
 func TestUnrecognisedDeviceStateIsNeitherOnlineNorOffline(t *testing.T) {
-	for _, state := range []int{2, 4, 5, 6, 11, -1} {
+	for _, state := range []int{2, deviceStateUpgrading, deviceStateProvisioning, deviceStateHeartbeatMissing, 11, -1} {
 		odd := adoptedDevice("Provisioning", state)
 		got := fleetState(t, true, adoptedDevice("Switch 48", deviceStateOnline), odd)
 
@@ -154,6 +159,31 @@ func TestUnrecognisedDeviceStateIsNeitherOnlineNorOffline(t *testing.T) {
 		if value, present := got[stateKeyDevicePrefix+"provisioning"]; present {
 			t.Errorf("state %d should publish no key of its own, got %q", state, value)
 		}
+	}
+}
+
+// The INFO level is reserved for states this provider has genuinely never
+// heard of, because those are worth an operator's attention. The known
+// transient states are something a healthy site produces every config push,
+// so they must not add an INFO line per device per poll (#97) — they speak at
+// V(1) only, which the verbosity-0 logger here drops.
+func TestKnownTransientStatesDoNotLogAtInfo(t *testing.T) {
+	var sink strings.Builder
+	ctx := logf.IntoContext(context.Background(), funcr.New(func(prefix, args string) {
+		sink.WriteString(prefix + " " + args + "\n")
+	}, funcr.Options{}))
+
+	tally := newDeviceTally(false)
+	for _, state := range []int{deviceStateUpgrading, deviceStateProvisioning, deviceStateHeartbeatMissing} {
+		tally.observe(ctx, adoptedDevice("Core Switch", state))
+	}
+	if got := sink.String(); got != "" {
+		t.Errorf("a known transient state should say nothing at INFO, got %q", got)
+	}
+
+	tally.observe(ctx, adoptedDevice("Core Switch", 11))
+	if got := sink.String(); !strings.Contains(got, "does not recognise") {
+		t.Errorf("a genuinely unknown state should keep the please-report INFO line, got %q", got)
 	}
 }
 
