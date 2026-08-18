@@ -26,6 +26,7 @@ const (
 	stateKeyWANQuality  = "wan.quality"
 	stateKeyISP         = "isp"
 	stateKeyInternet    = "internet"
+	stateKeyDataUsage   = "data.usage"
 	stateKeyUPS         = "ups"
 	stateKeyUPSBattery  = "ups.battery"
 	stateKeyUPSRuntime  = "ups.runtime"
@@ -110,6 +111,19 @@ const (
 	healthStatusOK      = "ok"
 	healthStatusWarning = "warning"
 	healthStatusError   = "error"
+
+	// data.usage is the active SIM's traffic against its data plan, read
+	// straight from the console's own data_warning and data_limited flags. The
+	// console does the accounting and the threshold comparison against
+	// whatever the plan really is, so unlike wan.quality there is no threshold
+	// to configure here and nothing is counted on this side. under means
+	// "there is an allowance and it is not close" — which is why the key is
+	// absent, never under, when there is no modem, no active SIM, no card or
+	// no plan: publishing under for a site with no allowance reports headroom
+	// it does not have. See datausage.go.
+	dataUsageUnder   = "under"
+	dataUsageWarning = "warning"
+	dataUsageOver    = "over"
 
 	upsOnline    = "online"
 	upsOnBattery = "on-battery"
@@ -200,6 +214,7 @@ const (
 	signalDeviceNameShared    = "device-name-shared"
 	signalWiFiStatusDisagrees = "wifi-status-disagrees"
 	signalOutletNameShared    = "outlet-name-shared"
+	signalSIMMultipleActive   = "sim-multiple-active"
 )
 
 // StateVocabulary is the closed value set of every key this provider publishes
@@ -275,6 +290,7 @@ func StateVocabulary() map[string][]string {
 		stateKeyWAN:         {wanPrimary, wanBackup},
 		stateKeyWANQuality:  {wanQualityGood, wanQualityDegraded},
 		stateKeyInternet:    {internetOK, internetDegraded, internetDown},
+		stateKeyDataUsage:   {dataUsageUnder, dataUsageWarning, dataUsageOver},
 		stateKeyUPS:         {upsOnline, upsOnBattery},
 		stateKeyUPSBattery:  {batteryNormal, batteryLow, batteryCritical},
 		stateKeyUPSRuntime:  {upsRuntimeAmple, upsRuntimeShort, upsRuntimeCritical},

@@ -208,6 +208,14 @@ unifi:
     # by a poll, and it is a prefix because outlet keys are named outlet.<index>
     # until somebody names the outlets, and outlet.<name> afterwards.
     #
+    # data.usage is written down at 1 for outlet.*'s reason: there is nothing
+    # here to settle. The console has already done the byte accounting and the
+    # threshold comparison against the SIM's real plan before Reactor ever
+    # sees the flags this key is read from, so an extra sample would be
+    # second-guessing a judgement rather than settling a reading. It matches
+    # wan, not ups.battery — the threshold crossing happened on the console's
+    # side, where the hysteresis belongs.
+    #
     # An entry may end in "*", which matches every key with that prefix. It is
     # how a group whose key names come from your hardware gets settled at all:
     # no list here could name them. Exact keys win over patterns, and the
@@ -227,6 +235,7 @@ unifi:
       wifi: 2
       poe: 3
       outlet.*: 1
+      data.usage: 1
   # Name of an existing Secret containing the key UNIFI_API_KEY.
   # Create it with:
   #   kubectl -n <namespace> create secret generic unifi-reactor-credentials \
