@@ -42,12 +42,15 @@ is in the Automation's `status.observedState`, in an Event, and in a `V(1)` log
 line naming the device and the console's own disconnection reason.
 
 Three things are excluded on purpose. **Unadopted and pending devices**: the
-console can see your neighbour's AP, and it is not your fleet. **A device
-reporting a state this provider does not recognise** — UniFi documents
-provisioning, upgrading and heartbeat-missed states that no capture has ever
-shown — because reading an unfamiliar state as `offline` would report a firmware
-upgrade as a fleet outage. **A device reporting no state at all**, which is
-absence, not zero.
+console can see your neighbour's AP, and it is not your fleet. **A device in a
+transient state** — provisioning, upgrading and heartbeat-missed are recognised
+explicitly, and provisioning has been observed on real hardware, on three device
+classes at once during a config push — because reading any of them as `offline`
+would report a firmware upgrade as a fleet outage, and a device mid-provision is
+genuinely neither online nor offline. That exclusion is a decision about known
+states, logged at `V(1)`; a state this provider has never seen is a separate
+case, still counted towards neither key, and still logged at INFO asking to be
+reported. **A device reporting no state at all**, which is absence, not zero.
 
 Renaming a device on the console makes its old key *vanish* rather than report
 `offline`, which Reactor treats as lost visibility: the last known state is held

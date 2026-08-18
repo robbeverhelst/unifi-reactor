@@ -27,6 +27,8 @@ The counts are tier 2 for the same reason. `num_user`, `num_sta`, `num_ap`, `num
 
 That last check is required-to-equal rather than forbidden-to-be, and the direction is the whole of its value. A list of carrier names never to publish would have to hold the real one as a literal, in a public file, which is the thing being removed rather than a guard against it — and it would only ever catch the carriers somebody thought to add. Requiring `isp`, `isp_name` and `isp_organization` to equal what `hack/capture-unifi.sh` writes catches *every* carrier from every future capture and names none of them. It is also how the MAC guard already reasons: the rule there is "inside the `aa:bb:cc` prefix", not "not one of these MACs".
 
+The modem's SIM block is the furthest this policy has had to reach. `mbb.sim[]` is projected down to exactly the six fields the `data.usage` key reads — `active`, `slot`, `card_present`, `has_data_plan`, `data_warning`, `data_limited` — and everything else in it is **absent rather than redacted**: the SIM's `iccid` (its serial number), the modem's `imei`, the PIN/PUK lock state and retry counters, the carrier's name in `spn`, and the `mcc`/`mnc`/`asn` that together identify the network operator. Absence is the only projection under which none of that can leak. `hack/verify-testdata.sh` guards the identifiers anyway — `iccid`, `imei` and the PIN/PUK fields are in its secret-field list ahead of any fixture that could carry them — and requires `spn` to equal the placeholder the same way the WAN carrier fields already must.
+
 The placeholders are read out of the capture script, so the value a capture writes and the value the guard requires cannot drift apart.
 
 The counts are deliberately unguarded. There is no positive rule to write — every small integer is a plausible count — and enumerating forbidden ones would be the same inverted mistake. The capture script scaling them is the whole of the fix there.
@@ -54,7 +56,7 @@ Captured with WAN1 (ethernet) active and WAN2 (SFP+) enabled but down. Four fiel
 | `isp` | `Example Telecom` — a placeholder, see [below](#the-two-tiers) | published as the `isp` state key, slugified. Compared with `wan` across observations: if one moves and the other does not, that is logged |
 | `last_wan_status` | `{"WAN": "online"}` | never derived from — only `online` has ever been seen, so the failed value is unknown. Used only to notice the live uplink not calling itself online |
 
-> ⚠️ **The mapping is inferred, not observed.** No real failover has been captured, so which of these fields actually moves during one is unconfirmed — including whether `is_uplink` means "is carrying traffic" or "is configured as the uplink". See issue #34, and the runbook below for how to settle it.
+> ⚠️ **This capture cannot settle the mapping, and the one observed failover only half did.** All four fields agree here because only one uplink was live when this was taken. The failover that has since been observed on real hardware ([#34](https://github.com/robbeverhelst/unifi-reactor/issues/34), closed as verified) was a cellular one, in which `is_uplink` named no port at all and the gateway's uplink interface name resolved the key — so whether `is_uplink` moves cleanly between two *wired* ports is still unconfirmed. See the runbook below.
 
 ### Rehearsing a failover without hardware
 
@@ -151,10 +153,12 @@ when uptime is accumulating on an uplink other than the one `wan` names.
 It is deliberately narrow — nothing fires unless *some* uplink has uptime and
 the believed one does not, which is the shape of "the mapping is pointing at
 the wrong port" rather than of "this link is having a bad day". It also does
-not yet *resolve* anything: `wan` is still derived from `is_uplink`, because
-promoting a new signal of record needs a real failover to have been observed
-and one has not been. Add the health comparison to the deliverable below and
-it might.
+not *resolve* anything: `wan` is still derived from `is_uplink` where that
+field answers, because promoting a new signal of record needs a wired-to-wired
+failover to have been observed, and the failover that has been
+([#34](https://github.com/robbeverhelst/unifi-reactor/issues/34)) was a
+cellular one, in which `is_uplink` abstained entirely. Add the health
+comparison to the deliverable below and it might.
 
 There is deliberately **no** disagreement signal for `internet: down` while
 `wan: primary`. That is not a contradiction — it is precisely the failure mode
@@ -163,7 +167,7 @@ exactly the case the key exists for.
 
 ## Capturing a real failover
 
-This is the open half of issue #34. It needs a gateway with two working uplinks — for this project, a U5G with a SIM in it — and about fifteen minutes. Nothing here is dangerous; the worst case is a brief outage on the primary uplink.
+A real failover has now been captured with this runbook — a cellular one, on 2026-08-18, which is what closed [#34](https://github.com/robbeverhelst/unifi-reactor/issues/34): the primary uplink was unplugged for 75 seconds, the console failed over to a cellular backup and back, and `wan` read `backup` for the whole of it. What the runbook remains for is the failover that has **not** been observed: a wired-to-wired one, where a second wired WAN port takes over from the first. A cellular uplink carries no `is_uplink` field at all, so that outage structurally could not say whether `is_uplink` moves cleanly between two wired ports — and the gateway on hand has nothing plugged into its second wired port, so it cannot answer either. If you have a gateway with two working wired uplinks, this is the procedure. It takes about fifteen minutes, and nothing here is dangerous; the worst case is a brief outage on the primary uplink.
 
 **Before you start**, know that the point is not to get a `backup` reading. It is to find out *which fields moved*, and specifically whether `is_uplink` follows the traffic or stays where it was configured. Capture all four stages even if the state looks right at stage 3 — the interesting failures are silent.
 
@@ -256,7 +260,7 @@ UNIFI_URL=$UNIFI_URL UNIFI_API_KEY=$UNIFI_API_KEY ./hack/capture-unifi.sh
 
 That script writes `testdata/unifi/api/` through the allowlist. **Do not hand-edit `/tmp/failover/*.json` into a fixture** — those files are whole device records containing `x_authkey`, syslog keys and adoption identifiers. That exact shortcut put a live credential in this repository's history once. Capturing the backup-live stage means running the script *while the failover is in progress* and saving its output under a new name, e.g. `stat-device-gateway-on-backup.json`, then adding a row to the file table above.
 
-Post the comparison output on [#34](https://github.com/robbeverhelst/unifi-reactor/issues/34) even if you cannot commit fixtures. The five numbers per stage are the finding; the fixture is only how it gets tested.
+Post the comparison output in a new issue even if you cannot commit fixtures — [#34](https://github.com/robbeverhelst/unifi-reactor/issues/34) holds the cellular run's record and is closed. The five numbers per stage are the finding; the fixture is only how it gets tested.
 
 ## Fleet health (`state`, `adopted`)
 
@@ -277,14 +281,17 @@ as `0` would report one truncated record as a dead device and take the fleet to
 `degraded`. `adopted` is a pointer too, and `nil` is read as "not known to be
 adopted" — the direction that publishes fewer keys rather than more.
 
-> ⚠️ **Only states 0 and 1 have been observed**, both of them `1`. UniFi
-> documents others — pending adoption, provisioning, upgrading, heartbeat missed,
-> isolated — and none has been captured, so none is mapped. A device in one of
-> them counts towards neither key and logs a line asking for a report, because
-> reading "upgrading" as `offline` would turn a firmware update into a fleet
-> outage. `disconnection_reason`'s field name comes from UniFi's own API rather
-> than from a capture; it is diagnostics only, so a wrong name costs a log field
-> and nothing else.
+> ⚠️ **Only states 0 and 1 appear in the committed captures**, both of them `1`.
+> Since then state 5 (provisioning) has been observed on real hardware, on three
+> device classes at once during a config push, and the transient states UniFi
+> documents — upgrading (4), provisioning (5), heartbeat missed (6) — are
+> recognised explicitly: each counts towards neither key, as a decision about
+> known states rather than unknown ones, and logs at `V(1)`, because reading
+> "upgrading" as `offline` would turn a firmware update into a fleet outage. A
+> state outside that set also counts towards neither key and still logs a line
+> asking for a report. `disconnection_reason`'s field name comes from UniFi's own
+> API rather than from a capture; it is diagnostics only, so a wrong name costs a
+> log field and nothing else.
 
 The two captured names are the console's defaults for that hardware, which is
 what makes them safe to use as documentation examples. Anything derived from a

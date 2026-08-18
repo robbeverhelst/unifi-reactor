@@ -65,7 +65,7 @@ Out of scope: `unifi.insecureSkipVerify: true`, which is the documented default 
 
 **Residual risk, stated plainly.** With an SSID or a port allowlisted, anyone who can create an `Automation` in any namespace can cause that SSID to be switched or that port to be cycled, at whatever moment the provider state they chose transitions. That is the feature. Allowlist only things whose loss is an inconvenience, and note that a disabled WLAN is **not handed back** by an uninstall or by deleting the `Automation` — there is no baseline for it and the pre-delete sweep has no credentials to use one with.
 
-**Unverified surface.** Every endpoint on the write path is inferred rather than observed; only the authentication has been seen working against real hardware. [Writing to a UniFi console](https://reactor.robbeverhelst.com/contributing/unifi-write-api/) splits the two. A bug in that inference degrades to a refused action rather than to a wrong one, which is the property the check-before-write discipline exists to give.
+**Unverified surface.** Almost every endpoint on the write path is inferred rather than observed. The authentication has been seen working against real hardware, and — since 2026-08-15 — so has one write: an outlet write was accepted and moved only the outlet it addressed, though the outlet was empty, so nobody has yet watched a relay open under load ([#109](https://github.com/robbeverhelst/unifi-reactor/issues/109)). [Writing to a UniFi console](https://reactor.robbeverhelst.com/contributing/unifi-write-api/) splits inferred from observed. A bug in that inference degrades to a refused action rather than to a wrong one, which is the property the check-before-write discipline exists to give.
 
 ## Supported versions
 
@@ -74,6 +74,8 @@ The project is pre-1.0. Fixes land on the latest release only; there are no main
 ## Verifying a release
 
 Images and charts are signed with [cosign](https://docs.sigstore.dev/) keyless signing from the release workflow — there is no key to steal, and the signature records the workflow and tag that produced the artifact. Signing starts with the first release after this policy was added; v0.3.0 and earlier are unsigned.
+
+The commands below require **cosign v3 or newer**. Releases from v1.5.0 are signed with cosign v3, which no longer publishes the legacy `sha256-<digest>.sig` tag that v2 clients look for — so cosign v2 reports `no signatures found` against v1.5.0 and later **even though the artifacts are signed**. What changed is the signature format, with the signing toolchain, not the signing: cosign v3 against the same release verifies the claims, the transparency log entry, and the certificate.
 
 ```bash
 IDENTITY='^https://github.com/robbeverhelst/unifi-reactor/.github/workflows/release.yaml@refs/tags/v.*$'
