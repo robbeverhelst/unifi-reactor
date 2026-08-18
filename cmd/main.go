@@ -468,7 +468,7 @@ func main() {
 	}
 	if destinations.Empty() {
 		setupLog.Info("Outbound actions disabled (no allowed destinations configured); " +
-			"http.request and notification.* actions will be refused")
+			strings.Join(actions.OutboundTypes(), ", ") + " actions will be refused")
 	}
 
 	if dryRun {
@@ -614,7 +614,7 @@ func setupUniFi(
 	switch {
 	case !writer.Enabled():
 		setupLog.Info("UniFi console actions disabled (nothing is allowlisted); " +
-			"unifi.wlan.* and unifi.poe.cycle actions will be refused")
+			strings.Join(actions.ConsoleTypes(), ", ") + " actions will be refused")
 	case !writer.Credentialed():
 		// Not fatal, on the same rule the webhook fast path follows: this is not
 		// the mechanism of record, and an operator whose poller works should not
@@ -625,7 +625,8 @@ func setupUniFi(
 	default:
 		setupLog.Info("UniFi console actions enabled",
 			"allowedWlans", len(cfg.Actions.AllowedWLANs),
-			"allowedPoePorts", len(cfg.Actions.AllowedPoEPorts))
+			"allowedPoePorts", len(cfg.Actions.AllowedPoEPorts),
+			"allowedOutlets", len(cfg.Actions.AllowedOutlets))
 	}
 	return writer, nil
 }

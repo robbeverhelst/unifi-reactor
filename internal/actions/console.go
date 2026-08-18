@@ -16,6 +16,8 @@ limitations under the License.
 
 package actions
 
+import "slices"
+
 // The console action types: the edge actions that write to the console a
 // provider observes, rather than to an address an Automation named.
 //
@@ -84,14 +86,24 @@ const (
 	TypeUniFiOutletRestore = "unifi.outlet.restore"
 )
 
+// consoleTypes is the one list of console action types. Dispatch and the
+// startup line that names what an empty allowlist refuses both read it, so a
+// type added here is refused-by-name at startup without anyone remembering —
+// the outlet actions added in v1.3.0 were refused without the startup line
+// naming them (#99).
+var consoleTypes = []string{
+	TypeUniFiWLANEnable, TypeUniFiWLANDisable, TypeUniFiPoECycle,
+	TypeUniFiOutletCut, TypeUniFiOutletRestore,
+}
+
 // IsConsole reports whether an action type writes to a provider's own console,
 // and so whether it is executed by that provider rather than by this package's
 // outbound client.
 func IsConsole(actionType string) bool {
-	switch actionType {
-	case TypeUniFiWLANEnable, TypeUniFiWLANDisable, TypeUniFiPoECycle,
-		TypeUniFiOutletCut, TypeUniFiOutletRestore:
-		return true
-	}
-	return false
+	return slices.Contains(consoleTypes, actionType)
+}
+
+// ConsoleTypes returns every console action type, in declaration order.
+func ConsoleTypes() []string {
+	return slices.Clone(consoleTypes)
 }
