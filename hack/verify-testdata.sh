@@ -18,8 +18,12 @@ HACK_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "${1:-$HACK_DIR/..}"
 failed=0
 
-# Fields that must never carry a real value.
-SECRET_FIELDS='x_authkey|syslog_key|serial|anon_id|device_id|hash_id|external_id|setup_id'
+# Fields that must never carry a real value. The SIM and modem identifiers are
+# here ahead of any fixture that could carry them: an iccid is the SIM's serial
+# number, an imei identifies the modem, and the PIN/PUK state is the lock on
+# somebody's SIM. The capture projection drops all of them rather than
+# redacting them, so for these, appearing at all is the violation.
+SECRET_FIELDS='x_authkey|syslog_key|serial|anon_id|device_id|hash_id|external_id|setup_id|iccid|imei|pin_lock|pin_verified|pin_tries_remaining|puk_tries_remaining'
 
 # Fields whose value must be the placeholder the capture script writes, and
 # nothing else.
@@ -37,7 +41,11 @@ SECRET_FIELDS='x_authkey|syslog_key|serial|anon_id|device_id|hash_id|external_id
 # The placeholders are read out of hack/capture-unifi.sh rather than repeated
 # here, so the value the capture writes and the value this requires cannot
 # drift apart.
-ISP_FIELDS='isp|isp_name|isp_organization'
+# spn is the SIM's own statement of the same fact — the carrier's name, read
+# off the card in the modem block. The capture projection drops it entirely, so
+# the only value that could ever legitimately appear is the placeholder a
+# hand-derived fixture copied from the capture script.
+ISP_FIELDS='isp|isp_name|isp_organization|spn'
 placeholder() { sed -n "s/^$1='\(.*\)'\$/\1/p" "$HACK_DIR/capture-unifi.sh"; }
 ISP_PLACEHOLDER="$(placeholder ISP)"
 ISP_ORG_PLACEHOLDER="$(placeholder ISP_ORG)"
@@ -55,11 +63,15 @@ fi
 for file in testdata/unifi/api/*.json testdata/unifi/webhooks/*.json; do
   [ -e "$file" ] || continue
 
-  # Any of the above with something other than a redaction marker.
+  # Any of the above with something other than a redaction marker. The value
+  # side accepts a quoted string or a bare JSON scalar, because the PIN and PUK
+  # retry counters are numbers and a numeric secret is no less real for having
+  # no quotes; the optional spaces are how jq pretty-prints, which is the shape
+  # every committed capture actually has.
   while IFS= read -r hit; do
     echo "$file: unredacted secret field: $hit"
     failed=1
-  done < <(grep -oE "\"($SECRET_FIELDS)\":\"[^\"]+\"" "$file" | grep -vE '"REDACTED"' || true)
+  done < <(grep -oE "\"($SECRET_FIELDS)\" *: *(\"[^\"]*\"|[^,}[:space:]]+)" "$file" | grep -vE '"REDACTED"$' || true)
 
   # Real-world addresses that should have been replaced with documentation ranges.
   while IFS= read -r hit; do

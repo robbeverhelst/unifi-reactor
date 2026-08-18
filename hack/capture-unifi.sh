@@ -95,6 +95,15 @@ WAN='{is_uplink, up, ifname, name, speed, ip: (if .ip then "'"$PUB_IP"'" else nu
 # 2026-08-15; the fixture committed before that date predates this projection
 # and carries neither, which is why the write path is exercised against
 # hack/mock-unifi rather than against a capture.
+#
+# mbb is the most sensitive block this API has shown so far, and its projection
+# is the six booleans-and-a-slot the data.usage key reads — nothing else. A real
+# SIM entry also carries the SIM's iccid (its serial number), the modem's imei,
+# the PIN/PUK lock state and retry counters, the carrier's name in spn, and
+# mcc/mnc/asn which together identify the country and network operator. None of
+# that is redacted: it is absent, which is the only projection under which it
+# cannot leak. rxbytes and txbytes are counters rather than identifiers, but
+# nothing reads them, and being read is what earns a field a place here.
 DEVICE='{
   model, type, name, state, adopted, version, displayable_version,
   disconnection_reason,
@@ -110,6 +119,9 @@ DEVICE='{
   uplink: (if .uplink then {name: .uplink.name, type: .uplink.type} else null end),
   last_wan_status,
   isp: (if .active_geo_info.WAN.isp_name then "'"$ISP"'" else null end),
+  mbb: (if .mbb.sim then {sim: [.mbb.sim[] | {
+    active, slot, card_present, has_data_plan, data_warning, data_limited
+  }]} else null end),
   vbms_table,
   outlet_table: (if .outlet_table then [.outlet_table[] | {
     index, relay_state, relay_group, outlet_caps,
@@ -124,9 +136,7 @@ DEVICE='{
 # to name wan1 and wan2, which is how a gateway with a cellular backup — which
 # reports it as wan3 — could never produce a fixture reproducing #104. The wanN
 # fields themselves stay in the allowlist one at a time exactly as before; what
-# is dynamic is only which N exist. mbb is deliberately NOT projected: nothing
-# reads it, and it carries a cell_id and a modem MAC, which under the #94 rule
-# would put it in the replace-the-value tier before it could ever be committed.
+# is dynamic is only which N exist.
 + (with_entries(select((.key | test("^wan[0-9]+$")) and .value != null)) | map_values('"$WAN"'))
 | with_entries(select(.value != null))'
 
