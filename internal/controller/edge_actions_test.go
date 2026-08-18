@@ -287,7 +287,7 @@ var _ = Describe("Edge actions", func() {
 			// Suspension is a reversible delete, and a deleted automation does
 			// not announce transitions it is no longer acting on.
 			Expect(outbound.requests()).To(BeEmpty())
-			Expect(statusOf(name).Matching).To(BeTrue())
+			Expect(statusOf(name).Matching).To(HaveValue(BeTrue()))
 		})
 	})
 
@@ -397,13 +397,14 @@ var _ = Describe("Edge actions", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(outbound.requests()).To(BeEmpty())
-			Expect(statusOf(name).Matching).To(BeFalse())
+			Expect(statusOf(name).Matching).To(BeNil(),
+				"nothing had been committed before the failed write, and nothing may be after it")
 
 			By("announcing it once the target does get written")
 			reconciler.Client = k8sClient
 			reconcileOnce(name)
 			Expect(outbound.requests()).To(HaveLen(1))
-			Expect(statusOf(name).Matching).To(BeTrue())
+			Expect(statusOf(name).Matching).To(HaveValue(BeTrue()))
 		})
 	})
 

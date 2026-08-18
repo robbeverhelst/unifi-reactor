@@ -298,7 +298,7 @@ var _ = Describe("Automation Controller", func() {
 
 			By("recording status")
 			status := statusOf(target)
-			Expect(status.Matching).To(BeFalse())
+			Expect(status.Matching).To(HaveValue(BeFalse()))
 			Expect(status.ObservedState).To(HaveKeyWithValue(keyWAN, wanPrimary))
 			Expect(status.LastExecution).NotTo(BeNil())
 			Expect(status.LastExecution.OnExit).To(BeTrue())
@@ -426,7 +426,7 @@ var _ = Describe("Automation Controller", func() {
 
 			By("still reporting what it observes, so it stays useful for debugging")
 			status := statusOf(target)
-			Expect(status.Matching).To(BeTrue())
+			Expect(status.Matching).To(HaveValue(BeTrue()))
 			Expect(status.ObservedState).To(HaveKeyWithValue(keyUPS, upsOnBattery))
 			Expect(conditionOf(status, conditionReady).Status).To(Equal(metav1.ConditionTrue))
 			Expect(conditionOf(status, conditionReady).Reason).To(Equal(reasonSuspended))
@@ -469,7 +469,7 @@ var _ = Describe("Automation Controller", func() {
 			reconciler.Store = engine.NewStateStore()
 			reconcileOnce(target)
 			Expect(replicasOf(target)).To(Equal(int32(3)), "the recorded baseline is restored")
-			Expect(statusOf(target).Matching).To(BeTrue(), "the last known matching is held, not guessed")
+			Expect(statusOf(target).Matching).To(HaveValue(BeTrue()), "the last known matching is held, not guessed")
 		})
 
 		It("does not release a target another automation still claims", func() {

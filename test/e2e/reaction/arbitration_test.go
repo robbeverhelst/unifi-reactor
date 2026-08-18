@@ -104,7 +104,7 @@ var _ = Describe("Arbitrating one workload between two Automations", Ordered, fu
 
 		Eventually(func(g Gomega) {
 			automation := automationOf(g, wanShared)
-			g.Expect(automation.Status.Matching).To(BeFalse())
+			g.Expect(automation.Status.Matching).To(HaveValue(BeFalse()))
 			target := targetStatus(automation, shared)
 			g.Expect(target).NotTo(BeNil())
 			g.Expect(target.Desired).To(HaveValue(BeEquivalentTo(baseline)),

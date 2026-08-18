@@ -197,7 +197,7 @@ var _ = Describe("Not acting, and saying what would have happened", func() {
 			reconcileOnce(name)
 
 			automation := automationOf(name)
-			Expect(automation.Status.Matching).To(BeFalse())
+			Expect(automation.Status.Matching).To(HaveValue(BeFalse()))
 			Expect(targetOf(automation).Preview.Effective).To(HaveValue(BeEquivalentTo(0)))
 		})
 

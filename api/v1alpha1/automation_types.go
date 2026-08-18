@@ -1014,8 +1014,15 @@ type AutomationStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// Matching is true while a state trigger's condition currently matches.
+	//
+	// Absent means this Automation has never been evaluated, while false
+	// means it was evaluated and the condition does not hold. Keeping those
+	// apart is why this is a pointer rather than a plain bool: under
+	// omitempty a plain bool's false never serialises, which read as "never
+	// evaluated" and left the MATCHING printer column blank on every quiet
+	// automation.
 	// +optional
-	Matching bool `json:"matching,omitempty"`
+	Matching *bool `json:"matching,omitempty"`
 
 	// ObservedState is the provider state relevant to this Automation at the
 	// last reconcile, e.g. {"wan": "backup"}.
@@ -1065,6 +1072,14 @@ type AutomationStatus struct {
 	// rather than leaving the resource stuck terminating.
 	// +optional
 	ReleaseAttempts int32 `json:"releaseAttempts,omitempty"`
+}
+
+// IsMatching reports the last recorded matching. The nil of a never-evaluated
+// Automation exists to keep "no answer yet" visible on the wire; in code it
+// reads as not matching, because an Automation that has never been evaluated
+// has never claimed anything either.
+func (s *AutomationStatus) IsMatching() bool {
+	return s.Matching != nil && *s.Matching
 }
 
 // +kubebuilder:object:root=true

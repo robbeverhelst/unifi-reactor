@@ -63,7 +63,7 @@ var _ = Describe("Reacting to a power failure", Ordered, func() {
 
 		By("leaving the escalation alone: one of its two keys does not hold")
 		automation := automationOf(Default, critical)
-		Expect(automation.Status.Matching).To(BeFalse())
+		Expect(automation.Status.Matching).To(HaveValue(BeFalse()))
 		Expect(automation.Status.ObservedState).To(HaveKeyWithValue(keyUPS, upsOnBattery))
 		Expect(automation.Status.ObservedState).To(HaveKeyWithValue("ups.battery", "normal"))
 		Expect(replicasOf(Default, core)).To(BeEquivalentTo(baseline))
@@ -81,7 +81,7 @@ var _ = Describe("Reacting to a power failure", Ordered, func() {
 		}).Should(Succeed())
 
 		By("still considering itself matched, because losing sight is not evidence the outage ended")
-		Expect(automationOf(Default, upsShed).Status.Matching).To(BeTrue())
+		Expect(automationOf(Default, upsShed).Status.Matching).To(HaveValue(BeTrue()))
 
 		By("and leaving the workload down for as long as it cannot see")
 		Consistently(func(g Gomega) {
@@ -121,7 +121,7 @@ var _ = Describe("Reacting to a power failure", Ordered, func() {
 		}).Should(Succeed())
 
 		automation := automationOf(Default, critical)
-		Expect(automation.Status.Matching).To(BeTrue())
+		Expect(automation.Status.Matching).To(HaveValue(BeTrue()))
 		Expect(automation.Status.ObservedState).To(HaveKeyWithValue("ups.battery", "critical"))
 		Expect(targetStatus(automation, core).Effective).To(HaveValue(BeEquivalentTo(1)))
 

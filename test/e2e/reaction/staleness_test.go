@@ -106,7 +106,7 @@ var _ = Describe("Deciding while the console has stopped answering", Ordered, fu
 		By("while changing nothing at all about what is being held")
 		Consistently(func(g Gomega) {
 			g.Expect(replicasOf(g, target)).To(BeEquivalentTo(0))
-			g.Expect(automationOf(g, shed).Status.Matching).To(BeTrue())
+			g.Expect(automationOf(g, shed).Status.Matching).To(HaveValue(BeTrue()))
 			g.Expect(annotationsOf(g, target)).To(HaveKeyWithValue(annotationBaseline, "2"))
 		}).Should(Succeed(), "losing sight of the console released a claim, which brings a workload back mid-outage")
 	})

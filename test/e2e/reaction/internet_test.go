@@ -81,7 +81,7 @@ var _ = Describe("Reacting to the internet going away under a healthy link", Ord
 		}).Should(Succeed())
 
 		automation := automationOf(Default, shed)
-		Expect(automation.Status.Matching).To(BeTrue())
+		Expect(automation.Status.Matching).To(HaveValue(BeTrue()))
 		Expect(automation.Status.ObservedState).To(HaveKeyWithValue(keyInternet, internetDown))
 		By("with the uplink exactly where it was — the shed could not have fired otherwise")
 		Expect(automation.Status.ObservedState).To(HaveKeyWithValue(keyWAN, wanPrimary))
