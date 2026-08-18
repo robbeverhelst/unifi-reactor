@@ -151,7 +151,7 @@ func TestCapturedGatewayHasEverySignalAgreeing(t *testing.T) {
 	ctx, logs := logged(t)
 	c := NewClient("", nil, "", false)
 
-	state, err := c.stateFromDevices(ctx, gatewayFromCapture(t, nil))
+	state, _, err := c.stateFromDevices(ctx, gatewayFromCapture(t, nil))
 	if err != nil {
 		t.Fatalf("stateFromDevices: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestFailoverHypotheses(t *testing.T) {
 			ctx, logs := logged(t)
 			c := NewClient("", nil, "", false)
 
-			state, err := c.stateFromDevices(ctx, gatewayFromCapture(t, tc.apply))
+			state, _, err := c.stateFromDevices(ctx, gatewayFromCapture(t, tc.apply))
 			if err != nil {
 				t.Fatalf("stateFromDevices: %v", err)
 			}
@@ -345,7 +345,7 @@ func TestCellularFailoverReportsBackup(t *testing.T) {
 	ctx, logs := logged(t)
 	c := NewClient("", nil, "", false)
 
-	state, err := c.stateFromDevices(ctx, gatewayFromCapture(t, func(d *deviceRecord) {
+	state, wanIndex, err := c.stateFromDevices(ctx, gatewayFromCapture(t, func(d *deviceRecord) {
 		withCellularBackup(d)
 		wan(d, 1).IsUplink, wan(d, 1).Up = false, false
 		d.Uplink.Name = cellularIfName
@@ -359,6 +359,12 @@ func TestCellularFailoverReportsBackup(t *testing.T) {
 	}
 	if value != wanBackup {
 		t.Fatalf("state[wan] = %q, want %q", value, wanBackup)
+	}
+	// backup alone cannot say WHICH backup, and on this failover it is the
+	// third uplink — the fact the health cross-check needs, and the one whose
+	// loss made it fire falsely on every poll of the real outage (#107).
+	if wanIndex != 3 {
+		t.Errorf("resolved wan index = %d, want 3 — the cross-check would look for the wrong uptime_stats key", wanIndex)
 	}
 	// The path taken must be the documented one: is_uplink resolves nothing,
 	// the uplink interface decides.
@@ -374,7 +380,7 @@ func TestACellularBackupAtRestChangesNothing(t *testing.T) {
 	ctx, logs := logged(t)
 	c := NewClient("", nil, "", false)
 
-	state, err := c.stateFromDevices(ctx, gatewayFromCapture(t, withCellularBackup))
+	state, _, err := c.stateFromDevices(ctx, gatewayFromCapture(t, withCellularBackup))
 	if err != nil {
 		t.Fatalf("stateFromDevices: %v", err)
 	}
@@ -456,13 +462,13 @@ func TestISPAndWANDisagreementAcrossObservations(t *testing.T) {
 
 			// First observation: the capture, unmodified. Nothing to compare
 			// against yet, so nothing may be reported.
-			if _, err := c.stateFromDevices(ctx, gatewayFromCapture(t, nil)); err != nil {
+			if _, _, err := c.stateFromDevices(ctx, gatewayFromCapture(t, nil)); err != nil {
 				t.Fatalf("first observation: %v", err)
 			}
 			if strings.Contains(logs(), "ISP") {
 				t.Errorf("the first observation has nothing to disagree with:\n%s", logs())
 			}
-			if _, err := c.stateFromDevices(ctx, gatewayFromCapture(t, tc.then)); err != nil {
+			if _, _, err := c.stateFromDevices(ctx, gatewayFromCapture(t, tc.then)); err != nil {
 				t.Fatalf("second observation: %v", err)
 			}
 			if !strings.Contains(logs(), tc.wantLogged) {
@@ -478,10 +484,10 @@ func TestNoDisagreementWhenBothSignalsMoveTogether(t *testing.T) {
 	ctx, logs := logged(t)
 	c := NewClient("", nil, "", false)
 
-	if _, err := c.stateFromDevices(ctx, gatewayFromCapture(t, nil)); err != nil {
+	if _, _, err := c.stateFromDevices(ctx, gatewayFromCapture(t, nil)); err != nil {
 		t.Fatalf("first observation: %v", err)
 	}
-	state, err := c.stateFromDevices(ctx, gatewayFromCapture(t, func(d *deviceRecord) {
+	state, _, err := c.stateFromDevices(ctx, gatewayFromCapture(t, func(d *deviceRecord) {
 		wan(d, 1).IsUplink, wan(d, 1).Up = false, false
 		wan(d, 2).IsUplink, wan(d, 2).Up = true, true
 		d.Uplink.Name = wan(d, 2).IfName
@@ -512,7 +518,7 @@ func TestAnUnknownCarrierIsNotACarrierChange(t *testing.T) {
 		func(d *deviceRecord) { d.ISP = "" },
 		nil,
 	} {
-		if _, err := c.stateFromDevices(ctx, gatewayFromCapture(t, apply)); err != nil {
+		if _, _, err := c.stateFromDevices(ctx, gatewayFromCapture(t, apply)); err != nil {
 			t.Fatalf("stateFromDevices: %v", err)
 		}
 	}

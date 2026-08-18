@@ -50,7 +50,7 @@ func TestWiFiAgainstTheCapture(t *testing.T) {
 	}
 
 	before := disagreements(t, signalWiFiStatusDisagrees)
-	state := mergedHealth(t, NewClient("", nil, "", false), health, wanPrimary)
+	state := mergedHealth(t, NewClient("", nil, "", false), health, wanPrimary, wanPrimaryIndex)
 
 	if state[stateKeyWiFi] != wifiWarning {
 		t.Errorf("state[wifi] = %q, want %q", state[stateKeyWiFi], wifiWarning)
@@ -82,7 +82,7 @@ func TestWiFiFromTheAPCounts(t *testing.T) {
 			// about the derivation rather than about the cross-check.
 			subsystem(t, &health, healthSubsystemWLAN).Status = ""
 
-			if got := mergedHealth(t, c, health, wanPrimary)[stateKeyWiFi]; got != tc.want {
+			if got := mergedHealth(t, c, health, wanPrimary, wanPrimaryIndex)[stateKeyWiFi]; got != tc.want {
 				t.Errorf("state[wifi] = %q with %d adopted and %d disconnected, want %q",
 					got, tc.adopted, tc.disconnected, tc.want)
 			}
@@ -96,7 +96,7 @@ func TestNoAccessPointsPublishesNoWiFiKey(t *testing.T) {
 	health := capturedHealth(t)
 	counts(t, &health, 0, 0, 0)
 
-	if got, present := mergedHealth(t, NewClient("", nil, "", false), health, wanPrimary)[stateKeyWiFi]; present {
+	if got, present := mergedHealth(t, NewClient("", nil, "", false), health, wanPrimary, wanPrimaryIndex)[stateKeyWiFi]; present {
 		t.Errorf("a site with no adopted AP should publish no wifi key, got %q", got)
 	}
 }
@@ -124,7 +124,7 @@ func TestMissingAPCountsPublishNoWiFiKey(t *testing.T) {
 				wlan.NumDisconnected = nil
 			}
 
-			if got, present := mergedHealth(t, c, health, wanPrimary)[stateKeyWiFi]; present {
+			if got, present := mergedHealth(t, c, health, wanPrimary, wanPrimaryIndex)[stateKeyWiFi]; present {
 				t.Errorf("missing counts should publish no wifi key, got %q", got)
 			}
 		})
@@ -144,7 +144,7 @@ func TestWiFiDegradesWithoutTakingTheOtherHealthKeys(t *testing.T) {
 	}
 	health.Data = kept
 
-	state := mergedHealth(t, NewClient("", nil, "", false), health, wanPrimary)
+	state := mergedHealth(t, NewClient("", nil, "", false), health, wanPrimary, wanPrimaryIndex)
 	if got, present := state[stateKeyWiFi]; present {
 		t.Errorf("wifi should be absent when the wlan subsystem is, got %q", got)
 	}
@@ -169,7 +169,7 @@ func TestTheConsolesOwnStatusIsCrossCheckedRatherThanTrusted(t *testing.T) {
 	counts(t, &health, 3, 0, 3)
 	subsystem(t, &health, healthSubsystemWLAN).Status = healthStatusWarning
 
-	state := mergedHealth(t, NewClient("", nil, "", false), health, wanPrimary)
+	state := mergedHealth(t, NewClient("", nil, "", false), health, wanPrimary, wanPrimaryIndex)
 	if state[stateKeyWiFi] != wifiOK {
 		t.Errorf("state[wifi] = %q, want %q: every adopted AP is connected", state[stateKeyWiFi], wifiOK)
 	}
@@ -187,7 +187,7 @@ func TestAnUnfamiliarWiFiStatusIsNotADisagreement(t *testing.T) {
 	counts(t, &health, 2, 0, 2)
 	subsystem(t, &health, healthSubsystemWLAN).Status = "degraded-somehow"
 
-	if got := mergedHealth(t, NewClient("", nil, "", false), health, wanPrimary)[stateKeyWiFi]; got != wifiOK {
+	if got := mergedHealth(t, NewClient("", nil, "", false), health, wanPrimary, wanPrimaryIndex)[stateKeyWiFi]; got != wifiOK {
 		t.Errorf("state[wifi] = %q, want %q", got, wifiOK)
 	}
 	if after := disagreements(t, signalWiFiStatusDisagrees); after != before {

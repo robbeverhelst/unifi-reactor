@@ -139,7 +139,7 @@ func TestFirmwareDecodesTheDocumentedShape(t *testing.T) {
 	}
 
 	c := NewClient("", nil, "", false)
-	state, err := c.stateFromDevices(context.Background(), parsed)
+	state, _, err := c.stateFromDevices(context.Background(), parsed)
 	if err != nil {
 		t.Fatalf("stateFromDevices: %v", err)
 	}

@@ -58,7 +58,7 @@ func poeState(t *testing.T, threshold float64, devices ...deviceRecord) map[stri
 	t.Helper()
 	c := NewClient("", nil, "", false)
 	c.MaxPoEUtilizationPercent = threshold
-	state, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: devices})
+	state, _, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: devices})
 	if err != nil {
 		t.Fatalf("stateFromDevices: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestPoEDecodesTheDocumentedShape(t *testing.T) {
 	}
 
 	c := NewClient("", nil, "", false)
-	state, err := c.stateFromDevices(context.Background(), parsed)
+	state, _, err := c.stateFromDevices(context.Background(), parsed)
 	if err != nil {
 		t.Fatalf("stateFromDevices: %v", err)
 	}

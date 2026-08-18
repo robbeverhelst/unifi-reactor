@@ -45,7 +45,7 @@ func heatState(t *testing.T, threshold float64, devices ...deviceRecord) map[str
 	t.Helper()
 	c := NewClient("", nil, "", false)
 	c.HighTemperatureCelsius = threshold
-	state, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: devices})
+	state, _, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: devices})
 	if err != nil {
 		t.Fatalf("stateFromDevices: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestTemperatureDecodesTheDocumentedShape(t *testing.T) {
 	}
 
 	c := NewClient("", nil, "", false)
-	state, err := c.stateFromDevices(context.Background(), parsed)
+	state, _, err := c.stateFromDevices(context.Background(), parsed)
 	if err != nil {
 		t.Fatalf("stateFromDevices: %v", err)
 	}

@@ -47,7 +47,7 @@ func fleetState(t *testing.T, perDeviceKeys bool, devices ...deviceRecord) map[s
 	t.Helper()
 	c := NewClient("", nil, "", false)
 	c.PerDeviceKeys = perDeviceKeys
-	state, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: devices})
+	state, _, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: devices})
 	if err != nil {
 		t.Fatalf("stateFromDevices: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestAListWithNothingAdoptedObservesNothing(t *testing.T) {
 	pending.Adopted = nil
 
 	c := NewClient("", nil, "", false)
-	if _, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{pending}}); err == nil {
+	if _, _, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{pending}}); err == nil {
 		t.Fatal("a list holding nothing observable should be an error, not an empty observation")
 	}
 }
