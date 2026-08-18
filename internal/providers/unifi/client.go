@@ -379,10 +379,11 @@ func (c *Client) Observe(ctx context.Context) (map[string]string, error) {
 	state := map[string]string{}
 
 	var devices deviceStatResponse
+	var wanIndex int
 	deviceErr := c.get(ctx, "stat/device", &devices)
 	if deviceErr == nil {
 		var fromDevices map[string]string
-		fromDevices, deviceErr = c.stateFromDevices(ctx, devices)
+		fromDevices, wanIndex, deviceErr = c.stateFromDevices(ctx, devices)
 		maps.Copy(state, fromDevices)
 	}
 
@@ -394,7 +395,7 @@ func (c *Client) Observe(ctx context.Context) (map[string]string, error) {
 	var health healthResponse
 	healthErr := c.get(ctx, "stat/health", &health)
 	if healthErr == nil {
-		c.mergeHealth(ctx, state, health, state[stateKeyWAN])
+		c.mergeHealth(ctx, state, health, state[stateKeyWAN], wanIndex)
 	}
 
 	if len(state) == 0 {
@@ -445,9 +446,15 @@ func (c *Client) get(ctx context.Context, endpoint string, out any) error {
 // The two halves are independent on purpose: a site with no UPS still reports
 // wan, and a site whose gateway reports nothing recognisable still reports the
 // UPS keys. Only observing nothing at all is an error.
-func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse) (map[string]string, error) {
+//
+// The resolved WAN index rides alongside the map because the map cannot carry
+// it: wan is published as primary or backup by design, and the health
+// cross-check needs to know which uplink that answer collapsed from (#107).
+// Zero when wan is absent or was guessed rather than resolved.
+func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse) (map[string]string, int, error) {
 	state := map[string]string{}
 	gatewaySeen := false
+	wanIndex := 0
 	// One tally per fleet-wide key, each holding whatever operator configuration
 	// it needs, so that publishing takes nothing but the state map.
 	fleet := newDeviceTally(c.PerDeviceKeys)
@@ -473,7 +480,8 @@ func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse
 		}
 		if !gatewaySeen && len(d.WANs) > 0 {
 			gatewaySeen = true
-			if wan := c.wanFrom(ctx, d); wan != "" {
+			var wan string
+			if wan, wanIndex = c.wanFrom(ctx, d); wan != "" {
 				state[stateKeyWAN] = wan
 			}
 			state[stateKeyISP] = ispFrom(d)
@@ -504,7 +512,7 @@ func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse
 	c.reportOutlets(ctx, outlets.publish(ctx, state))
 
 	if len(state) == 0 {
-		return nil, fmt.Errorf(
+		return nil, 0, fmt.Errorf(
 			"no gateway reporting WAN ports, no UPS, and no adopted device reporting a state "+
 				"were found in the device list; "+
 				"the fields this provider reads were verified on UniFi Network %s (%s), "+
@@ -512,13 +520,18 @@ func (c *Client) stateFromDevices(ctx context.Context, parsed deviceStatResponse
 				"— see the compatibility matrix in the README",
 			VerifiedNetworkVersion, VerifiedConsoleModel)
 	}
-	return state, nil
+	return state, wanIndex, nil
 }
 
 // wanSignal is one field's answer to which uplink is live.
 type wanSignal struct {
 	// value is wanPrimary, wanBackup, or empty when the field says nothing.
 	value string
+	// index is the WAN index value collapsed from. value is a two-value key by
+	// design, so it cannot say WHICH backup on a gateway with more than one —
+	// and the health cross-check needs to know exactly that (#107). Zero when
+	// value is empty or the claim was ambiguous.
+	index int
 	// ambiguous records that the field claimed both uplinks at once. That is
 	// itself information — it means the field does not mean what this provider
 	// takes it to mean — so it is kept apart from "said nothing".
@@ -569,9 +582,9 @@ func resolveSignal(claims []int) wanSignal {
 		return wanSignal{}
 	case 1:
 		if claims[0] == wanPrimaryIndex {
-			return wanSignal{value: wanPrimary}
+			return wanSignal{value: wanPrimary, index: claims[0]}
 		}
-		return wanSignal{value: wanBackup}
+		return wanSignal{value: wanBackup, index: claims[0]}
 	}
 	return wanSignal{ambiguous: true}
 }
@@ -591,42 +604,49 @@ func resolveSignal(claims []int) wanSignal {
 // failover takes. The cellular entry carries no is_uplink key at all, so
 // is_uplink names nobody and the uplink interface — which the gateway points
 // at the cellular tunnel — is what resolves the key to backup (#104).
-func (c *Client) wanFrom(ctx context.Context, d deviceRecord) string {
+//
+// The uplink's index is returned alongside the value because the value cannot
+// carry it: wan is a two-value key by design, so "backup" cannot say which
+// backup, and the health cross-check needs exactly that to name the uplink it
+// believes in (#107). Zero when the value itself is a guess — the ambiguous
+// path — or when nothing is published at all.
+func (c *Client) wanFrom(ctx context.Context, d deviceRecord) (string, int) {
 	log := logf.FromContext(ctx).WithName("unifi-wan")
 	claimed, named := d.byIsUplink(), d.byUplinkName()
 
-	var wan string
+	var wan wanSignal
 	switch {
 	case claimed.value != "" && named.value != "" && claimed.value != named.value:
 		metrics.SignalsDisagreed(ProviderName, signalWANUplinkDisagrees)
 		log.Info("The gateway's WAN signals disagree about which uplink is live; "+
 			"trusting is_uplink, which is the signal this mapping has always used",
 			"byIsUplink", claimed.value, "byUplinkName", named.value, "uplink", d.Uplink.Name)
-		wan = claimed.value
+		wan = claimed
 	case claimed.value != "":
-		wan = claimed.value
+		wan = claimed
 	case named.value != "":
 		metrics.SignalsDisagreed(ProviderName, signalWANUplinkUnclaimed)
 		log.Info("is_uplink does not name a single live WAN port; "+
 			"deriving the live uplink from the gateway's uplink interface instead",
 			"byUplinkName", named.value, "uplink", d.Uplink.Name, "bothPortsClaimedUplink", claimed.ambiguous)
-		wan = named.value
+		wan = named
 	case claimed.ambiguous:
 		// Both ports claim the uplink and nothing resolves it. Reporting the
 		// backup is what this provider has always done here; it is a guess,
-		// and saying so is the only honest thing available.
+		// and saying so is the only honest thing available. The index stays
+		// zero: which uplink the guess would even mean is what is unknown.
 		metrics.SignalsDisagreed(ProviderName, signalWANUplinkAmbiguous)
 		log.Info("Both WAN ports report is_uplink and nothing resolves which is live; "+
 			"reporting the backup uplink, which may be wrong",
 			"wan", wanBackup)
-		wan = wanBackup
+		wan = wanSignal{value: wanBackup}
 	default:
 		log.V(1).Info("No WAN port reports is_uplink and the gateway names no uplink interface; wan will not be published")
-		return ""
+		return "", 0
 	}
 
-	c.checkLastWANStatus(ctx, d, wan)
-	return wan
+	c.checkLastWANStatus(ctx, d, wan.value)
+	return wan.value, wan.index
 }
 
 // checkLastWANStatus compares the derived uplink against the gateway's own

@@ -18,6 +18,7 @@ package unifi
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 
@@ -117,7 +118,13 @@ type healthMonitor struct {
 // lives in the device response. When wan says nothing, neither does
 // wan.quality: guessing an uplink would publish another uplink's numbers under
 // this one's name.
-func (c *Client) mergeHealth(ctx context.Context, state map[string]string, health healthResponse, wan string) {
+//
+// wanIndex is the uplink wan resolved to, and it comes along because wan alone
+// is not enough to name one: it is a two-value key by design, and on a gateway
+// with more than one backup "backup" does not say which (#107). Zero means wan
+// was guessed rather than resolved, and the per-uplink work is skipped for the
+// same reason it is when wan is empty.
+func (c *Client) mergeHealth(ctx context.Context, state map[string]string, health healthResponse, wan string, wanIndex int) {
 	log := logf.FromContext(ctx).WithName("unifi-health")
 
 	for _, subsystem := range health.Data {
@@ -140,11 +147,16 @@ func (c *Client) mergeHealth(ctx context.Context, state map[string]string, healt
 				state[stateKeyWiFi] = wifi
 			}
 		case healthSubsystemWAN:
-			c.crossCheckUplinkHealth(ctx, wan, subsystem.UptimeStats)
+			c.crossCheckUplinkHealth(ctx, wan, wanIndex, subsystem.UptimeStats)
 			if wan == "" {
 				continue
 			}
-			entry, present := subsystem.UptimeStats[uptimeStatsKey(wan)]
+			if wanIndex < wanPrimaryIndex {
+				log.V(1).Info("wan was guessed rather than resolved to a single uplink; "+
+					"wan.quality will not be published", "wan", wan)
+				continue
+			}
+			entry, present := subsystem.UptimeStats[uptimeStatsKey(wanIndex)]
 			if !present {
 				log.V(1).Info("The health response carries no uptime stats for the live uplink; "+
 					"wan.quality will not be published", "wan", wan)
@@ -157,13 +169,17 @@ func (c *Client) mergeHealth(ctx context.Context, state map[string]string, healt
 	}
 }
 
-// uptimeStatsKey maps a derived uplink onto the key stat/health files it
-// under. Both captured endpoints agree on WAN and WAN2.
-func uptimeStatsKey(wan string) string {
-	if wan == wanBackup {
-		return wanStatusKeyBackup
+// uptimeStatsKey maps a resolved uplink index onto the key stat/health files
+// it under. The primary is WAN with no digit — both captures agree — and every
+// index above it is WAN<N>, which is what the captures show for the second and
+// what live hardware reports for the third (#107). It takes the index rather
+// than wan's value because the value cannot name a backup: deriving the key
+// from it assumed the only backup is the second uplink.
+func uptimeStatsKey(index int) string {
+	if index == wanPrimaryIndex {
+		return wanStatusKeyPrimary
 	}
-	return wanStatusKeyPrimary
+	return fmt.Sprintf("WAN%d", index)
 }
 
 // internetFrom translates the www subsystem's status. An empty result means
@@ -276,11 +292,19 @@ func meanOf(monitors, alerting []healthMonitor, field func(healthMonitor) *float
 // and the one believed live is not among them — the shape of "the mapping is
 // pointing at the wrong port", not the shape of "this link is having a bad
 // day", which wan.quality is the key for.
-func (c *Client) crossCheckUplinkHealth(ctx context.Context, wan string, stats map[string]uplinkHealth) {
-	if wan == "" || len(stats) == 0 {
+//
+// The believed uplink is named by its resolved index, not by wan's value.
+// Deriving the key from the value assumed the only possible backup is the
+// second uplink, and on a gateway whose live backup is the third that reported
+// the mapping as broken — once per poll, for the whole outage — at the exact
+// moment it was right (#107). When no single index was resolved there is
+// nothing precise enough to check, and nothing fires; wan itself was flagged
+// as a guess on that path.
+func (c *Client) crossCheckUplinkHealth(ctx context.Context, wan string, wanIndex int, stats map[string]uplinkHealth) {
+	if wan == "" || wanIndex < wanPrimaryIndex || len(stats) == 0 {
 		return
 	}
-	believed := uptimeStatsKey(wan)
+	believed := uptimeStatsKey(wanIndex)
 	var withUptime []string
 	for key, entry := range stats {
 		if entry.Uptime != nil && *entry.Uptime > 0 {

@@ -168,7 +168,7 @@ func TestVersionGuardGivesUpQuietlyOnAnUnreachableConsole(t *testing.T) {
 // because that is what it usually means once the credentials are right.
 func TestNothingObservableNamesTheTestedVersion(t *testing.T) {
 	c := NewClient("", nil, "", false)
-	_, err := c.stateFromDevices(context.Background(), deviceStatResponse{})
+	_, _, err := c.stateFromDevices(context.Background(), deviceStatResponse{})
 	if err == nil {
 		t.Fatal("expected an error for an empty device list")
 	}

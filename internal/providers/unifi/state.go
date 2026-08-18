@@ -85,8 +85,13 @@ const (
 	wanStatusOnline = "online"
 
 	// The keys last_wan_status and the health subsystem's uptime_stats use for
-	// each uplink. Both captures agree on WAN for the first and WAN2 for the
-	// second, and neither has been observed while the second was live.
+	// the first two uplinks. Both captures agree on WAN for the first and WAN2
+	// for the second, and the second has still never been observed live. A
+	// THIRD has: during a real cellular failover the health endpoint
+	// accumulated the live uplink's uptime under WAN3, so these two constants
+	// are not the whole key space — which is why uptimeStatsKey derives WAN<N>
+	// from the resolved uplink index instead of assuming every backup is the
+	// second (#107).
 	wanStatusKeyPrimary = "WAN"
 	wanStatusKeyBackup  = "WAN2"
 

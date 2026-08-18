@@ -165,7 +165,7 @@ func TestObserveWithoutAGatewayStillReportsTheUPS(t *testing.T) {
 
 func TestWANBackupWhenWAN2IsUplink(t *testing.T) {
 	c := NewClient("", nil, "", false)
-	state, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{
+	state, _, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{
 		Model: gatewayModel,
 		WANs: []wanEntry{
 			{Index: 1, wanPort: wanPort{IsUplink: false, Up: false}},
@@ -203,7 +203,7 @@ func TestUPSStateTransitions(t *testing.T) {
 			vbms.IsBatteryMode = tc.batteryMode
 			vbms.BattPool.BatteryLevel = tc.level
 
-			state, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{Model: "USWDA26", VBMS: &vbms}}})
+			state, _, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{Model: "USWDA26", VBMS: &vbms}}})
 			if err != nil {
 				t.Fatalf("stateFromDevices: %v", err)
 			}
@@ -226,7 +226,7 @@ func TestUPSStaysOnBatteryAcrossBatteryLevels(t *testing.T) {
 		vbms.IsBatteryMode = true
 		vbms.BattPool.BatteryLevel = level
 
-		state, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
+		state, _, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
 		if err != nil {
 			t.Fatalf("stateFromDevices: %v", err)
 		}
@@ -258,7 +258,7 @@ func TestUPSRuntimeLevels(t *testing.T) {
 			var vbms vbmsTable
 			vbms.BattPool.TimeToRemain = tc.seconds
 
-			state, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
+			state, _, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
 			if err != nil {
 				t.Fatalf("stateFromDevices: %v", err)
 			}
@@ -279,7 +279,7 @@ func TestUnknownRuntimeOmitsTheKey(t *testing.T) {
 		var vbms vbmsTable
 		vbms.BattPool.TimeToRemain = seconds
 
-		state, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
+		state, _, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
 		if err != nil {
 			t.Fatalf("stateFromDevices: %v", err)
 		}
@@ -316,7 +316,7 @@ func TestUPSLoadLevels(t *testing.T) {
 			var vbms vbmsTable
 			vbms.BattPool.TotalPowerOutput, vbms.BattPool.TotalPowerBudget = tc.output, tc.budget
 
-			state, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
+			state, _, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
 			if err != nil {
 				t.Fatalf("stateFromDevices: %v", err)
 			}
@@ -347,7 +347,7 @@ func TestUPSKeysAreIndependentAxes(t *testing.T) {
 			vbms.BattPool.TimeToRemain = 120
 			vbms.BattPool.TotalPowerOutput, vbms.BattPool.TotalPowerBudget = watts(output), watts(1000)
 
-			state, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
+			state, _, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
 			if err != nil {
 				t.Fatalf("stateFromDevices: %v", err)
 			}
@@ -373,7 +373,7 @@ func TestCustomUPSRuntimeAndLoadThresholds(t *testing.T) {
 	output, budget := 310.0, 1000.0
 	vbms.BattPool.TotalPowerOutput, vbms.BattPool.TotalPowerBudget = &output, &budget
 
-	state, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
+	state, _, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
 	if err != nil {
 		t.Fatalf("stateFromDevices: %v", err)
 	}
@@ -396,7 +396,7 @@ func TestCustomBatteryThresholds(t *testing.T) {
 	vbms.IsBatteryMode = true
 	vbms.BattPool.BatteryLevel = 50
 
-	state, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
+	state, _, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{VBMS: &vbms}}})
 	if err != nil {
 		t.Fatalf("stateFromDevices: %v", err)
 	}
@@ -407,7 +407,7 @@ func TestCustomBatteryThresholds(t *testing.T) {
 
 func TestErrorsWhenNothingObservable(t *testing.T) {
 	c := NewClient("", nil, "", false)
-	if _, err := c.stateFromDevices(context.Background(), deviceStatResponse{}); err == nil {
+	if _, _, err := c.stateFromDevices(context.Background(), deviceStatResponse{}); err == nil {
 		t.Fatal("expected error for empty device list")
 	}
 }

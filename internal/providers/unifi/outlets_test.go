@@ -60,7 +60,7 @@ func capturedGrouping() []outletRecord {
 func outletState(t *testing.T, devices ...deviceRecord) map[string]string {
 	t.Helper()
 	c := NewClient("", nil, "", false)
-	state, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: devices})
+	state, _, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: devices})
 	if err != nil {
 		t.Fatalf("stateFromDevices: %v", err)
 	}
@@ -323,7 +323,7 @@ func TestBothRelayHypothesesAreObservable(t *testing.T) {
 			c := NewClient("", nil, "", false)
 			ctx := context.Background()
 
-			if _, err := c.stateFromDevices(ctx, deviceStatResponse{
+			if _, _, err := c.stateFromDevices(ctx, deviceStatResponse{
 				Data: []deviceRecord{upsWithOutlets("UPS 2U", capturedGrouping()...)},
 			}); err != nil {
 				t.Fatalf("first observation: %v", err)
@@ -340,7 +340,7 @@ func TestBothRelayHypothesesAreObservable(t *testing.T) {
 				}
 				second = append(second, o)
 			}
-			state, err := c.stateFromDevices(ctx, deviceStatResponse{
+			state, _, err := c.stateFromDevices(ctx, deviceStatResponse{
 				Data: []deviceRecord{upsWithOutlets("UPS 2U", second...)},
 			})
 			if err != nil {
@@ -386,7 +386,7 @@ func TestOutletChangeIsReportedWithItsRelayGroup(t *testing.T) {
 			}, funcr.Options{}))
 			c := NewClient("", nil, "", false)
 
-			if _, err := c.stateFromDevices(ctx, deviceStatResponse{
+			if _, _, err := c.stateFromDevices(ctx, deviceStatResponse{
 				Data: []deviceRecord{upsWithOutlets("UPS 2U", capturedGrouping()...)},
 			}); err != nil {
 				t.Fatalf("first observation: %v", err)
@@ -409,7 +409,7 @@ func TestOutletChangeIsReportedWithItsRelayGroup(t *testing.T) {
 				}
 				second = append(second, o)
 			}
-			if _, err := c.stateFromDevices(ctx, deviceStatResponse{
+			if _, _, err := c.stateFromDevices(ctx, deviceStatResponse{
 				Data: []deviceRecord{upsWithOutlets("UPS 2U", second...)},
 			}); err != nil {
 				t.Fatalf("second observation: %v", err)

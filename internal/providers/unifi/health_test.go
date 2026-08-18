@@ -24,6 +24,15 @@ import (
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
+// The uplink indices behind the capture's uptime_stats keys: WAN is the
+// primary, WAN2 the wired backup, WAN3 the cellular one. The tests thread them
+// explicitly because that is the point of #107 — the wan value alone cannot
+// name a backup, so every believed uplink is named by its index.
+const (
+	wiredBackupIndex    = 2
+	cellularBackupIndex = 3
+)
+
 // disagreements reads reactor_provider_signal_disagreements_total for one
 // signal. It gathers from the registry rather than reaching into the metrics
 // package, because the counter is deliberately unexported: what a test may
@@ -74,17 +83,20 @@ func subsystem(t *testing.T, health *healthResponse, name string) *healthSubsyst
 	return nil
 }
 
-func mergedHealth(t *testing.T, c *Client, health healthResponse, wan string) map[string]string {
+// mergedHealth runs mergeHealth as Observe would: with the wan value and the
+// uplink index it resolved from, which are two separate facts — "backup" alone
+// cannot say which backup (#107).
+func mergedHealth(t *testing.T, c *Client, health healthResponse, wan string, wanIndex int) map[string]string {
 	t.Helper()
 	state := map[string]string{}
-	c.mergeHealth(context.Background(), state, health, wan)
+	c.mergeHealth(context.Background(), state, health, wan, wanIndex)
 	return state
 }
 
 // The capture was taken with the internet up and WAN1 at 100% availability,
 // 16 ms average. Both keys should read the healthy value from it unedited.
 func TestHealthAgainstTheCapture(t *testing.T) {
-	state := mergedHealth(t, NewClient("", nil, "", false), capturedHealth(t), wanPrimary)
+	state := mergedHealth(t, NewClient("", nil, "", false), capturedHealth(t), wanPrimary, wanPrimaryIndex)
 
 	for key, want := range map[string]string{
 		stateKeyInternet:   internetOK,
@@ -111,7 +123,7 @@ func TestInternetFromTheWWWSubsystem(t *testing.T) {
 			health := capturedHealth(t)
 			subsystem(t, &health, healthSubsystemWWW).Status = tc.status
 
-			if got := mergedHealth(t, c, health, wanPrimary)[stateKeyInternet]; got != tc.want {
+			if got := mergedHealth(t, c, health, wanPrimary, wanPrimaryIndex)[stateKeyInternet]; got != tc.want {
 				t.Errorf("state[internet] = %q, want %q", got, tc.want)
 			}
 		})
@@ -128,7 +140,7 @@ func TestUnrecognisedInternetStatusOmitsTheKey(t *testing.T) {
 		health := capturedHealth(t)
 		subsystem(t, &health, healthSubsystemWWW).Status = status
 
-		if got, present := mergedHealth(t, c, health, wanPrimary)[stateKeyInternet]; present {
+		if got, present := mergedHealth(t, c, health, wanPrimary, wanPrimaryIndex)[stateKeyInternet]; present {
 			t.Errorf("status %q should publish no internet key, got %q", status, got)
 		}
 	}
@@ -143,7 +155,7 @@ func TestHealthKeysDegradeIndependently(t *testing.T) {
 		health := capturedHealth(t)
 		health.Data = without(health.Data, healthSubsystemWWW)
 
-		state := mergedHealth(t, c, health, wanPrimary)
+		state := mergedHealth(t, c, health, wanPrimary, wanPrimaryIndex)
 		if _, present := state[stateKeyInternet]; present {
 			t.Error("internet should be absent when the console reports no www subsystem")
 		}
@@ -156,7 +168,7 @@ func TestHealthKeysDegradeIndependently(t *testing.T) {
 		health := capturedHealth(t)
 		health.Data = without(health.Data, healthSubsystemWAN)
 
-		state := mergedHealth(t, c, health, wanPrimary)
+		state := mergedHealth(t, c, health, wanPrimary, wanPrimaryIndex)
 		if state[stateKeyInternet] != internetOK {
 			t.Errorf("state[internet] = %q, want %q", state[stateKeyInternet], internetOK)
 		}
@@ -183,13 +195,19 @@ func without(data []healthSubsystem, name string) []healthSubsystem {
 func TestWANQualityNeedsToKnowWhichUplinkIsLive(t *testing.T) {
 	c := NewClient("", nil, "", false)
 
-	if got, present := mergedHealth(t, c, capturedHealth(t), "")[stateKeyWANQuality]; present {
+	if got, present := mergedHealth(t, c, capturedHealth(t), "", 0)[stateKeyWANQuality]; present {
 		t.Errorf("wan.quality should be absent when wan is not derivable, got %q", got)
 	}
 	// The same capture read as if the backup were live: WAN2 has been down for
 	// the whole window, and its monitors say so.
-	if got := mergedHealth(t, c, capturedHealth(t), wanBackup)[stateKeyWANQuality]; got != wanQualityDegraded {
+	if got := mergedHealth(t, c, capturedHealth(t), wanBackup, wiredBackupIndex)[stateKeyWANQuality]; got != wanQualityDegraded {
 		t.Errorf("state[wan.quality] on the dead backup = %q, want %q", got, wanQualityDegraded)
+	}
+	// A wan that was guessed rather than resolved — the ambiguous-claim path —
+	// names no uplink either. Publishing WAN2's numbers there would be the
+	// same two-WAN assumption #107 removed from the cross-check.
+	if got, present := mergedHealth(t, c, capturedHealth(t), wanBackup, 0)[stateKeyWANQuality]; present {
+		t.Errorf("wan.quality should be absent when wan was guessed rather than resolved, got %q", got)
 	}
 }
 
@@ -221,7 +239,7 @@ func TestWANQualityThresholds(t *testing.T) {
 			entry.Monitors, entry.AlertingMonitors = nil, nil
 			subsystem(t, &health, healthSubsystemWAN).UptimeStats[wanStatusKeyPrimary] = entry
 
-			if got := mergedHealth(t, c, health, wanPrimary)[stateKeyWANQuality]; got != tc.want {
+			if got := mergedHealth(t, c, health, wanPrimary, wanPrimaryIndex)[stateKeyWANQuality]; got != tc.want {
 				t.Errorf("state[wan.quality] = %q, want %q", got, tc.want)
 			}
 		})
@@ -240,7 +258,7 @@ func TestMissingAvailabilityIsNotZeroAvailability(t *testing.T) {
 	entry.Monitors, entry.AlertingMonitors = nil, nil
 	subsystem(t, &health, healthSubsystemWAN).UptimeStats[wanStatusKeyPrimary] = entry
 
-	state := mergedHealth(t, NewClient("", nil, "", false), health, wanPrimary)
+	state := mergedHealth(t, NewClient("", nil, "", false), health, wanPrimary, wanPrimaryIndex)
 	if got, present := state[stateKeyWANQuality]; present {
 		t.Fatalf("an entry reporting no availability must publish no wan.quality, got %q", got)
 	}
@@ -257,13 +275,13 @@ func TestAvailabilityFallsBackToTheMonitors(t *testing.T) {
 	wanSubsystem.UptimeStats[wanStatusKeyPrimary] = entry
 
 	// The capture's WAN monitors all read 100%, so it stays good...
-	state := mergedHealth(t, NewClient("", nil, "", false), health, wanPrimary)
+	state := mergedHealth(t, NewClient("", nil, "", false), health, wanPrimary, wanPrimaryIndex)
 	if state[stateKeyWANQuality] != wanQualityGood {
 		t.Errorf("state[wan.quality] = %q, want %q", state[stateKeyWANQuality], wanQualityGood)
 	}
 	// ...and the captured WAN2 entry, which has no uplink-level fields at all,
 	// still reads degraded off its monitors alone.
-	if got := mergedHealth(t, NewClient("", nil, "", false), health, wanBackup)[stateKeyWANQuality]; got != wanQualityDegraded {
+	if got := mergedHealth(t, NewClient("", nil, "", false), health, wanBackup, wiredBackupIndex)[stateKeyWANQuality]; got != wanQualityDegraded {
 		t.Errorf("state[wan.quality] from monitors alone = %q, want %q", got, wanQualityDegraded)
 	}
 }
@@ -277,14 +295,16 @@ func TestUplinkHealthCrossCheck(t *testing.T) {
 	tests := []struct {
 		name          string
 		wan           string
+		wanIndex      int
 		uptime        map[string]*int
 		wantDisagrees bool
 	}{
-		{"the capture, believed correctly", wanPrimary, nil, false},
-		{"believed to be on the backup while the primary has the uptime", wanBackup, nil, true},
+		{"the capture, believed correctly", wanPrimary, wanPrimaryIndex, nil, false},
+		{"believed to be on the backup while the primary has the uptime", wanBackup, wiredBackupIndex, nil, true},
 		{
-			name: "believed to be on the primary while the backup has the uptime",
-			wan:  wanPrimary,
+			name:     "believed to be on the primary while the backup has the uptime",
+			wan:      wanPrimary,
+			wanIndex: wanPrimaryIndex,
 			uptime: map[string]*int{
 				wanStatusKeyPrimary: nil,
 				wanStatusKeyBackup:  seconds(98787),
@@ -295,8 +315,9 @@ func TestUplinkHealthCrossCheck(t *testing.T) {
 			// Mid-switchover: nothing has uptime yet. There is no evidence
 			// either way, so this must stay quiet rather than cry wolf on
 			// every failover.
-			name: "no uplink has uptime",
-			wan:  wanPrimary,
+			name:     "no uplink has uptime",
+			wan:      wanPrimary,
+			wanIndex: wanPrimaryIndex,
 			uptime: map[string]*int{
 				wanStatusKeyPrimary: nil,
 				wanStatusKeyBackup:  nil,
@@ -304,12 +325,45 @@ func TestUplinkHealthCrossCheck(t *testing.T) {
 		},
 		{
 			// Both up: the believed uplink is among them, so nothing is wrong.
-			name: "both uplinks have uptime",
-			wan:  wanBackup,
+			name:     "both uplinks have uptime",
+			wan:      wanBackup,
+			wanIndex: wiredBackupIndex,
 			uptime: map[string]*int{
 				wanStatusKeyPrimary: seconds(98787),
 				wanStatusKeyBackup:  seconds(4200),
 			},
+		},
+		{
+			// The false positive #107 is about, as it fired live: wan resolved
+			// to backup FROM THE THIRD UPLINK, and the health endpoint agrees —
+			// the uptime sits under WAN3. Deriving the believed key from the
+			// value compared WAN2 against {WAN3} and reported the mapping as
+			// broken at the exact moment it was right, once per poll.
+			name:     "the live backup is the third uplink and health agrees",
+			wan:      wanBackup,
+			wanIndex: cellularBackupIndex,
+			uptime: map[string]*int{
+				wanStatusKeyPrimary: nil,
+				"WAN3":              seconds(75),
+			},
+		},
+		{
+			// The disagreement worth keeping — the one the fix must not weaken
+			// away: wan names the third uplink while only the primary has
+			// uptime. "Any backup with uptime counts" would stay quiet here,
+			// and here is precisely a mapping pointing at the wrong backup.
+			name:          "believed to be on the third uplink while the primary has the uptime",
+			wan:           wanBackup,
+			wanIndex:      cellularBackupIndex,
+			wantDisagrees: true,
+		},
+		{
+			// wan was guessed off an ambiguous claim, so no index resolved.
+			// There is no believed uplink precise enough to check against, and
+			// the guess was already reported where it was made.
+			name:     "wan was guessed and no index resolved",
+			wan:      wanBackup,
+			wanIndex: 0,
 		},
 	}
 	for _, tc := range tests {
@@ -323,7 +377,7 @@ func TestUplinkHealthCrossCheck(t *testing.T) {
 			}
 
 			before := disagreements(t, signalWANHealthDisagrees)
-			mergedHealth(t, NewClient("", nil, "", false), health, tc.wan)
+			mergedHealth(t, NewClient("", nil, "", false), health, tc.wan, tc.wanIndex)
 			after := disagreements(t, signalWANHealthDisagrees)
 
 			if got := after > before; got != tc.wantDisagrees {
