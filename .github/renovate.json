@@ -16,6 +16,13 @@
       "automerge": true
     },
     {
+      "description": "A 0.x minor is a breaking change under semver, so grouping one into allNonMajor hides it. Starlight 0.37 -> 0.41 arrived that way, needed an Astro the repo did not have, and broke the Pages deploy for half an hour without failing a single check.",
+      "matchCurrentVersion": "/^0\\./",
+      "matchUpdateTypes": ["minor"],
+      "groupName": null,
+      "automerge": false
+    },
+    {
       "description": "controller-tools and controller-runtime decide what `make manifests` and the envtest matrix produce; land those deliberately",
       "matchPackageNames": [
         "kubernetes-sigs/controller-tools",
