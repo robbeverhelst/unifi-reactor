@@ -32,12 +32,6 @@ func outlet(index int, name string, relayState *bool, group *int) outletRecord {
 	return outletRecord{Index: &index, Name: name, RelayState: relayState, RelayGroup: group}
 }
 
-//go:fix inline
-func boolPtr(v bool) *bool { return new(v) }
-
-//go:fix inline
-func intPtr(v int) *int { return new(v) }
-
 // upsWithOutlets is an adopted UPS carrying an outlet table.
 func upsWithOutlets(name string, outlets ...outletRecord) deviceRecord {
 	d := adoptedDevice(name, deviceStateOnline)

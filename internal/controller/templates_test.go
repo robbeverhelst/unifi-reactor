@@ -383,6 +383,3 @@ var _ = Describe("An automation whose template can never render", func() {
 		Expect(readyOf(name).Message).To(ContainSubstring("spec.onExit[0].notification.message"))
 	})
 })
-
-//go:fix inline
-func ptrTo[T any](value T) *T { return new(value) }
