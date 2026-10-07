@@ -492,8 +492,7 @@ func transient(err error) bool {
 // the credential — so an unsanitized error reaching a log line, a status field
 // or an Event would publish it.
 func sanitize(err error) error {
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
+	if urlErr, ok := errors.AsType[*url.Error](err); ok {
 		err = urlErr.Err
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
