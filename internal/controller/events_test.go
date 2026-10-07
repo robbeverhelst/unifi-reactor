@@ -84,7 +84,7 @@ func (f *fakeRecorder) find(reason string) (recordedEvent, bool) {
 
 func automationWithCondition(conditionType, reason string) *reactorv1alpha1.Automation {
 	automation := &reactorv1alpha1.Automation{
-		ObjectMeta: metav1.ObjectMeta{Name: "pause-on-backup-wan", Namespace: "media"},
+		Name: "pause-on-backup-wan", Namespace: "media",
 		Spec: reactorv1alpha1.AutomationSpec{
 			When: &reactorv1alpha1.StateTrigger{Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup}},
 		},
@@ -282,7 +282,7 @@ func TestEventsAreWrittenToTheEventsAPIGroup(t *testing.T) {
 	defer broadcaster.Shutdown()
 
 	recorder := broadcaster.NewRecorder(clientgoscheme.Scheme, "automation")
-	recorder.Eventf(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "stand-in", Namespace: "media"}},
+	recorder.Eventf(&corev1.Pod{Name: "stand-in", Namespace: "media"},
 		nil, corev1.EventTypeWarning, reasonStateKeyUnavailable, actionEvaluate, "note")
 
 	select {

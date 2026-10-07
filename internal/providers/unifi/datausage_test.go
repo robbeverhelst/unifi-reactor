@@ -32,9 +32,9 @@ import (
 // modem returns a record whose mbb block holds exactly the given SIM slots.
 func modem(sims ...simSlot) deviceRecord {
 	return deviceRecord{
-		Model:           gatewayModel,
-		Type:            "udm",
-		dataUsageFields: dataUsageFields{MBB: &mbbBlock{SIM: sims}},
+		Model: gatewayModel,
+		Type:  "udm",
+		MBB:   &mbbBlock{SIM: sims},
 	}
 }
 

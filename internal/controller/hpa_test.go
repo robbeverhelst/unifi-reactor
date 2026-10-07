@@ -72,7 +72,7 @@ var _ = Describe("A target a HorizontalPodAutoscaler already drives", func() {
 
 	reconcileOnce := func(name string) {
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{
-			NamespacedName: types.NamespacedName{Name: name, Namespace: testNamespace},
+			Name: name, Namespace: testNamespace,
 		})
 		Expect(err).NotTo(HaveOccurred())
 	}
@@ -102,7 +102,7 @@ var _ = Describe("A target a HorizontalPodAutoscaler already drives", func() {
 
 	createDeployment := func(name string, replicas int32) {
 		deployment := &appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+			Name: name, Namespace: testNamespace,
 			Spec: appsv1.DeploymentSpec{
 				Replicas: &replicas,
 				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{labelApp: name}},
@@ -124,7 +124,7 @@ var _ = Describe("A target a HorizontalPodAutoscaler already drives", func() {
 	createHPA := func(name, kind, target string) *autoscalingv2.HorizontalPodAutoscaler {
 		minReplicas := int32(1)
 		hpa := &autoscalingv2.HorizontalPodAutoscaler{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+			Name: name, Namespace: testNamespace,
 			Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
 				ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
 					APIVersion: "apps/v1", Kind: kind, Name: target,
@@ -141,7 +141,7 @@ var _ = Describe("A target a HorizontalPodAutoscaler already drives", func() {
 	createAutomation := func(name, target string) {
 		zero := int32(0)
 		automation := &reactorv1alpha1.Automation{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+			Name: name, Namespace: testNamespace,
 			Spec: reactorv1alpha1.AutomationSpec{
 				When: &reactorv1alpha1.StateTrigger{
 					Provider: providerUniFi, State: map[string]string{keyUPS: upsOnBattery},
@@ -203,7 +203,7 @@ var _ = Describe("A target a HorizontalPodAutoscaler already drives", func() {
 		It("claims the target the moment the HPA is gone", func() {
 			reconcileOnce(automated)
 			Expect(k8sClient.Delete(ctx, &autoscalingv2.HorizontalPodAutoscaler{
-				ObjectMeta: metav1.ObjectMeta{Name: hpaName, Namespace: testNamespace},
+				Name: hpaName, Namespace: testNamespace,
 			})).To(Succeed())
 
 			reconcileOnce(automated)

@@ -168,8 +168,8 @@ func TestWANBackupWhenWAN2IsUplink(t *testing.T) {
 	state, _, err := c.stateFromDevices(context.Background(), deviceStatResponse{Data: []deviceRecord{{
 		Model: gatewayModel,
 		WANs: []wanEntry{
-			{Index: 1, wanPort: wanPort{IsUplink: false, Up: false}},
-			{Index: 2, wanPort: wanPort{IsUplink: true, Up: true}},
+			{Index: 1, IsUplink: false, Up: false},
+			{Index: 2, IsUplink: true, Up: true},
 		},
 	}}})
 	if err != nil {

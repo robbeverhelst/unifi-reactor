@@ -26,7 +26,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -117,8 +116,8 @@ var _ = Describe("Console actions", func() {
 
 	create := func(name string, spec reactorv1alpha1.AutomationSpec) *reactorv1alpha1.Automation {
 		automation := &reactorv1alpha1.Automation{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
-			Spec:       spec,
+			Name: name, Namespace: testNamespace,
+			Spec: spec,
 		}
 		Expect(k8sClient.Create(ctx, automation)).To(Succeed())
 		DeferCleanup(func() {
@@ -140,7 +139,7 @@ var _ = Describe("Console actions", func() {
 			Provider: providerUniFi, State: state, ObservedAt: time.Now(),
 		})
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{
-			NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: name},
+			Namespace: testNamespace, Name: name,
 		})
 		Expect(err).NotTo(HaveOccurred())
 	}
@@ -313,8 +312,8 @@ var _ = Describe("Console actions", func() {
 	Describe("admission", func() {
 		rejects := func(name string, list ...reactorv1alpha1.Action) {
 			Expect(k8sClient.Create(ctx, &reactorv1alpha1.Automation{
-				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
-				Spec:       onBackup(list...),
+				Name: name, Namespace: testNamespace,
+				Spec: onBackup(list...),
 			})).NotTo(Succeed())
 		}
 

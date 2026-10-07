@@ -101,7 +101,7 @@ var _ = Describe("Automation Controller", func() {
 
 	createDeployment := func(name string, replicas int32) {
 		deployment := &appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+			Name: name, Namespace: testNamespace,
 			Spec: appsv1.DeploymentSpec{
 				Replicas: &replicas,
 				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{labelApp: name}},
@@ -119,8 +119,8 @@ var _ = Describe("Automation Controller", func() {
 
 	createAutomation := func(name string, spec reactorv1alpha1.AutomationSpec) {
 		automation := &reactorv1alpha1.Automation{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
-			Spec:       spec,
+			Name: name, Namespace: testNamespace,
+			Spec: spec,
 		}
 		Expect(k8sClient.Create(ctx, automation)).To(Succeed())
 		DeferCleanup(func() {
@@ -145,7 +145,7 @@ var _ = Describe("Automation Controller", func() {
 
 	reconcileOnce := func(name string) {
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{
-			NamespacedName: types.NamespacedName{Name: name, Namespace: testNamespace},
+			Name: name, Namespace: testNamespace,
 		})
 		Expect(err).NotTo(HaveOccurred())
 	}
@@ -183,7 +183,7 @@ var _ = Describe("Automation Controller", func() {
 	createStatefulSet := func(name string, replicas int32) {
 		selector := &metav1.LabelSelector{MatchLabels: map[string]string{labelApp: name}}
 		set := &appsv1.StatefulSet{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+			Name: name, Namespace: testNamespace,
 			Spec: appsv1.StatefulSetSpec{
 				Replicas:    &replicas,
 				ServiceName: name,
@@ -217,7 +217,7 @@ var _ = Describe("Automation Controller", func() {
 
 	createCronJob := func(name string, suspended bool) {
 		cronJob := &batchv1.CronJob{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+			Name: name, Namespace: testNamespace,
 			Spec: batchv1.CronJobSpec{
 				Schedule: "0 3 * * *",
 				Suspend:  &suspended,
@@ -522,7 +522,7 @@ var _ = Describe("Automation Controller", func() {
 	Context("when a target will not answer", func() {
 		reconcileFor := func(name string) (reconcile.Result, error) {
 			return reconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: name, Namespace: testNamespace},
+				Name: name, Namespace: testNamespace,
 			})
 		}
 
@@ -945,8 +945,8 @@ var _ = Describe("Automation Controller", func() {
 
 		createNode := func(name string, unschedulable bool) {
 			node := &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{Name: name},
-				Spec:       corev1.NodeSpec{Unschedulable: unschedulable},
+				Name: name,
+				Spec: corev1.NodeSpec{Unschedulable: unschedulable},
 			}
 			Expect(k8sClient.Create(ctx, node)).To(Succeed())
 			DeferCleanup(func() { _ = k8sClient.Delete(ctx, node) })

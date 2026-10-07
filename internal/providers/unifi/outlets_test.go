@@ -32,9 +32,6 @@ func outlet(index int, name string, relayState *bool, group *int) outletRecord {
 	return outletRecord{Index: &index, Name: name, RelayState: relayState, RelayGroup: group}
 }
 
-func boolPtr(v bool) *bool { return &v }
-func intPtr(v int) *int    { return &v }
-
 // upsWithOutlets is an adopted UPS carrying an outlet table.
 func upsWithOutlets(name string, outlets ...outletRecord) deviceRecord {
 	d := adoptedDevice(name, deviceStateOnline)
@@ -51,7 +48,7 @@ func capturedGrouping() []outletRecord {
 		if i > 4 {
 			group = 2
 		}
-		outlets = append(outlets, outlet(i, "Outlet "+strconv.Itoa(i), boolPtr(true), &group))
+		outlets = append(outlets, outlet(i, "Outlet "+strconv.Itoa(i), new(true), &group))
 	}
 	return outlets
 }
@@ -134,12 +131,12 @@ func TestOutletKeyPrefersANameOverAnIndex(t *testing.T) {
 		want  string
 		ok    bool
 	}{
-		{name: "console placeholder falls back to the index", index: intPtr(3), given: "Outlet 3", want: "3", ok: true},
+		{name: "console placeholder falls back to the index", index: new(3), given: "Outlet 3", want: "3", ok: true},
 		{name: "a placeholder naming another index is still a placeholder",
-			index: intPtr(7), given: "Outlet 3", want: "7", ok: true},
-		{name: "no name at all falls back to the index", index: intPtr(5), given: "", want: "5", ok: true},
-		{name: "a chosen name wins", index: intPtr(3), given: "NAS", want: "nas", ok: true},
-		{name: "a chosen name is slugified", index: intPtr(3), given: "Rack Switch 1", want: "rack-switch-1", ok: true},
+			index: new(7), given: "Outlet 3", want: "7", ok: true},
+		{name: "no name at all falls back to the index", index: new(5), given: "", want: "5", ok: true},
+		{name: "a chosen name wins", index: new(3), given: "NAS", want: "nas", ok: true},
+		{name: "a chosen name is slugified", index: new(3), given: "Rack Switch 1", want: "rack-switch-1", ok: true},
 		{name: "a name survives a missing index", index: nil, given: "NAS", want: "nas", ok: true},
 		{name: "no index and no name is not addressable", index: nil, given: "Outlet 4", want: "", ok: false},
 	}
@@ -156,8 +153,8 @@ func TestOutletKeyPrefersANameOverAnIndex(t *testing.T) {
 func TestOutletValues(t *testing.T) {
 	group := 1
 	state := outletState(t, upsWithOutlets("UPS 2U",
-		outlet(1, "Outlet 1", boolPtr(true), &group),
-		outlet(2, "NAS", boolPtr(false), &group),
+		outlet(1, "Outlet 1", new(true), &group),
+		outlet(2, "NAS", new(false), &group),
 	))
 
 	for key, want := range map[string]string{
@@ -177,7 +174,7 @@ func TestOutletWithNoRelayStateIsOmitted(t *testing.T) {
 	group := 1
 	state := outletState(t, upsWithOutlets("UPS 2U",
 		outlet(1, "Outlet 1", nil, &group),
-		outlet(2, "Outlet 2", boolPtr(true), &group),
+		outlet(2, "Outlet 2", new(true), &group),
 	))
 
 	if _, published := state[stateKeyOutletPrefix+"1"]; published {
@@ -208,7 +205,7 @@ func TestAnEmptyOutletTableIsNotAnOutletBearingDevice(t *testing.T) {
 	gateway := adoptedDevice("Dream Machine Pro", deviceStateOnline)
 	gateway.OutletTable = []outletRecord{}
 	group := 1
-	state := outletState(t, gateway, upsWithOutlets("UPS 2U", outlet(1, "Outlet 1", boolPtr(true), &group)))
+	state := outletState(t, gateway, upsWithOutlets("UPS 2U", outlet(1, "Outlet 1", new(true), &group)))
 
 	if state[stateKeyOutletPrefix+"1"] != outletOn {
 		t.Errorf("state[outlet.1] = %q, want the UPS behind the gateway's empty table to be read",
@@ -221,9 +218,9 @@ func TestAnEmptyOutletTableIsNotAnOutletBearingDevice(t *testing.T) {
 func TestOutletsSharingAKeyPublishNeither(t *testing.T) {
 	group := 1
 	state := outletState(t, upsWithOutlets("UPS 2U",
-		outlet(1, "NAS", boolPtr(true), &group),
-		outlet(2, "nas", boolPtr(false), &group),
-		outlet(3, "Outlet 3", boolPtr(true), &group),
+		outlet(1, "NAS", new(true), &group),
+		outlet(2, "nas", new(false), &group),
+		outlet(3, "Outlet 3", new(true), &group),
 	))
 
 	if _, published := state[stateKeyOutletPrefix+"nas"]; published {
@@ -239,8 +236,8 @@ func TestOutletsSharingAKeyPublishNeither(t *testing.T) {
 func TestOnlyTheFirstOutletTableIsPublished(t *testing.T) {
 	group := 1
 	state := outletState(t,
-		upsWithOutlets("UPS 2U", outlet(1, "Outlet 1", boolPtr(true), &group)),
-		upsWithOutlets("PDU", outlet(1, "Outlet 1", boolPtr(false), &group)),
+		upsWithOutlets("UPS 2U", outlet(1, "Outlet 1", new(true), &group)),
+		upsWithOutlets("PDU", outlet(1, "Outlet 1", new(false), &group)),
 	)
 
 	if state[stateKeyOutletPrefix+"1"] != outletOn {
@@ -253,7 +250,7 @@ func TestOnlyTheFirstOutletTableIsPublished(t *testing.T) {
 // but nothing can be said about what else would move with it.
 func TestOutletWithNoRelayGroupIsStillPublished(t *testing.T) {
 	tally := newOutletTally()
-	tally.observe(upsWithOutlets("UPS 2U", outlet(1, "Outlet 1", boolPtr(true), nil)))
+	tally.observe(upsWithOutlets("UPS 2U", outlet(1, "Outlet 1", new(true), nil)))
 	state := map[string]string{}
 	snapshot := tally.publish(context.Background(), state)
 
@@ -336,7 +333,7 @@ func TestBothRelayHypothesesAreObservable(t *testing.T) {
 			second := make([]outletRecord, 0, len(capturedGrouping()))
 			for _, o := range capturedGrouping() {
 				if opened[*o.Index] {
-					o.RelayState = boolPtr(false)
+					o.RelayState = new(false)
 				}
 				second = append(second, o)
 			}
@@ -405,7 +402,7 @@ func TestOutletChangeIsReportedWithItsRelayGroup(t *testing.T) {
 			second := make([]outletRecord, 0, len(capturedGrouping()))
 			for _, o := range capturedGrouping() {
 				if opened[*o.Index] {
-					o.RelayState = boolPtr(false)
+					o.RelayState = new(false)
 				}
 				second = append(second, o)
 			}

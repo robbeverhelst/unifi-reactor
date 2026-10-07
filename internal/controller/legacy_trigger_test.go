@@ -21,7 +21,6 @@ import (
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -50,8 +49,8 @@ func TestALeftOverEventTriggerAutomationStaysInert(t *testing.T) {
 
 	replicas := int32(3)
 	target := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: targetQbit, Namespace: testNamespace},
-		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
+		Name: targetQbit, Namespace: testNamespace,
+		Spec: appsv1.DeploymentSpec{Replicas: &replicas},
 	}
 	stale := legacyAutomation("notify-on-client-connect")
 	stale.Spec.Actions = []reactorv1alpha1.Action{{

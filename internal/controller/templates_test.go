@@ -58,7 +58,7 @@ func notifyWith(message string) reactorv1alpha1.Action {
 
 func automationWithActions(actionList, onExit []reactorv1alpha1.Action) *reactorv1alpha1.Automation {
 	return &reactorv1alpha1.Automation{
-		ObjectMeta: metav1.ObjectMeta{Name: "notify-on-wan-failover", Namespace: testNamespace},
+		Name: "notify-on-wan-failover", Namespace: testNamespace,
 		Spec: reactorv1alpha1.AutomationSpec{
 			When: &reactorv1alpha1.StateTrigger{
 				Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
@@ -242,7 +242,7 @@ var _ = Describe("An automation whose template can never render", func() {
 
 	reconcileOnce := func(name string) {
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{
-			NamespacedName: types.NamespacedName{Name: name, Namespace: testNamespace},
+			Name: name, Namespace: testNamespace,
 		})
 		Expect(err).NotTo(HaveOccurred())
 	}
@@ -261,8 +261,8 @@ var _ = Describe("An automation whose template can never render", func() {
 
 	createAutomation := func(name string, spec reactorv1alpha1.AutomationSpec) {
 		automation := &reactorv1alpha1.Automation{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
-			Spec:       spec,
+			Name: name, Namespace: testNamespace,
+			Spec: spec,
 		}
 		Expect(k8sClient.Create(ctx, automation)).To(Succeed())
 		DeferCleanup(func() {
@@ -278,7 +278,7 @@ var _ = Describe("An automation whose template can never render", func() {
 
 	createDeployment := func(name string, replicas int32) {
 		deployment := &appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+			Name: name, Namespace: testNamespace,
 			Spec: appsv1.DeploymentSpec{
 				Replicas: &replicas,
 				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{labelApp: name}},
@@ -325,7 +325,7 @@ var _ = Describe("An automation whose template can never render", func() {
 				{
 					Type:     actionKubernetesScale,
 					Target:   &reactorv1alpha1.TargetRef{Kind: kindDeployment, Name: name},
-					Replicas: ptrTo(int32(0)),
+					Replicas: new(int32(0)),
 				},
 				notifyWith("scaled down, carrier is {{ .State.isp }}"),
 			},
@@ -383,5 +383,3 @@ var _ = Describe("An automation whose template can never render", func() {
 		Expect(readyOf(name).Message).To(ContainSubstring("spec.onExit[0].notification.message"))
 	})
 })
-
-func ptrTo[T any](value T) *T { return &value }

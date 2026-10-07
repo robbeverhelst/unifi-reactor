@@ -51,7 +51,7 @@ var _ = Describe("Recording a target's baseline", func() {
 
 	deploymentAt := func(replicas int32) *unstructured.Unstructured {
 		deployment := &appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: target, Namespace: testNamespace},
+			Name: target, Namespace: testNamespace,
 			Spec: appsv1.DeploymentSpec{
 				Replicas: &replicas,
 				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{labelApp: target}},

@@ -70,7 +70,7 @@ var _ = Describe("Not acting, and saying what would have happened", func() {
 
 	reconcileOnce := func(name string) {
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{
-			NamespacedName: types.NamespacedName{Name: name, Namespace: testNamespace},
+			Name: name, Namespace: testNamespace,
 		})
 		Expect(err).NotTo(HaveOccurred())
 	}
@@ -105,7 +105,7 @@ var _ = Describe("Not acting, and saying what would have happened", func() {
 
 	createDeployment := func(name string, replicas int32) {
 		deployment := &appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+			Name: name, Namespace: testNamespace,
 			Spec: appsv1.DeploymentSpec{
 				Replicas: &replicas,
 				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{labelApp: name}},
@@ -123,8 +123,8 @@ var _ = Describe("Not acting, and saying what would have happened", func() {
 
 	createAutomation := func(name string, spec reactorv1alpha1.AutomationSpec) {
 		automation := &reactorv1alpha1.Automation{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
-			Spec:       spec,
+			Name: name, Namespace: testNamespace,
+			Spec: spec,
 		}
 		Expect(k8sClient.Create(ctx, automation)).To(Succeed())
 		DeferCleanup(func() {
