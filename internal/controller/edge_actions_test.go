@@ -124,8 +124,8 @@ var _ = Describe("Edge actions", func() {
 
 	createSecret := func(name string, data map[string][]byte) {
 		secret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
-			Data:       data,
+			Name: name, Namespace: testNamespace,
+			Data: data,
 		}
 		Expect(k8sClient.Create(ctx, secret)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, secret) })
@@ -133,7 +133,7 @@ var _ = Describe("Edge actions", func() {
 
 	createDeployment := func(name string, replicas int32) {
 		deployment := &appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+			Name: name, Namespace: testNamespace,
 			Spec: appsv1.DeploymentSpec{
 				Replicas: &replicas,
 				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{labelApp: name}},
@@ -151,8 +151,8 @@ var _ = Describe("Edge actions", func() {
 
 	createAutomation := func(name string, spec reactorv1alpha1.AutomationSpec) *reactorv1alpha1.Automation {
 		automation := &reactorv1alpha1.Automation{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
-			Spec:       spec,
+			Name: name, Namespace: testNamespace,
+			Spec: spec,
 		}
 		Expect(k8sClient.Create(ctx, automation)).To(Succeed())
 		DeferCleanup(func() {
@@ -175,7 +175,7 @@ var _ = Describe("Edge actions", func() {
 
 	reconcileOnce := func(name string) {
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{
-			NamespacedName: types.NamespacedName{Name: name, Namespace: testNamespace},
+			Name: name, Namespace: testNamespace,
 		})
 		Expect(err).NotTo(HaveOccurred())
 	}
@@ -392,7 +392,7 @@ var _ = Describe("Edge actions", func() {
 			reconciler.Client = stallingClient{Client: k8sClient}
 			observe(map[string]string{keyWAN: wanBackup})
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: name, Namespace: testNamespace},
+				Name: name, Namespace: testNamespace,
 			})
 			Expect(err).NotTo(HaveOccurred())
 
@@ -413,7 +413,7 @@ var _ = Describe("Edge actions", func() {
 	// run against a real API server, which is the only thing that compiles CEL.
 	rejects := func(name string, action reactorv1alpha1.Action) {
 		automation := &reactorv1alpha1.Automation{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+			Name: name, Namespace: testNamespace,
 			Spec: reactorv1alpha1.AutomationSpec{
 				When: &reactorv1alpha1.StateTrigger{
 					Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
@@ -658,7 +658,7 @@ var _ = Describe("Edge actions", func() {
 				spec.URL = haURL
 				spec.SecretRef = reactorv1alpha1.SecretReference{Name: haSecretName}
 				automation := &reactorv1alpha1.Automation{
-					ObjectMeta: metav1.ObjectMeta{Name: "ha-path", Namespace: testNamespace},
+					Name: "ha-path", Namespace: testNamespace,
 					Spec: reactorv1alpha1.AutomationSpec{
 						When: &reactorv1alpha1.StateTrigger{
 							Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},

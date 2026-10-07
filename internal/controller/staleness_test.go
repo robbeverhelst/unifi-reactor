@@ -77,7 +77,7 @@ var _ = Describe("Deciding against an observation that has stopped arriving", fu
 
 	createDeployment := func(name string, replicas int32) {
 		deployment := &appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+			Name: name, Namespace: testNamespace,
 			Spec: appsv1.DeploymentSpec{
 				Replicas: &replicas,
 				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{labelApp: name}},
@@ -96,7 +96,7 @@ var _ = Describe("Deciding against an observation that has stopped arriving", fu
 	createAutomation := func(name string) {
 		replicas := int32(0)
 		automation := &reactorv1alpha1.Automation{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+			Name: name, Namespace: testNamespace,
 			Spec: reactorv1alpha1.AutomationSpec{
 				When: &reactorv1alpha1.StateTrigger{
 					Provider: providerUniFi, State: map[string]string{keyWAN: wanBackup},
@@ -122,7 +122,7 @@ var _ = Describe("Deciding against an observation that has stopped arriving", fu
 
 	reconcileOnce := func(name string) {
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{
-			NamespacedName: types.NamespacedName{Name: name, Namespace: testNamespace},
+			Name: name, Namespace: testNamespace,
 		})
 		Expect(err).NotTo(HaveOccurred())
 	}

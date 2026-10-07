@@ -101,12 +101,11 @@ func wan(d *deviceRecord, index int) *wanEntry {
 // decodes as false. It goes in as wan3 so the fixture's wired pair stays the
 // observed ground truth.
 func withCellularBackup(d *deviceRecord) {
-	d.WANs = append(d.WANs, wanEntry{Index: 3, wanPort: wanPort{
+	d.WANs = append(d.WANs, wanEntry{Index: 3,
 		Up:     true,
 		IfName: cellularIfName,
 		Name:   cellularIfName,
-		IP:     "203.0.113.11",
-	}})
+		IP:     "203.0.113.11"})
 }
 
 // gatewayFromCapture returns the committed gateway record with one

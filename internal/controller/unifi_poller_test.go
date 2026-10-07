@@ -20,7 +20,6 @@ import (
 	"context"
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -31,7 +30,7 @@ import (
 
 func automation(name, provider string) *reactorv1alpha1.Automation {
 	a := &reactorv1alpha1.Automation{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+		Name: name, Namespace: testNamespace,
 	}
 	a.Spec.When = &reactorv1alpha1.StateTrigger{Provider: provider, State: map[string]string{"wan": wanBackupValue}}
 	return a
@@ -41,7 +40,7 @@ func automation(name, provider string) *reactorv1alpha1.Automation {
 // removed from v1alpha1: it survives in etcd with no spec.when at all.
 func legacyAutomation(name string) *reactorv1alpha1.Automation {
 	return &reactorv1alpha1.Automation{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Name: name, Namespace: "default",
 	}
 }
 
