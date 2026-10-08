@@ -289,7 +289,7 @@ CRD_REF_DOCS ?= $(LOCALBIN)/crd-ref-docs
 
 ## Tool Versions
 # renovate: datasource=github-releases depName=kubernetes-sigs/kustomize extractVersion=^kustomize/(?<version>.+)$
-KUSTOMIZE_VERSION ?= v5.8.2
+KUSTOMIZE_VERSION ?= v5.8.3
 # renovate: datasource=github-releases depName=kubernetes-sigs/controller-tools
 CONTROLLER_TOOLS_VERSION ?= v0.22.0
 # renovate: datasource=github-releases depName=elastic/crd-ref-docs
