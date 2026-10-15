@@ -52,6 +52,9 @@ Do not move files around. The CLI expects files in specific locations.
 ### Always Use CLI Commands
 Always use `kubebuilder create api` and `kubebuilder create webhook` to scaffold. Do NOT create files manually.
 
+### Bun-Native JavaScript
+The TypeScript side (the `docs/` site, `hack/*.mjs`) runs on Bun, pinned in `.bun-version`. Use what Bun ships before adding an npm package: `bun test`, `bun build`, `Bun.$`, `Bun.YAML`, `Bun.password` and the built-in `.env` loading. `bun hack/check-bun-native.ts` fails CI when a replaceable package (Jest, Vitest, dotenv, tsx, ts-node, rimraf, esbuild, tsup, js-yaml, argon2, Prettier, ESLint, oxlint, husky, lint-staged) or a lockfile other than `bun.lock` is added. If one is really needed, add it to `ALLOWED` in that script with the reason.
+
 ### E2E Tests Require an Isolated Kind Cluster
 The e2e tests are designed to validate the solution in an isolated environment (similar to GitHub Actions CI).
 Ensure you run them against a dedicated [Kind](https://kind.sigs.k8s.io/) cluster (not your “real” dev/prod cluster).
