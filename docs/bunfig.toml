@@ -1,0 +1,4 @@
+# Run package scripts (astro) on the Bun runtime instead of the node in their shebang,
+# so neither CI nor a contributor needs Node installed.
+[run]
+bun = true
