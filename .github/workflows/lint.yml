@@ -27,3 +27,25 @@ jobs:
         run: make lint-config
       - name: Run linter
         run: make lint
+
+  # Bun ships a test runner, bundler, .env loading, YAML and password hashing,
+  # so the npm packages it replaces stay out of docs/ and any later JS. This
+  # fails when one is added, or when a lockfile other than bun.lock appears.
+  bun-native:
+    permissions:
+      contents: read
+    name: Check Bun-native dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+
+      - name: Check Bun-native dependencies
+        run: bun hack/check-bun-native.ts

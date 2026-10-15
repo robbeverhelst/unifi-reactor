@@ -235,7 +235,7 @@ The mock's alarm responses are built from the [Alarm Manager API notes](/contrib
 `hack/webhook-logger.mjs` dumps incoming requests verbatim to `testdata/unifi/webhooks/raw/` (gitignored). Raw records contain every header, including the `Authorization` header carrying Reactor's own shared secret, so nothing goes from there into `testdata/` by hand:
 
 ```sh
-node hack/webhook-logger.mjs 8080
+bun hack/webhook-logger.mjs 8080
 
 ./hack/sanitize-webhook-capture.sh --paths testdata/unifi/webhooks/raw/<file>.json
 ./hack/sanitize-webhook-capture.sh testdata/unifi/webhooks/raw/<file>.json \

@@ -1,9 +1,9 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Spike tool (v0.0): dumb request logger for capturing UniFi Alarm Manager
 // webhook deliveries during a real WAN failover. Every request is written
 // verbatim to one JSON file; nothing is interpreted.
 //
-//   node hack/webhook-logger.mjs [port] [outDir]
+//   bun hack/webhook-logger.mjs [port] [outDir]
 //
 // Defaults: port 8080, outDir testdata/unifi/webhooks/raw (gitignored — review
 // and sanitize before committing anything from it).
