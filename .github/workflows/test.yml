@@ -50,9 +50,8 @@ jobs:
   # happened: a Starlight 0.x minor landed in a "non-major" group needing an
   # Astro it did not have, and main deployed nothing for half an hour.
   #
-  # Node is pinned to what withastro/action installs rather than left to the
-  # runner's default, because Astro enforces an engine floor and the whole
-  # point is to fail here rather than at deploy.
+  # Bun is pinned by .bun-version, and docs/bunfig.toml runs Astro on the Bun
+  # runtime, so this job builds exactly the way docs.yml deploys.
   site:
     permissions:
       contents: read
@@ -64,13 +63,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup Node
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '24.22.0'
-
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
 
       - name: Install with the committed lockfile
         run: bun install --frozen-lockfile
