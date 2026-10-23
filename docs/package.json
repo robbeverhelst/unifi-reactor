@@ -2,7 +2,7 @@
   "name": "unifi-reactor-docs",
   "type": "module",
   "version": "0.0.1",
-  "packageManager": "bun@1.4.3",
+  "packageManager": "bun@1.4.4",
   "scripts": {
     "dev": "astro dev",
     "build": "astro build",
@@ -11,8 +11,8 @@
   },
   "dependencies": {
     "@astrojs/sitemap": "^3.7.4",
-    "@astrojs/starlight": "^0.42.6",
-    "astro": "^7.3.8",
+    "@astrojs/starlight": "^0.42.7",
+    "astro": "^7.4.2",
     "astro-mermaid": "^2.1.0",
     "mermaid": "^12.2.0",
     "sharp": "^0.35.5"
