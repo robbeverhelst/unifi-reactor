@@ -35,7 +35,7 @@ jobs:
         id: version
         run: |
           echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          echo "image=ghcr.io/${{ github.repository }}" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${GITHUB_REPOSITORY}" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
@@ -96,11 +96,13 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
           OWNER: ${{ github.repository_owner }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          helm registry login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
+          printf '%s' "${REGISTRY_TOKEN}" \
+            | helm registry login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
           helm package charts/reactor \
             --version "${VERSION}" \
-            --app-version "${{ github.ref_name }}"
+            --app-version "${GITHUB_REF_NAME}"
           helm push "reactor-${VERSION}.tgz" "oci://ghcr.io/${OWNER}/charts" 2>&1 | tee push.log
           # helm prints the pushed manifest digest; cosign signs digests, never
           # tags, so that the signature cannot be moved to different content.
@@ -115,7 +117,9 @@ jobs:
         run: cosign sign --yes "ghcr.io/${OWNER}/charts/reactor@${DIGEST}"
 
       - name: Build install manifest
-        run: make build-installer IMG=${{ steps.version.outputs.image }}:${{ github.ref_name }}
+        env:
+          IMAGE: ${{ steps.version.outputs.image }}
+        run: make build-installer IMG="${IMAGE}:${GITHUB_REF_NAME}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
