@@ -6,6 +6,8 @@
     "group:allNonMajor",
     "helpers:pinGitHubActionDigests"
   ],
+  "osvVulnerabilityAlerts": true,
+  "lockFileMaintenance": { "enabled": true },
   "labels": ["dependencies"],
   "rangeStrategy": "bump",
   "postUpdateOptions": ["gomodTidy"],
