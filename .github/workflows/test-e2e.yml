@@ -64,6 +64,10 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # The ARC runner image has no make; GitHub-hosted runners ship it.
+      - name: Install make
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends make
+
       # The reaction and lifecycle suites install the chart rather than the
       # kustomize manifests, so helm has to be there rather than merely likely.
       - name: Setup Helm

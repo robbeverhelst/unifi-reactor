@@ -23,6 +23,10 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # The ARC runner image has no make; GitHub-hosted runners ship it.
+      - name: Install make
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends make
+
       - name: Check linter configuration
         run: make lint-config
       - name: Run linter
