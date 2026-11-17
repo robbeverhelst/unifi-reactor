@@ -82,6 +82,10 @@ jobs:
       - name: Verify kind installation
         run: kind version
 
+      # The suites shell out to kubectl; GitHub-hosted runners ship it, the ARC image does not.
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
+
       - name: Running Test e2e
         run: |
           go mod tidy
