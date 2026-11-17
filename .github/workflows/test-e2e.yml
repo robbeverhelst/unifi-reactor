@@ -42,7 +42,7 @@ jobs:
     permissions:
       contents: read
     name: ${{ matrix.name }}
-    runs-on: ubuntu-latest
+    runs-on: arc-unifi-reactor
     strategy:
       fail-fast: false
       matrix:
@@ -64,6 +64,10 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # The ARC runner image has no make; GitHub-hosted runners ship it.
+      - name: Install make
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends make
+
       # The reaction and lifecycle suites install the chart rather than the
       # kustomize manifests, so helm has to be there rather than merely likely.
       - name: Setup Helm
@@ -77,6 +81,10 @@ jobs:
 
       - name: Verify kind installation
         run: kind version
+
+      # The suites shell out to kubectl; GitHub-hosted runners ship it, the ARC image does not.
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
 
       - name: Running Test e2e
         run: |

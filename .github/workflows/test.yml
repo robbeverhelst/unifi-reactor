@@ -11,7 +11,7 @@ jobs:
     permissions:
       contents: read
     name: Run on Ubuntu
-    runs-on: ubuntu-latest
+    runs-on: arc-unifi-reactor
     steps:
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -22,6 +22,10 @@ jobs:
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
+
+      # The ARC runner image has no make; GitHub-hosted runners ship it.
+      - name: Install make
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends make
 
       # The chart render tests skip themselves without it, which would hide the
       # packaging regressions they exist to catch.
@@ -56,7 +60,7 @@ jobs:
     permissions:
       contents: read
     name: Check the docs site builds
-    runs-on: ubuntu-latest
+    runs-on: arc-unifi-reactor
     steps:
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -85,7 +89,7 @@ jobs:
     permissions:
       contents: read
     name: Check generated docs are committed
-    runs-on: ubuntu-latest
+    runs-on: arc-unifi-reactor
     steps:
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -96,6 +100,10 @@ jobs:
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
+
+      # The ARC runner image has no make; GitHub-hosted runners ship it.
+      - name: Install make
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends make
 
       - name: Regenerate the Reference section
         run: make docs
