@@ -2,7 +2,16 @@ name: Lint
 
 on:
   push:
+    paths-ignore:
+      - "*.md"
   pull_request:
+    paths-ignore:
+      - "*.md"
+
+# PR runs cancel the one they supersede; main runs are per commit, so no release or deploy is cut short.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions: {}
 
