@@ -47,7 +47,7 @@ jobs:
     permissions:
       contents: read
     name: ${{ matrix.name }}
-    runs-on: arc-unifi-reactor
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
